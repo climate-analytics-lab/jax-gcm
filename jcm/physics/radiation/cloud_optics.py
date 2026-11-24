@@ -14,7 +14,7 @@ from typing import Tuple
 
 from .radiation_types import OpticalProperties
 from .constants import SW_BAND_LIMITS, LW_BAND_LIMITS, N_SW_BANDS, N_LW_BANDS
-from .mcica import in_cloud_condensate
+from .mcica import in_cloud_condensate, in_cloud_condensate_with_mask_gradient
 import jcm.constants as c
 from jcm.physics.clouds.cloud_utils import (
     BREADTH_CONTINENTAL,
@@ -789,6 +789,64 @@ RRTMGP_ICE_RADIUS_RANGE_UM = (5.0, 90.0)
 _NUMBER_FLOOR_PER_M3 = 1.0e-12
 
 
+def _clamp_published_radius(
+    radius: jnp.ndarray,
+    in_cloud: jnp.ndarray,
+    radius_range: Tuple[float, float],
+) -> jnp.ndarray:
+    """Clamp ``radius`` to ``radius_range`` where in-cloud condensate is
+    present, else report exactly 0 (ECHAM's "phase absent" convention).
+
+    The one clamp both radius sources must pass through before anything
+    downstream (the RRTMGP solve, the NN emulator feature, the
+    ``clouds.r_eff_*`` diagnostic) sees a radius: :func:`echam_cloud_effective_radii`
+    for a radius jcm itself computed, :func:`host_effective_radii` for one a
+    host supplies (jax-gcm#1135). Sharing this instead of duplicating the
+    ``where(cond, clip(...), 0)`` pattern at both call sites is what makes
+    the two paths interchangeable -- a host radius reaching jax-rrtmgp's
+    table range the exact way an internally-computed one does, and the
+    "0 = phase absent" convention holding regardless of which path formed
+    the value.
+    """
+    return jnp.where(in_cloud > 0.0, jnp.clip(radius, *radius_range), 0.0)
+
+
+def _in_cloud_condensate_pair(
+    cloud_water: jnp.ndarray,
+    cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    cld_frac_min,
+    cloud_fraction_raw: jnp.ndarray | None,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """In-cloud liquid/ice condensate, the one dispatch shared by every
+    effective-radius source.
+
+    :func:`radiation_effective_radii` (jcm's own radii) and
+    :func:`host_effective_radii` (a host's, jax-gcm#1135) both need the
+    SAME in-cloud condensate to mask their radius with, so this is the one
+    place that decides between the plain :func:`~jcm.physics.radiation.
+    mcica.in_cloud_condensate` and the mask-gradient variant
+    :func:`~jcm.physics.radiation.mcica.in_cloud_condensate_with_mask_gradient`
+    (#973) -- a future change to that choice (a different eps convention, a
+    new gradient treatment) then reaches both radius sources at once rather
+    than risking the two drifting onto different masking semantics, which
+    would quietly break the "interchangeable paths" guarantee this module
+    documents.
+
+    ``cloud_fraction_raw=None`` selects the plain function (forward value
+    identical either way; see :func:`host_effective_radii`'s docstring).
+    """
+    if cloud_fraction_raw is None:
+        cw_in = in_cloud_condensate(cloud_water, cloud_fraction, eps=cld_frac_min)
+        ci_in = in_cloud_condensate(cloud_ice, cloud_fraction, eps=cld_frac_min)
+    else:
+        cw_in = in_cloud_condensate_with_mask_gradient(
+            cloud_water, cloud_fraction, cloud_fraction_raw, eps=cld_frac_min)
+        ci_in = in_cloud_condensate_with_mask_gradient(
+            cloud_ice, cloud_fraction, cloud_fraction_raw, eps=cld_frac_min)
+    return cw_in, ci_in
+
+
 def echam_cloud_effective_radii(
     cloud_water_in_cloud: jnp.ndarray,
     cloud_ice_in_cloud: jnp.ndarray,
@@ -856,7 +914,20 @@ def echam_cloud_effective_radii(
     has no condensate path, so the value never weights an optical property.
     Every power is evaluated behind a double ``where``, so the reverse pass
     is finite in clear cells and as the condensate goes to zero; the clamp
-    passes no gradient outside the table range, like the library's.
+    passes no gradient outside the table range, like the library's. The
+    ``where`` on each phase is not a stylistic zero: the Martin et al. law is
+    a cube root of the water content, whose derivative diverges as the
+    content goes to 0 (the same singular-point hazard
+    ``docs/source/design/surrogate_gradients.md`` names for square roots), so
+    this guard is load-bearing for a finite reverse pass, not just the
+    forward zero. One consequence: a caller that reaches this function's
+    ``cloud_water_in_cloud``/``cloud_ice_in_cloud`` with a non-vanishing
+    derivative at exactly 0 (``mcica.in_cloud_condensate_with_mask_gradient``,
+    #973) still sees that derivative stop here -- closing it needs a smoothed
+    surrogate of the cube root in place of this guard, not a bypass of it
+    (which would trade the current zero for a NaN/Inf), tracked as a further
+    instance of jax-gcm#1093's "downstream hard gate blocks an upstream
+    surrogate" class.
 
     Broadcasting-native: all array arguments broadcast against each other
     (level on axis 0, any trailing horizontal axes; ``continental`` may be
@@ -899,10 +970,10 @@ def echam_cloud_effective_radii(
     else:
         # Double-where guarded; the ice-free placeholder is replaced by 0 below.
         r_ice = effective_radius_ice(iwc_gm3)
-    r_liq = jnp.where(cloud_water_in_cloud > 0.0,
-                      jnp.clip(r_liq, *RRTMGP_LIQUID_RADIUS_RANGE_UM), 0.0)
-    r_ice = jnp.where(cloud_ice_in_cloud > 0.0,
-                      jnp.clip(r_ice, *RRTMGP_ICE_RADIUS_RANGE_UM), 0.0)
+    r_liq = _clamp_published_radius(
+        r_liq, cloud_water_in_cloud, RRTMGP_LIQUID_RADIUS_RANGE_UM)
+    r_ice = _clamp_published_radius(
+        r_ice, cloud_ice_in_cloud, RRTMGP_ICE_RADIUS_RANGE_UM)
     return r_liq, r_ice
 
 
@@ -915,6 +986,7 @@ def radiation_effective_radii(
     *,
     temperature=None,
     number_tracers=None,
+    cloud_fraction_raw: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Effective radii (um, shaped like the state) the ECHAM radiation uses this step.
 
@@ -951,6 +1023,24 @@ def radiation_effective_radii(
     (:func:`post_physics_effective_radii`). Which law applies is still
     decided by the composition's tracers, so an override cannot switch a
     1-moment composition to the prognostic-number law.
+
+    ``cloud_fraction_raw``: the cover BEFORE the condensate mask that built
+    ``cloud_fraction`` (``cloud_data.condensate_masked_cover``), i.e. the
+    SAME diagnosed cover the caller's own mask-gradient fix passes to
+    ``radiation_scheme_rrtmgp`` (#973). ``None`` (the default -- the
+    ``NNEmulatorRadiation`` call site) keeps the plain, zero-derivative-at-
+    the-mask :func:`in_cloud_condensate`, exactly the pre-#973 behaviour;
+    given explicitly (``RRTMGPRadiation``'s call site) the IN-CLOUD
+    CONDENSATE this function forms (``cw_in``/``ci_in`` below) gets the
+    same one-sided derivative at a covered-but-empty cell as the radiation
+    term's own in-cloud condensate and cover -- a gap a review caught on
+    this PR. This does NOT reach the FINAL radius
+    :func:`echam_cloud_effective_radii` returns: its own zero-condensate
+    guard is a genuine singularity guard (the Martin et al. law is a cube
+    root, infinite-sloped at 0), not a stylistic zero, so bypassing it would
+    trade a zero derivative for a NaN/Inf one. Closing that needs a
+    smoothed surrogate of the cube root, a separate, more careful change;
+    see that function's docstring.
     """
     pressure = diagnostics["pressure_full"]
     if temperature is None:
@@ -962,8 +1052,8 @@ def radiation_effective_radii(
         # uses for the water content (``diagnostics["air_density"]`` is that
         # law at the step-start temperature).
         air_density = pressure / (c.rd * temperature)
-    cw_in = in_cloud_condensate(cloud_water, cloud_fraction, eps=cld_frac_min)
-    ci_in = in_cloud_condensate(cloud_ice, cloud_fraction, eps=cld_frac_min)
+    cw_in, ci_in = _in_cloud_condensate_pair(
+        cloud_water, cloud_ice, cloud_fraction, cld_frac_min, cloud_fraction_raw)
     prognostic = "qnc" in state.tracers and "qni" in state.tracers
     continental = per_column(continental_columns(terrain, forcing),
                              temperature.shape[1:])
@@ -1045,3 +1135,118 @@ def post_physics_effective_radii(
         state, diagnostics, forcing, terrain, cloud_water, cloud_ice,
         cloud_fraction, POST_PHYSICS_CLOUD_FRACTION_FLOOR,
         temperature=temperature, number_tracers=number_tracers)
+
+
+def host_effective_radii(
+    clouds,
+    cloud_water: jnp.ndarray,
+    cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    cld_frac_min,
+    *,
+    cloud_fraction_raw: jnp.ndarray | None = None,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Effective radii (um) a HOST supplies, in place of :func:`radiation_effective_radii`.
+
+    jax-les (climate-analytics-lab/jax-les#55) runs jcm's RRTMGP term for
+    its radiative transfer but forms its own liquid droplet radius from its
+    prescribed or prognostic droplet number, using jcm's own law
+    (``cloud_utils.eff_liquid_droplet_radius`` + ``breadth_factor``) --
+    the exact law :func:`echam_cloud_effective_radii` would apply via the
+    2-moment ``qnc``/``qni`` path. It has no ice-number tracer, so it cannot
+    supply ``qni`` and get the ice radius from that path either; it instead
+    forms its OWN ice radius by its own law and wants radiation to use it
+    unchanged. :class:`~jcm.physics.radiation.rrtmgp.RRTMGPRadiation`'s
+    ``use_host_effective_radii=True`` reads the radii this function returns
+    (the host's own ``clouds.r_eff_liq``/``r_eff_ice``) instead of forming
+    them from the state (jax-gcm#1135).
+
+    This is the read-side counterpart of the ``clouds.r_eff_liq``/
+    ``r_eff_ice`` diagnostic: with ``use_host_effective_radii=False`` (the
+    default) those fields are ONLY ever written by the radiation term, never
+    read back (see :func:`radiation_effective_radii`'s docstring and
+    ``RRTMGPRadiation``'s class docstring); turning the flag on is what lets
+    a host feed them back in as an input for this one term instance, without
+    changing that invariant for every other composition.
+
+    **Units and bounds are the host's responsibility to approximate, and
+    this function's responsibility to enforce**: whatever the host hands in
+    is clamped to the exact table range jax-rrtmgp interpolates
+    (``RRTMGP_LIQUID_RADIUS_RANGE_UM`` / ``RRTMGP_ICE_RADIUS_RANGE_UM``) and
+    forced to exactly 0 wherever THIS function's own in-cloud condensate
+    test says the phase is absent -- the same
+    :func:`_clamp_published_radius` call :func:`echam_cloud_effective_radii`
+    applies to its own radius. A host radius that already satisfies both
+    (as the agreement test in ``rrtmgp_test.py`` constructs, by computing it
+    with :func:`radiation_effective_radii` itself) therefore passes through
+    this clamp unchanged, which is what makes the two paths interchangeable:
+    whichever one is live, the radiative transfer sees a radius bounded the
+    same way and zeroed the same way. The host chooses its OWN ice-radius
+    law (there is no ECHAM counterpart to defer to when no ice number is
+    available); jcm does not second-guess it beyond this shared bound.
+
+    Args:
+        clouds: the diagnostic struct the host publishes as
+            ``diagnostics["clouds"]`` -- jcm's own composition always
+            carries this as a :class:`~jcm.physics.clouds.cloud_data.CloudData`,
+            whose ``r_eff_liq``/``r_eff_ice`` are mandatory fields; a host
+            that constructs its own "clouds" diagnostic for this term must
+            carry them too. Checked structurally (attribute presence, not
+            value) at every call so a host that omits them fails loudly
+            here rather than radiating with a silently-zero default --
+            ``use_host_effective_radii=True`` paired with a "clouds" object
+            that happens to carry neither attribute is a configuration
+            error, not a valid "no radius supplied" state. This cannot
+            catch the data-shaped version of the same mistake: a host that
+            DOES carry the fields but never actually fills them leaves the
+            all-zero default from ``CloudData.zeros()``, which reads as the
+            SMALLEST tabulated radius wherever condensate is present, NOT
+            as "cloud-free" -- the clamp below raises any value at or below
+            ``radius_range[0]`` up to it, 0 included, so an unfilled host
+            radius silently radiates with the table's most optically potent
+            droplets/crystals rather than inertly. Telling "genuinely
+            unfilled" apart from "a real law that happens to floor at the
+            table minimum" needs a value-dependent check that is not
+            expressible as a jit-traceable Python ``if``, so this is a
+            documented limit of the guard, not an oversight: the host's
+            contract is that 0 never reaches here with condensate present
+            (jax-gcm#1135 review).
+        cloud_water / cloud_ice: grid-mean condensate [kg/kg], the same
+            arrays :func:`radiation_effective_radii` would receive (the
+            radiation term's own ``radiation_cloud_fields``), so the
+            in-cloud mask this function applies matches the condensate the
+            optical depth is built from.
+        cloud_fraction: the step's (masked) cloud cover, likewise matching
+            the radiation's own optical-depth construction.
+        cld_frac_min: the ``eps`` floor of :func:`~jcm.physics.radiation.
+            mcica.in_cloud_condensate` (``RadiationParameters.cld_frac_min``).
+        cloud_fraction_raw: the cover BEFORE the condensate mask, for the
+            same one-sided mask-gradient treatment
+            :func:`radiation_effective_radii` applies (jax-gcm#973); ``None``
+            keeps the plain zero-derivative-at-the-mask behaviour. Only the
+            REVERSE pass differs between the two -- the forward value (and
+            hence the clamp below) is identical either way.
+
+    Returns:
+        ``(r_eff_liq_um, r_eff_ice_um)``, each clamped to the RRTMGP table
+        range and 0 where that phase has no in-cloud condensate.
+
+    """
+    if not (hasattr(clouds, "r_eff_liq") and hasattr(clouds, "r_eff_ice")):
+        raise ValueError(
+            "RRTMGPRadiation(use_host_effective_radii=True) requires the "
+            "'clouds' diagnostic to carry r_eff_liq/r_eff_ice (um, the "
+            "host's own liquid/ice effective radii) -- got an object of "
+            f"type {type(clouds).__name__} with neither attribute. Either "
+            "publish them on the 'clouds' diagnostic the host supplies "
+            "each step, or construct the term with "
+            "use_host_effective_radii=False (the default) to let jcm form "
+            "the radii itself from qnc/qni or its prescribed profile."
+        )
+    cw_in, ci_in = _in_cloud_condensate_pair(
+        cloud_water, cloud_ice, cloud_fraction, cld_frac_min, cloud_fraction_raw)
+    r_liq = _clamp_published_radius(
+        clouds.r_eff_liq, cw_in, RRTMGP_LIQUID_RADIUS_RANGE_UM)
+    r_ice = _clamp_published_radius(
+        clouds.r_eff_ice, ci_in, RRTMGP_ICE_RADIUS_RANGE_UM)
+    return r_liq, r_ice

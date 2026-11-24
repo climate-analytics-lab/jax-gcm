@@ -111,7 +111,21 @@ def _run_one_step(physics, terrain):
 
 @pytest.mark.slow
 class TestEchamLandT31L47Hybrid(unittest.TestCase):
-    """Cheap-CPU control: T31L47 hybrid does NOT reproduce the T63 failure."""
+    """Cheap-CPU control: T31L47 hybrid does NOT reproduce the T63 failure.
+
+    Both tests already run the minimum that exercises this bisection point:
+    one 12-minute step (no multi-step integration needed — the production
+    failure reproduces by step 34, so step 1 alone already distinguishes
+    "NaNs immediately" from "stays finite"), at the specific resolution
+    (T31L47 hybrid) the bisection record above states does NOT reproduce the
+    T63 failure. Lowering the resolution further or dropping physics terms
+    would test a different, undocumented bisection point, not this one, so
+    neither is a valid way to shrink it. What is left — compiling the full
+    ``echam_physics()`` stack (RRTMGP + 1M microphysics + TTE-TKE, ...) at
+    T31L47 — is compile-bound (~95% of wall time is `jit` tracing/lowering,
+    not the single step's execution) and irreducible without changing the
+    code under test.
+    """
 
     def test_aquaplanet_baseline(self):
         """Sanity: aquaplanet T31L47 hybrid + balanced_isothermal must

@@ -20,12 +20,35 @@ in ``jcm/data/input_resolution.py``, driven by the Hydra ``forcing`` group
   the mirror manifest records, and a user file sets ``wrap_year`` /
   ``by_date`` / ``by_date_interp``. A ``wrap_year`` climatology is replayed on
   the real Gregorian calendar (``jcm/forcing.py::_select_time_series``): twelve
-  records are January–December, held from the 1st of each month; 365/366
-  records are a nominal-date daily table; other lengths keep equal fractions of
-  the actual year. A twelve-record surface climatology is first expanded to
-  daily values by periodic Dec/Jan linear interpolation
-  (``jcm/data/bc/interpolate.py::interpolate_to_daily``), as SPEEDY treats its
-  monthly boundary means.
+  records are January–December; 365/366 records are a nominal-date daily
+  table; other lengths keep equal fractions of the actual year. By default
+  (``forcing.monthly_anchors: mid_month``) the twelve monthly records are
+  reconstructed as ECHAM does (``mo_time_control.f90::time_weights``,
+  ``jcm/forcing.py::_echam_time_weights``): record *m* is the instant at
+  month *m*'s own mid-point, linearly blended with the previous or next
+  month's record using the real lengths of the months involved (leap
+  February included), recomputed fresh every step from the ACTUAL
+  simulated date — so it is correct for every model year regardless of
+  which year's file supplied the climatology, surface included: a
+  twelve-record SURFACE climatology under ``mid_month`` stays a direct
+  twelve-record leaf too (``jcm/forcing.py::from_dataset`` skips its
+  daily-table expansion in this case), selected exactly like ozone and the
+  oxidant climatology. ``forcing.monthly_anchors: month_start`` recovers
+  the pre-#902 behaviour instead: held constant from the 1st of each month
+  for ozone/oxidants, and — for the surface fields only — expanded once to
+  a 365/366-record daily table by periodic Dec/Jan **linear** interpolation
+  between month-start knots
+  (``jcm/data/bc/interpolate.py::interpolate_to_daily``), the original
+  surface-climatology reconstruction. Either way, ``month_start`` moves the
+  annual cycle about half a month early relative to the monthly-mean
+  meaning of the records. Interval-total emissions and the
+  Fortran-stepped Tegen dust-source/roughness climatologies are always held
+  from the 1st regardless of this knob (``jcm/forcing.py::
+  read_anthropogenic_emissions``, ``read_dust_source``): interpolating an
+  interval total would not preserve it, and the dust scheme's own Fortran
+  reference steps by calendar month. See
+  {doc}`../design/forcing_time_semantics` for the full reconstruction
+  contract.
 - **Coverage is declared, never assumed.** ``jcm/forcing.py::expand_yearly_files``
   pads the requested ``years`` by one year each side, **clipped to the product's
   ``available_years``**, so ``by_date_interp`` has bracketing samples across the
@@ -84,7 +107,7 @@ alternative (all fields on one ERA5 land-sea mask).
   state-dependent).
 
 **Dust boundary conditions.** The Tegen scheme (see {doc}`aerosol`) needs five
-fields rather than one, all published per grid on the data mirror and picked up
+fields rather than one (six under ``ndust = 5``), all published per grid on the data mirror and picked up
 by ``forcing.dust_file`` / ``dust_preferential_file`` / ``dust_soil_types_file``
 / ``dust_regions_file`` / ``dust_roughness_file`` (all ``auto`` by default):
 
@@ -95,16 +118,19 @@ by ``forcing.dust_file`` / ``dust_preferential_file`` / ``dust_soil_types_file``
 | ``dust_soil_types_file`` | ``type2/3/4/6``, ``type13..17`` | static | nine texture area fractions (type 1 is the residual) |
 | ``dust_regions_file`` | ``regions`` | static, integer 1-8 | regional tuning index |
 | ``dust_roughness_file`` | ``surfrough`` [cm] | 12 monthly records | satellite roughness, read only when ``ndurough = 0`` |
+| ``dust_msg_file`` | ``dsaf`` | static | MSG-SEVIRI Saharan dust-source activation map, read only by ``ndust = 5`` (the ``echam-jam-m7`` preset); ``null`` by default, ``auto`` in ``t63-echam-jam`` |
 
 The first four are mandatory together: ``mo_ham_dust.f90`` aborts without any of
 them, and running with the textures or regions missing would silently emit an
 untuned, all-coarse-soil flux, so ``_attach_dust`` raises instead. The monthly
 climatologies are stepped by month, never interpolated — the Fortran reads one
-record per call and marks the region mask ``EF_NOINTER``. As for every
-twelve-record ``wrap_year`` climatology in the model, record *m* is held from
-the 1st of calendar month *m* on the run's Gregorian clock, leap years
-included, so each record switches exactly at the civil month boundary the
-Fortran's monthly read uses. The region mask is categorical and is refused at load if it is
+record per call and marks the region mask ``EF_NOINTER``. Unlike the SST/ozone/
+oxidant climatologies (which default to ECHAM's mid-month interpolation,
+``forcing.monthly_anchors: mid_month``, see above), the dust-source and
+roughness climatologies always hold record *m* from the 1st of calendar month
+*m* on the run's Gregorian clock, leap years included, matching
+``bgc_dust_read_monthly``'s own stepped-by-month read — this is not affected by
+``forcing.monthly_anchors``. The region mask is categorical and is refused at load if it is
 not integral in [1, 8], which is what a linear or conservative regrid would
 produce. The products come from the ECHAM-HAMMOZ input pool at the three
 resolutions HAMMOZ ships (``jcm/data/mirror/dust.py``, provenance in
@@ -140,6 +166,20 @@ ne30's ~1°) is the closest an ne30 run can get to a native field; a conservativ
 remap onto the pg3 cells, or the 0.5-degree originals the HAMMOZ files were made
 from, would close the gap.
 
+**Natural aerosol background.** ``forcing.natural_aerosol_file`` names a
+``macv2_natural_aerosol`` bundle (``jcm/data/mirror/macv2.py``): MACv2's coarse
+mode and pre-industrial fine mode optics per RRTMG band and their layer
+fractions, as twelve monthly means on the model grid. It is loaded onto
+``ForcingData.natural_aerosol`` as mid-month ``WRAP_YEAR`` leaves
+(``forcing.monthly_anchors`` applies, as for SST, ozone and oxidants) with the
+band limits and layer bounds beside them, and read by ``Macv2NaturalAerosol``
+(see {doc}`aerosol`). ``auto``, the default, resolves the per-grid bundle when
+the physics composes that term, the surface is a real one
+(``kind: from_file``) and the mirror publishes the grid (the four Gaussian
+grids, T31 and T42); otherwise it resolves to nothing, and a composed term on
+an unpublished grid logs that it runs without a background. ``null`` runs the
+plumes alone.
+
 **Status & known limitations.** The analytic-ozone fallback is a real
 low-fidelity path (loud warning); a run that logs the analytic-ozone warning is
 *not* a valid radiation benchmark. AMIP-SST land extrapolation is heuristically
@@ -165,6 +205,8 @@ a simplification suited to slowly-evolving species.
   top guard.
 - ``jcm/config/forcing/{default,from_file,amip,era5}.yaml``.
 - ``jcm/data/mirror/dust.py`` — ``build_dust_product`` (the five dust bundles).
+- ``jcm/data/mirror/macv2.py`` — ``build_macv2_natural`` (the natural aerosol
+  bundle); ``jcm/forcing.py::read_natural_aerosol``.
 - Data provenance and the mirror: {doc}`../design/data_mirror`.
 
 **Validation evidence.** ``jcm/forcing_test.py`` (incl. year-expansion / start-date

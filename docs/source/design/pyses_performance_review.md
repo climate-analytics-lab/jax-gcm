@@ -57,7 +57,7 @@ From the jcm chain (13 JAM terms added over plain 2m):
 |---|---|---|
 | `Mam4JaxMicrophysics` | full amicphys box model vmapped over **~1.0 M cells** (47×21,600); gasaerexch→rename→newnuc→coag + length-4 SOA scan; **float64 by default** (jcm's f32 tracers upcast at the boundary) | every step |
 | `JamOpticsTerm` | (14 SW + 16 LW) bands × 4 modes × species Mie-LUT interpolations, ragged Python mode/species loops inside a band vmap | every step |
-| `RRTMGPRadiation` | per-column vmap over 21,600 cols; internally float32 | every **8th** step, **×2** (`compute_cre=True` runs a second full clear-sky solve) |
+| `RRTMGPRadiation` | per-column vmap over 21,600 cols; internally float32 | every **8th** step; `compute_cre=True` adds the clear-sky transport on the all-sky solve's shared gas optics (jax-rrtmgp `with_clear_sky`) |
 | 10 other JAM terms (emissions, gas/aqueous chem, activation, sedimentation, wet/dry dep) | batched/elementwise; wetdep+sedi vmap over stacked tracers | every step |
 
 `checkpoint_terms=True` wraps each term in `jax.checkpoint` — **forward-cost
@@ -125,8 +125,9 @@ other 7 steps is discarded work. Cache per-band optics in the physics carry
 exactly like the radiation cache. ~8× reduction on the second-largest JAM
 term.
 
-**B3. `compute_cre=False` for production.** Halves the RRTMGP work on compute
-steps; CRE is a diagnostic — keep it for analysis runs only. One flag.
+**B3. `compute_cre=False` for production.** Drops the clear-sky transport
+(the gas optics it shares with the all-sky solve are computed regardless); CRE
+is a diagnostic — keep it for analysis runs only. One flag.
 
 **B4. Radiation interval 2 h → 3 h.** Science trade-off; standard in ECHAM
 lineage. Only if B1–B3 are insufficient.
@@ -237,7 +238,7 @@ assertions moved into unit tests:
 
 - optics gating replays cached per-band fields between radiation steps —
   ``optics_term_test.py::test_radiation_gate_replays_cache_between_compute_steps``
-- ``compute_cre=False`` drops the clear-sky RRTMGP call —
+- ``compute_cre=False`` drops the clear-sky fluxes from the RRTMGP solve —
   covered in ``rrtmgp_test.py`` (term- and scheme-level)
 
 The sharding measurements (GSPMD gather DSS cost, explicit-mesh

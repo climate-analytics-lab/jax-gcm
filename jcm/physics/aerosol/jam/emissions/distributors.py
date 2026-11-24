@@ -17,7 +17,7 @@ from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 
 
 def particle_mean_mass(mode: AerosolMode, species_density: float,
-                       emission_diameter=None):
+                       emission_diameter=None, number_factor: float | None = None):
     """Mean single-particle mass [kg] of freshly emitted material.
 
     Freshly emitted particles are not at their class's equilibrium size, so a
@@ -27,11 +27,19 @@ def particle_mean_mass(mode: AerosolMode, species_density: float,
     number for a given mass scales as D⁻³, the difference is large wherever
     the emitted and equilibrium sizes differ.
 
-    The mechanism only; no scheme in this module supplies a diameter yet.
+    ``number_factor``, when given, overrides both of the above: it is a
+    number-per-mass ratio [kg⁻¹] the caller already computed from its own
+    size/σ assumptions (HAM's mass-median-radius ``zm2n`` conversion for the
+    M7 dust policy — ``emissions/dust.py`` — whose lognormal correction has
+    the opposite sign from a count-median :attr:`AerosolMode.number_factor`,
+    so it cannot be expressed as an ``emission_diameter``).
+
     Each emission scheme owns the size its own reference prescribes, and this
     is a HAMMOZ package: the primary-carbon and primary-sulfate sizes come
     from HAM (Stier et al. 2005) with the emissions port, not from CAM/CESM.
     """
+    if number_factor is not None:
+        return 1.0 / number_factor
     if emission_diameter is None:
         return species_density / mode.number_factor
     return species_density * (math.pi / 6.0) * emission_diameter ** 3
@@ -64,10 +72,12 @@ def distribute_surface_flux(
 
     Args:
         spec: the modal population.
-        fluxes: list of ``(species_token, mode_short, mass_flux)`` or
-            ``(species_token, mode_short, mass_flux, emission_diameter)`` with
-            ``mass_flux`` shaped ``(ncols,)`` in kg/m²/s and the optional
-            volume-mean diameter [m] of the emitted size distribution (see
+        fluxes: list of ``(species_token, mode_short, mass_flux)``,
+            ``(species_token, mode_short, mass_flux, emission_diameter)``, or
+            ``(species_token, mode_short, mass_flux, None, number_factor)``
+            with ``mass_flux`` shaped ``(ncols,)`` in kg/m²/s and either the
+            volume-mean diameter [m] of the emitted size distribution or a
+            direct number-per-mass factor [kg⁻¹] (see
             :func:`particle_mean_mass`); omitted, the class geometry is used.
         air_density: air density [kg/m³].
         layer_thickness: geometric layer thickness [m].

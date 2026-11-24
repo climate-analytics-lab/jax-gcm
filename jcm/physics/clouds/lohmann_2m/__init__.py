@@ -50,6 +50,8 @@ from .types import (
     microphysics_dt_constants,
 )
 from .sedimentation_melt import (
+    melt_falling_flux,
+    melt_in_cloud_ice,
     melting_snow_and_ice,
     sedimentation_ice,
 )
@@ -80,6 +82,8 @@ __all__ = [
     "HeterogeneousFreezingAerosol",
     "MicrophysicsTendencies_2M",
     "microphysics_dt_constants",
+    "melt_falling_flux",
+    "melt_in_cloud_ice",
     "melting_snow_and_ice",
     "sedimentation_ice",
     "demott2010_inp",

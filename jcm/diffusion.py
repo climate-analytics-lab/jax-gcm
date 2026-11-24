@@ -173,8 +173,9 @@ class DiffusionFilter:
     # stratosphere and mesosphere are not smoothed by the ∇² of the top
     # levels; the SPEEDY default diffuses every wavenumber. ``None`` means
     # True (diffuse it). The exemption covers every modal field the filters
-    # touch, the modal ``specific_humidity`` included; ECHAM's humidity is a
-    # grid-point field that its spectral diffusion never sees at all.
+    # touch. Humidity is a gridpoint (nodal) field under the semi-Lagrangian
+    # core, as ECHAM's is, and the filters never see it; a spectral humidity
+    # (the Eulerian core, or ``dycore.nodal_humidity: false``) is covered.
     diffuse_zonal_mean: Optional[bool] = None
 
     @classmethod

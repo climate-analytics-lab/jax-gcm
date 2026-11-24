@@ -6,6 +6,17 @@ Reads the per-mode dry radius / κ / number from the ``_jam_state`` diagnostic
 is the same diagnostics key the 2M scheme's SPA floor produces, so ARG and SPA
 are interchangeable activation sources (one factory arg) — see #342.
 
+Also publishes ``activation_potential`` as a plain alias of
+``activated_cdnc`` (jax-gcm#1160): ARG's output is already a per-cell
+activation POTENTIAL (the number parcel-theory activation would give at
+this level's updraft/aerosol state) with no cloud-fraction weighting
+anywhere in `arg_activation` — unlike the MACv2-SP SPA floor, which bakes
+``cloud_fraction`` in by design (see `jcm.physics.aerosol.spa`'s module
+docstring). The alias exists so `Lohmann2MMicrophysics`'s two section-1
+droplet-number sources (cloud-base activation, convective-detrainment
+number) can read one name, ``activation_potential``, regardless of which
+aerosol route is composed.
+
 Updraft velocity: the characteristic activation updraft is read from
 ``updraft_velocity`` if some upstream term provides it; otherwise it is
 derived from the previous step's TTE-TKE (w = √(2·TKE/3)), falling back to a
@@ -68,7 +79,16 @@ class ArgActivation(PhysicsTerm):
         "_jam_state", "pressure_full", "air_density",
     )
     provides: ClassVar[tuple[str, ...]] = (
-        "activated_cdnc", "activated_fraction", "_jam_activation",
+        "activated_cdnc", "activation_potential", "activated_fraction",
+        "_jam_activation",
+    )
+    # Both read in ``_updraft`` (module docstring): ``updraft_velocity`` is
+    # a deliberately-empty hook (no in-tree term provides it yet);
+    # ``vertical_diffusion`` is a cross-step read of last step's TTE-TKE
+    # (this term runs in the pre-cloud aerosol block, upstream of
+    # ``TteTkeVerticalDiffusion`` in the default ``echam_physics`` order).
+    optional_requires: ClassVar[tuple[str, ...]] = (
+        "updraft_velocity", "vertical_diffusion",
     )
 
     def __init__(
@@ -89,7 +109,7 @@ class ArgActivation(PhysicsTerm):
         self._can_activate = tuple(
             float(m.can_activate) for m in self._spec.modes
         )
-        self._sigma_acc = self._spec.mode("accum").geom_std_dev
+        self._sigma_acc = self._spec.mode(self._spec.accumulation_mode).geom_std_dev
 
     def _updraft(self, diagnostics, shape, params):
         """Characteristic activation updraft [m/s]."""
@@ -98,8 +118,8 @@ class ArgActivation(PhysicsTerm):
         elif "vertical_diffusion" in diagnostics:
             tke = diagnostics["vertical_diffusion"].tke
             # Double-where on the root's argument, as
-            # ``tke_budget.py::echam_tke_source_update`` guards the same
-            # root. Zero TKE is a laminar layer's value, and there
+            # ``closure.py::_sqrt_nonnegative`` guards the same root in the
+            # TKE closure. Zero TKE is a laminar layer's value, and there
             # ``sqrt(maximum(x, 0))`` is not protected: ``maximum`` ties at 0
             # and hands half of ``sqrt'(0) = inf`` back, which makes the
             # derivative with respect to TKE and to ``tke_factor`` NaN. The
@@ -146,6 +166,10 @@ class ArgActivation(PhysicsTerm):
         return tendency, {
             **diagnostics,
             "activated_cdnc": activated_cdnc,
+            # Alias, not a second computation (jax-gcm#1160): ARG's own
+            # output never has cloud_fraction baked in, so it already IS
+            # the activation potential — see the module docstring.
+            "activation_potential": activated_cdnc,
             "activated_fraction": activated_fraction,
             "_jam_activation": JamActivationData(
                 number_frac=number_frac, mass_frac=mass_frac,

@@ -16,6 +16,7 @@ replacement for the grey ``radiation_scheme``.
 
 from pathlib import Path
 from typing import Tuple, Optional
+import functools
 import warnings
 
 import logging
@@ -41,8 +42,11 @@ from jcm.physics.radiation.grey_two_stream.radiation_scheme import prepare_radia
 from jcm.physics.radiation.mcica import (
     column_key,
     effective_cloud_fraction,
+    effective_cloud_fraction_with_mask_gradient,
     generate_subcolumns,
     in_cloud_condensate,
+    in_cloud_condensate_with_mask_gradient,
+    optically_thick_cover,
     resolvable_path,
 )
 from jcm.physics.radiation.radiation_types import (
@@ -50,7 +54,10 @@ from jcm.physics.radiation.radiation_types import (
     lagged_convection_type,
     liquid_inhomogeneity,
 )
-from jcm.physics.radiation.cloud_optics import radiation_effective_radii
+from jcm.physics.radiation.cloud_optics import (
+    host_effective_radii,
+    radiation_effective_radii,
+)
 import jcm.constants as c
 
 import rrtmgp
@@ -132,6 +139,17 @@ def _ensure_rrtmgp():
                 "toa_sw_flux_incoming_2d_xy",
                 "toa_sw_flux_outgoing_2d_xy",
                 "toa_lw_flux_outgoing_2d_xy",
+                # Emitted only when ``compute_cre`` asks the library for the
+                # clear-sky fluxes (``clear_sky_fluxes=True``).
+                "toa_sw_flux_outgoing_clearsky_2d_xy",
+                "toa_lw_flux_outgoing_clearsky_2d_xy",
+                # Emitted only when the aerosol-free companion is asked for
+                # (``aerosol_free_fluxes=True``; the clear-sky pair needs
+                # ``compute_cre`` too). The AeroCom ``*noa`` fluxes.
+                "toa_sw_flux_outgoing_aerosolfree_2d_xy",
+                "toa_lw_flux_outgoing_aerosolfree_2d_xy",
+                "toa_sw_flux_outgoing_aerosolfree_clearsky_2d_xy",
+                "toa_lw_flux_outgoing_aerosolfree_clearsky_2d_xy",
             ),
         )
     return _GLOBAL_RRTMGP_INSTANCE
@@ -233,8 +251,113 @@ def _reverse_if_needed(pressure: jnp.ndarray) -> jnp.ndarray:
     return pressure[0] < pressure[-1]
 
 
+#: Cached per-SW-band near-IR mask (jax-gcm#959), built once from the live
+#: ``rrtmgp_instance``'s own band table -- see ``_sw_band_is_nir_mask``.
+_SW_BAND_IS_NIR: Optional[np.ndarray] = None
+
+
+def _sw_band_containing(rrtmgp_instance, wavelength_nm: float) -> int:
+    """Index of the SW gas-optics band whose wavenumber range holds ``wavelength_nm``.
+
+    Read off jax-rrtmgp's own band table (``bnd_lims_wn``, cm^-1) rather than
+    a hardcoded index, like :func:`_sw_band_is_nir_mask`. At 550 nm
+    (18182 cm^-1) this is the 16000-22650 cm^-1 band, the 11th of the 14
+    RRTMGP SW bands (zero-based index 10).
+    """
+    wn = 1.0e7 / wavelength_nm
+    lims = np.asarray(rrtmgp_instance.optics_lib.gas_optics_sw.bnd_lims_wn)
+    hit = np.nonzero((lims[:, 0] <= wn) & (wn < lims[:, 1]))[0]
+    if hit.size != 1:
+        raise ValueError(
+            f"{wavelength_nm} nm ({wn:.0f} cm^-1) is not in exactly one SW band"
+        )
+    return int(hit[0])
+
+
+#: Wavelength at which the thresholded cloud cover evaluates the cloud optical
+#: depth: the visible reference wavelength of cloud-mask and simulator
+#: optical-depth thresholds.
+COVER_TAU_WAVELENGTH_NM = 550.0
+
+
+def _visible_cloud_optical_depth(
+    rrtmgp_instance,
+    r_eff_liq_um, r_eff_ice_um,
+    in_cloud_liq_path, in_cloud_ice_path,
+) -> jnp.ndarray:
+    """Per-layer in-cloud liquid + ice extinction optical depth at 550 nm.
+
+    Evaluated with the SAME jax-rrtmgp cloud-optics lookup the flux solve
+    applies per g-point (``cloud_properties_fn`` for the band holding
+    550 nm), on the same in-cloud paths and effective radii, once per layer
+    rather than per g-point: a g-point's cloud path is ``mask * path``, so
+    the optical depth of a sub-column is the mask-weighted sum of these
+    per-layer values. This is the extinction optical depth BEFORE the solver's
+    delta scaling (which removes forward-scattered energy for the two-stream
+    transport) and WITHOUT the sub-grid inhomogeneity factors: a detector
+    sees the physical optical depth, not the albedo-bias correction.
+
+    Inputs and output are TOA-first ``(nlev,)``; effective radii in um.
+    """
+    ibnd = _sw_band_containing(rrtmgp_instance, COVER_TAU_WAVELENGTH_NM)
+    props = rrtmgp_instance.optics_lib.cloud_properties_fn(ibnd, is_lw=False)
+    f32 = lambda a: jnp.asarray(a).astype(jnp.float32)  # noqa: E731
+    with jax.enable_x64(False):
+        out = props(
+            f32(r_eff_liq_um) * 1e-6, f32(in_cloud_liq_path),
+            f32(r_eff_ice_um) * 1e-6, f32(in_cloud_ice_path),
+        )
+    return out["optical_depth"]
+
+
+def _sw_band_is_nir_mask(rrtmgp_instance) -> np.ndarray:
+    """Return a ``(n_bnd_sw,)`` NumPy bool mask: True where the SW band is NIR.
+
+    ECHAM's ``mo_surface`` hands the shortwave radiation a visible and a
+    near-infrared surface albedo and applies the visible one below 0.7 um
+    and the near-infrared one above it -- the TOA solar spectrum's split
+    about that wavelength (the same split the RRTMGP wrapper's broadband
+    blend, ``0.46*vis + 0.54*nir``, approximates with one value). This
+    builds the per-band equivalent directly from jax-rrtmgp's own SW
+    gas-optics band table (``bnd_lims_wn``, cm^-1 wavenumber limits) rather
+    than a hardcoded band count or index list, so a change to the
+    underlying k-distribution's band structure (e.g. a different
+    ``*-gas-sw-g*.nc`` file) is picked up automatically. Band center
+    wavelength follows ``band_config.py``'s own convention (``1e4 /
+    (0.5*(wn_lo+wn_hi))`` in micrometres here, vs. that module's
+    nanometres).
+
+    A NumPy array, not a JAX one: ``bnd_lims_wn`` is a static table loaded at
+    library-construction time, and the mask is used to build
+    ``jnp.where(mask, nir, vis)`` per column, where NumPy broadcasts against
+    the traced per-column scalars exactly as a JAX array would, with no
+    tracing overhead for a value that can never change mid-run. Cached at
+    module scope (keyed implicitly on the one process-global RRTMGP
+    instance, ``_ensure_rrtmgp``) rather than recomputed every call.
+    """
+    global _SW_BAND_IS_NIR
+    if _SW_BAND_IS_NIR is None:
+        wn = np.asarray(rrtmgp_instance.optics_lib.gas_optics_sw.bnd_lims_wn)
+        center_um = 1.0e4 / (0.5 * (wn[:, 0] + wn[:, 1]))
+        _SW_BAND_IS_NIR = center_um > 0.7
+    return _SW_BAND_IS_NIR
+
+
+def _per_band_surface_albedo(
+    vis: jnp.ndarray, nir: jnp.ndarray, nir_mask: np.ndarray,
+) -> jnp.ndarray:
+    """Per-column ``(vis, nir)`` scalars -> a ``(n_bnd_sw,)`` per-band spectrum.
+
+    Every band below 0.7 um (``nir_mask`` False) takes ``vis``; every band at
+    or above it takes ``nir`` (:func:`_sw_band_is_nir_mask`). Used for both
+    the direct-beam and the diffuse albedo, so the two share the same band
+    map applied to different (vis, nir) inputs.
+    """
+    return jnp.where(nir_mask, nir, vis)
+
+
 def _flux_profiles(
-    rrtmgp_data: dict, needs_reversal: jnp.ndarray,
+    rrtmgp_data: dict, needs_reversal: jnp.ndarray, sky: str = "",
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Return ``(sw_up, sw_down, lw_up, lw_down)`` interface profiles, ICON order.
 
@@ -244,8 +367,10 @@ def _flux_profiles(
     ``(ncols, nlev+1, ngpt)`` (ngpt is 128 LW / 112 SW, a ~120x memory
     saving), then flipped back to the caller's TOA-first ordering.
 
-    Shared by the all-sky and clear-sky solves so both land on identical
-    g-point handling and vertical orientation and can be differenced.
+    Shared by the all-sky and clear-sky fluxes so both land on identical
+    g-point handling and vertical orientation and can be differenced. ``sky``
+    is ``""`` for the all-sky profiles and ``"clearsky_"`` for the clear-sky
+    ones, which the library returns under ``sw_flux_up_clearsky_full`` etc.
     """
     flip = lambda a: a[::-1]  # noqa: E731
     identity = lambda a: a  # noqa: E731
@@ -254,8 +379,8 @@ def _flux_profiles(
             needs_reversal, flip, identity,
             rrtmgp_data[key][0, :, :].sum(axis=0),
         )
-        for key in ("sw_flux_up_full", "sw_flux_down_full",
-                    "lw_flux_up_full", "lw_flux_down_full")
+        for key in (f"sw_flux_up_{sky}full", f"sw_flux_down_{sky}full",
+                    f"lw_flux_up_{sky}full", f"lw_flux_down_{sky}full")
     )
     return profiles
 
@@ -363,14 +488,6 @@ def prepare_rrtmgp_data(
             pressure_1d, dp_bottom, dp_top, nlev, halo,
         ),
         "sg_map": sg_map,
-        # Unrolled z-recurrence (the jax-rrtmgp default). The lax.scan
-        # variant moveaxis's z to the leading axis for every vertical sweep;
-        # on an A100 (4096 columns x 62 levels, f32) that costs 20% (LW) /
-        # 41% (SW) of the solve relative to the unrolled slice-indexed loop
-        # — the same layout effect RRTMGP.jl measured on GPUs. The unrolled
-        # HLO is larger (one slice per level per sweep), which only shows up
-        # as a modest one-off compile-time cost.
-        "use_scan": False,
     }
 
 
@@ -384,8 +501,19 @@ def prepare_icon_data(
     surface_albedo_vis: jnp.ndarray,
     surface_albedo_nir: jnp.ndarray,
     surface_emissivity: jnp.ndarray,
+    surface_albedo_vis_dir: jnp.ndarray,
+    surface_albedo_vis_dif: jnp.ndarray,
+    surface_albedo_nir_dir: jnp.ndarray,
+    surface_albedo_nir_dif: jnp.ndarray,
 ) -> Tuple[RadiationTendencies, RadiationData]:
-    """Convert RRTMGP output dict back to ICON RadiationTendencies/RadiationData."""
+    """Convert RRTMGP output dict back to ICON RadiationTendencies/RadiationData.
+
+    ``surface_albedo_{vis,nir}_{dir,dif}`` (jax-gcm#959) are the per-band
+    direct/diffuse quartet the solve actually used (``sfc_alb_dir``/
+    ``sfc_alb_dif``, reduced back to the vis/nir pair for the published
+    diagnostic, the same way ``surface_albedo_vis``/``_nir`` already publish
+    the broadband value the solve used).
+    """
     halo = 1
     nlev = icon_data.temperature.shape[0]
     cos_zenith = icon_data.cos_zenith[0]
@@ -435,6 +563,10 @@ def prepare_icon_data(
         surface_albedo_vis=surface_albedo_vis,
         surface_albedo_nir=surface_albedo_nir,
         surface_emissivity=surface_emissivity,
+        surface_albedo_vis_dir=surface_albedo_vis_dir,
+        surface_albedo_vis_dif=surface_albedo_vis_dif,
+        surface_albedo_nir_dir=surface_albedo_nir_dir,
+        surface_albedo_nir_dif=surface_albedo_nir_dif,
         sw_flux_up=sw_flux_up,
         sw_flux_down=sw_flux_down,
         sw_heating_rate=sw_heating,
@@ -471,6 +603,20 @@ def prepare_icon_data(
         noa_frac_toa_lw_up_clear=jnp.zeros_like(toa_sw_up),
         toa_lw_up_clear_noa=jnp.zeros_like(toa_sw_up),
         total_cloud_cover=jnp.zeros_like(toa_sw_up),
+        total_cloud_cover_tau=jnp.zeros_like(toa_sw_up),
+        # Placeholder: this low-level helper never sees the cloud effective
+        # radii (``radiation_scheme_rrtmgp``'s caller forms them from the
+        # state, this function only assembles the library's flux output).
+        # Both of this function's actual callers overwrite it immediately --
+        # ``radiation_scheme_rrtmgp`` via its own ``diagnostics.copy(...)``
+        # below (populated from its ``r_eff_liq_um``/``r_eff_ice_um``
+        # arguments, the exact radii that call used, matching
+        # ``radiation_scheme_emulated``'s identical pattern), and
+        # ``RRTMGPRadiation._compute_full`` a second time on its own, final
+        # ``RadiationData`` -- so the zero here is never read back by
+        # anything, exactly like the clear-sky placeholders above.
+        r_eff_liq_at_solve=jnp.zeros_like(sw_heating),
+        r_eff_ice_at_solve=jnp.zeros_like(sw_heating),
         # ``step`` is owned by the enclosing ``RRTMGPRadiation`` carry —
         # the standalone scheme emits 0 and the term bumps the counter
         # after its compute-vs-cache cond.
@@ -533,6 +679,60 @@ def _solar_zenith_angle(cos_zenith: jnp.ndarray) -> jnp.ndarray:
     return _zenith_from_mu0(mu0)
 
 
+# Three performance options of the jax-rrtmgp solve, none of which changes the
+# physics: where the gas optics is evaluated (``gas_optics_mode``), how many
+# g-points its spectral loop solves per iteration (``gpt_chunk``), and whether
+# the vertical recurrences run as a ``lax.scan`` over levels (``use_scan``)
+# instead of an unrolled chain. ``all_gpts`` computes the gas absorption, Planck
+# fraction and Rayleigh optical depth of every g-point in one pass ahead of the
+# loop, with each k-table read a row gather over the g-points; ``per_gpt``
+# computes them inside the loop one g-point (or chunk) at a time.
+#
+# The jcm defaults are the measured optimum on an A100 at T63L47
+# (``t63-echam-rrtmgp``, one radiation call): 739 ms with a separate clear-sky
+# solve, unrolled and ``per_gpt``; 350 ms with the clear sky shared and the
+# recurrences fenced (both in the library); 202 ms with ``all_gpts`` and
+# ``gpt_chunk=4``; 139 ms with the scan at ``gpt_chunk=64``, ~9.1 s/sim-day
+# end to end. A scan
+# step is a kernel over ``gpt_chunk`` x columns elements, so scanning loses at
+# small chunks (each step is a launch) and wins once the chunk is large enough
+# to amortise it, which needs the gas optics out of the loop. The price is
+# memory: peak 12.5 GiB at T63L47 (+4.0 over the unrolled form) and 24.6 GiB at
+# T63L95 (+8.0), inside a 40 GB card; ``gpt_chunk=16`` is the no-extra-memory
+# setting (156.6 ms). The scanned and unrolled programs differ by at most 12
+# float32 ulp on the fluxes (XLA fusion / FMA contraction), and the G=64 minimum
+# is a property of the compiled program, to be re-measured when XLA or the
+# library changes. The library's own defaults stay ``per_gpt`` / 1 /
+# ``use_scan=False``, so a caller that does not opt in keeps the program it
+# always had. A TPU user of the matmul table lookup (``RRTMGP_LOOKUP_IMPL``)
+# should set ``gas_optics_mode="per_gpt"``: ``all_gpts`` always gathers. See
+# ``docs/source/design/rrtmgp_gpu_performance.md``.
+GAS_OPTICS_MODES = ("per_gpt", "all_gpts")
+DEFAULT_GAS_OPTICS_MODE = "all_gpts"
+DEFAULT_GPT_CHUNK = 64
+DEFAULT_USE_SCAN = True
+
+
+def _check_library_options(
+    gas_optics_mode: str, gpt_chunk: int, use_scan: bool,
+) -> tuple[int, bool]:
+    """Validate the static library options; return ``(gpt_chunk, use_scan)``.
+
+    All three select the traced program, so a bad value is rejected where the
+    term is built rather than at the first trace.
+    """
+    if gas_optics_mode not in GAS_OPTICS_MODES:
+        raise ValueError(
+            f"gas_optics_mode must be one of {GAS_OPTICS_MODES}, "
+            f"got {gas_optics_mode!r}.")
+    if isinstance(gpt_chunk, bool) or int(gpt_chunk) != gpt_chunk or gpt_chunk < 1:
+        raise ValueError(
+            f"gpt_chunk must be a positive integer, got {gpt_chunk!r}.")
+    if not isinstance(use_scan, (bool, np.bool_)):
+        raise ValueError(f"use_scan must be a bool, got {use_scan!r}.")
+    return int(gpt_chunk), bool(use_scan)
+
+
 def radiation_scheme_rrtmgp(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -563,6 +763,20 @@ def radiation_scheme_rrtmgp(
     r_eff_liq_um: Optional[jnp.ndarray] = None,
     r_eff_ice_um: Optional[jnp.ndarray] = None,
     convection_type: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
+    cloud_fraction_raw: Optional[jnp.ndarray] = None,
+    # New optional parameters go at the END of the signature (mirroring the
+    # jax-rrtmgp convention noted beside the library call below) so every
+    # existing positional/kwarg caller keeps its bindings.
+    surface_albedo_vis_dir: Optional[jnp.ndarray] = None,
+    surface_albedo_vis_dif: Optional[jnp.ndarray] = None,
+    surface_albedo_nir_dir: Optional[jnp.ndarray] = None,
+    surface_albedo_nir_dif: Optional[jnp.ndarray] = None,
+    lw_solver: str = "two_stream",
+    gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
+    gpt_chunk: int = DEFAULT_GPT_CHUNK,
+    use_scan: bool = DEFAULT_USE_SCAN,
+    solve_geometry: bool = False,
+    aerosol_free: bool = False,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -575,13 +789,15 @@ def radiation_scheme_rrtmgp(
     fluxes — at one RRTMGP call per radiation step rather than the
     previous 2-call beam-split's two.
 
-    When ``compute_cre`` is True an extra clear-sky RRTMGP call (with
-    zero condensate everywhere) populates ``toa_{sw,lw}_up_clear`` for
-    the cloud radiative effect diagnostic, plus the full
-    ``{sw,lw}_flux_{up,down}_clear`` interface profiles used as NN
-    emulator training labels. Costs 2× a McICA call; disable it (e.g.
-    for production runs that only need the all-sky fluxes) for the 1×
-    option.
+    When ``compute_cre`` is True the same RRTMGP call also returns the
+    cloud-free fluxes (``clear_sky_fluxes=True``), which populate
+    ``toa_{sw,lw}_up_clear`` for the cloud radiative effect diagnostic,
+    plus the full ``{sw,lw}_flux_{up,down}_clear`` interface profiles used
+    as NN emulator training labels. The library solves the clear sky inside
+    the all-sky g-point loop, sharing the gas optics and Planck sources
+    (the bulk of a g-point's cost), so it costs well under a second McICA
+    call; disable it (e.g. for production runs that only need the all-sky
+    fluxes) to drop even that.
 
     Args (additions over the previous beam-split signature):
         column_index: integer global index of the column being computed,
@@ -591,8 +807,8 @@ def radiation_scheme_rrtmgp(
             McICA seed so reruns are bit-exact reproducible.
         base_seed: term-level Python integer seed that the column +
             step indices fold into.
-        compute_cre: if True, run an additional clear-sky RRTMGP call
-            and populate ``toa_{sw,lw}_up_clear`` and the
+        compute_cre: if True, also take the clear-sky fluxes from the
+            RRTMGP solve and populate ``toa_{sw,lw}_up_clear`` and the
             ``{sw,lw}_flux_{up,down}_clear`` profiles on the returned
             ``RadiationData``.
         r_eff_liq_um / r_eff_ice_um: droplet / crystal effective radii (um,
@@ -606,6 +822,59 @@ def radiation_scheme_rrtmgp(
             selects the liquid inhomogeneity factor (see
             :func:`~jcm.physics.radiation.radiation_types.liquid_inhomogeneity`).
             0 (no convection) when not supplied.
+        surface_albedo_vis_dir / _vis_dif / _nir_dir / _nir_dif: the per-band
+            direct-beam / diffuse surface albedo quartet (jax-gcm#959),
+            e.g. the open-water Fresnel direct albedo vs. its diffuse
+            albedo (``jcm.physics.surface.echam.albedo.ocean_albedo``).
+            Mapped to jax-rrtmgp 0.5.0's per-SW-band ``sfc_alb_dir``/
+            ``sfc_alb_dif`` by wavelength (:func:`_sw_band_is_nir_mask`:
+            bands below 0.7 um take the visible value, at or above it the
+            near-infrared one, ECHAM's ``mo_surface`` split). ``None``
+            (the default, every call site predating #959) falls back to
+            the BLENDED BROADBAND scalar (``0.46*vis + 0.54*nir``) in all
+            four slots -- not the raw ``vis``/``nir`` pair, which would
+            give an unintended per-band split whenever ``vis != nir`` --
+            reproducing today's single-albedo behaviour exactly, which is
+            also the #959 regression pin (bit-identical fluxes whether
+            ``vis == nir`` or not, as long as no quartet is passed).
+        cloud_fraction_raw: the cover BEFORE ECHAM's condensate mask was
+            applied to it (``cloud_fraction`` is the masked cover; see
+            ``cloud_data.condensate_masked_cover``). Used only for the
+            DERIVATIVE of the in-cloud condensate and the McICA cover with
+            respect to condensate in a covered-but-empty cell (#973) — the
+            forward computation is unaffected either way. ``None`` (the
+            default, every call site predating #973) selects the PLAIN
+            (zero-derivative-at-the-mask) functions outright, rather than
+            substituting ``cloud_fraction`` for it: the ``_with_mask_gradient``
+            surrogates divide by ``max(raw_cloud_fraction, eps)`` ungated, so
+            passing the (zero, at a masked cell) masked value AS the raw one
+            would not reproduce the plain functions' hard zero -- it would
+            divide by ``eps`` instead, a large SPURIOUS derivative. Omitting
+            the argument avoids that trap by skipping the surrogate
+            entirely.
+        solve_geometry: True when called by the radiation TERM, which stores
+            the shortwave as transmissivities and re-applies the real sun
+            every step (:func:`jcm.physics.radiation.apply_insolation`): the
+            zenith is then ECHAM's solve zenith, curvature-corrected and
+            floored at 0.1 (:func:`~jcm.physics.radiation.echam_solve_cos_zenith`),
+            so night columns carry a finite transmissivity. False (default)
+            keeps the geometric zenith, with night columns at zero flux, for a
+            standalone call that reports the physical flux of ``solar``.
+            Static.
+        lw_solver: the library's longwave transport, ``"two_stream"`` (the
+            default) or ``"noscat"`` (RTE's absorption-only solver; see
+            :class:`RRTMGPRadiation`). Static: it selects the traced program.
+        gas_optics_mode / gpt_chunk / use_scan: jax-rrtmgp's gas-optics
+            placement, g-points per spectral-loop iteration and scanned
+            vertical recurrences (see :class:`RRTMGPRadiation`). Static; they
+            change the compiled program, not the physics.
+        aerosol_free: also solve the aerosol-free twin of every problem (the
+            all-sky one, and the clear-sky one under ``compute_cre``) inside
+            the same library call and publish their TOA fluxes as
+            ``toa_{sw,lw}_up_noa`` / ``toa_{sw,lw}_up_clear_noa`` (the
+            AeroCom ``*noa`` diagnostics, jax-gcm#583). Static. The twins
+            are the same gas optics, Planck sources and McICA cloud draw
+            with no aerosol optics mixed in; the slots are zero when False.
 
     """
     if r_eff_liq_um is None or r_eff_ice_um is None:
@@ -634,6 +903,8 @@ def radiation_scheme_rrtmgp(
     )
     sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
     cos_zenith = sin_altitude  # cos(zenith) = sin(altitude)
+    if solve_geometry:
+        cos_zenith = echam_solve_cos_zenith(cos_zenith)
 
     # In-cloud condensate (grid-mean / cf) is what each cloudy
     # sub-column sees; the binary McICA mask then re-imposes a
@@ -646,9 +917,12 @@ def radiation_scheme_rrtmgp(
     # ``q_c`` used in the vapour-VMR maths, so the sub-grid inhomogeneity
     # factor must NOT be baked in here -- that would shrink the inferred
     # crystal and partly undo the reduction (#678). The inhomogeneity factor
-    # is applied to the per-gpoint optical-depth paths
-    # (``in_cloud_{lwp,ipath}_lib`` below), which is where it belongs (ECHAM
-    # ``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``).
+    # (ECHAM ``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``)
+    # is passed to jax-rrtmgp as ``cloud_tau_scale_liq``/``_ice`` alongside
+    # the UNSCALED per-gpoint paths (``in_cloud_{lwp,ipath}_lib`` below, the
+    # ``lib_in`` dict further down) rather than baked into those paths here,
+    # so the library weights ssa/asymmetry by the unscaled per-phase τ as
+    # ECHAM does (#958).
     #
     # Only the NaN guard (``_MAX_IN_CLOUD_CONDENSATE``) is applied: a *thin*
     # but resolved cloud (cf ~ 0.01-0.05) carrying large grid-mean condensate
@@ -657,10 +931,26 @@ def radiation_scheme_rrtmgp(
     # in-cloud water, so genuine clouds are untouched and only the pathological
     # inflation is clipped. It is a one-sided guard, NOT an inhomogeneity
     # scaling -- measured on T63L47 it binds in ~0.003% of cloudy cells (#678).
-    cloud_water_in_cloud = in_cloud_condensate(
-        cloud_water, cloud_fraction, eps=parameters.cld_frac_min)
-    cloud_ice_in_cloud = in_cloud_condensate(
-        cloud_ice, cloud_fraction, eps=parameters.cld_frac_min)
+    # ``_with_mask_gradient``: forward value identical to the plain
+    # ``in_cloud_condensate``/``effective_cloud_fraction`` (ECHAM's exact
+    # condensate mask); derivative is the one-sided "if a trace of
+    # condensate appeared it would radiate at the RAW diagnosed cover"
+    # sensitivity, using ``cloud_fraction_raw`` (#973). ``cloud_fraction_raw
+    # is None`` is a Python-level (trace-time) choice between the two
+    # function pairs, not a value substitution -- see the argument's
+    # docstring for why a substitution would be wrong.
+    if cloud_fraction_raw is None:
+        cloud_water_in_cloud = in_cloud_condensate(
+            cloud_water, cloud_fraction, eps=parameters.cld_frac_min)
+        cloud_ice_in_cloud = in_cloud_condensate(
+            cloud_ice, cloud_fraction, eps=parameters.cld_frac_min)
+    else:
+        cloud_water_in_cloud = in_cloud_condensate_with_mask_gradient(
+            cloud_water, cloud_fraction, cloud_fraction_raw,
+            eps=parameters.cld_frac_min)
+        cloud_ice_in_cloud = in_cloud_condensate_with_mask_gradient(
+            cloud_ice, cloud_fraction, cloud_fraction_raw,
+            eps=parameters.cld_frac_min)
 
     # The clear-cell threshold ``in_cloud_path`` uses to zero the condensate
     # (cf <= 2*cld_frac_min) must also gate the McICA sampler and the cover
@@ -669,9 +959,14 @@ def radiation_scheme_rrtmgp(
     # maximum-random overlap through an empty layer (ECHAM ties condensate and
     # the icldlyr cloud flag together on the same test; see
     # ``effective_cloud_fraction``).
-    cloud_fraction_rad = effective_cloud_fraction(
-        cloud_fraction, eps=parameters.cld_frac_min,
-    )
+    if cloud_fraction_raw is None:
+        cloud_fraction_rad = effective_cloud_fraction(
+            cloud_fraction, eps=parameters.cld_frac_min,
+        )
+    else:
+        cloud_fraction_rad = effective_cloud_fraction_with_mask_gradient(
+            cloud_fraction, cloud_fraction_raw, eps=parameters.cld_frac_min,
+        )
 
     icon_state = prepare_radiation_state(
         temperature=temperature,
@@ -733,6 +1028,21 @@ def radiation_scheme_rrtmgp(
         jnp.sum(jnp.any(masks_lw, axis=1)) + jnp.sum(jnp.any(masks_sw, axis=1))
     ) / (n_gpt_lw + n_gpt_sw)
 
+    # Detection-thresholded cover of the SAME sub-columns: the fraction whose
+    # column cloud optical depth at 550 nm exceeds ``tau_threshold``. Built
+    # from the library's own cloud-optics lookup on the solve's in-cloud paths
+    # and radii (one lookup per layer, not per g-point), so it adds no solver
+    # work and feeds nothing back into the fluxes.
+    tau_layer = _visible_cloud_optical_depth(
+        rrtmgp_instance, r_eff_liq_um, r_eff_ice_um,
+        resolvable_path(icon_state.cloud_water_path),
+        resolvable_path(icon_state.cloud_ice_path),
+    )
+    total_cloud_cover_tau = optically_thick_cover(
+        jnp.concatenate([masks_lw, masks_sw], axis=0), tau_layer,
+        parameters.tau_threshold,
+    )
+
     # Per-gpoint cloud paths in surface-first convention (the library's
     # internal expectation, see the flip in ``prepare_rrtmgp_data``).
     needs_reversal = _reverse_if_needed(icon_state.pressure)
@@ -746,38 +1056,59 @@ def radiation_scheme_rrtmgp(
         needs_reversal, flip_per_gpt, identity, masks_sw,
     )
     # Per-gpoint condensate paths carry the cloud optical depth (τ ∝ path at the
-    # effective radius formed from the PHYSICAL in-cloud condensate). The ECHAM sub-grid
-    # inhomogeneity factors multiply the per-phase optical depth
+    # effective radius formed from the PHYSICAL in-cloud condensate). ECHAM's
+    # sub-grid inhomogeneity factors scale the per-PHASE optical depth
     # (``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``,
-    # ``l_variable_inhoml = .FALSE.``), so they are applied HERE -- to the
-    # τ-driving paths -- not to the physical path that set the effective radius
-    # above. The liquid factor follows the column's convective type (``zinhoml``
-    # 1/2/3); the ice factor is ``zinhomi``.
-    #
-    # jax-rrtmgp's only per-phase inputs are these paths, and it weights the
-    # combined ssa (by τ) and asymmetry (by τ·ssa) with the τ they produce.
-    # Wherever the two factors are equal -- every column at the T63 defaults
-    # except shallow-convective ``ktype == 4`` ones -- the common factor cancels
-    # in those weights and this is exactly ECHAM's ``ztau``/``zomg``/``zasy``.
-    # Where they differ AND a layer holds both phases, the ssa/asymmetry are
-    # weighted by the scaled rather than ECHAM's unscaled τ; the total optical
-    # depth is still exact. jax-rrtmgp 0.5.0 takes per-phase optical-depth
-    # scales (``cloud_tau_scale_liq``/``_ice``) that weight by the unscaled
-    # τ; passing them instead of scaling the paths is #958.
+    # ``l_variable_inhoml = .FALSE.``) and then weight the combined ssa/asymmetry
+    # by the UNSCALED ``ztol``/``ztoi``. jax-rrtmgp 0.5.0 exposes exactly that:
+    # ``cloud_tau_scale_liq``/``_ice`` on ``compute_heating_rate`` (passed below),
+    # applied after its own table lookup with ssa/asymmetry weighted by the
+    # unscaled per-phase τ. So the paths handed to the library here are the
+    # PHYSICAL (unscaled) per-phase paths -- scaling them ourselves, as a
+    # pre-#958 version of this function did, would hand the library an
+    # already-scaled τ that it would then weight ssa/asymmetry by directly,
+    # recreating the same bug these two factors differ (shallow-convective
+    # ``ktype == 4`` columns) that passing the factors separately fixes. The
+    # liquid factor follows the column's convective type (``zinhoml`` 1/2/3,
+    # :func:`liquid_inhomogeneity`); the ice factor is ``zinhomi``. Both are
+    # per-COLUMN scalars (not per-level), so no orientation flip or halo
+    # padding applies to them -- only the per-level paths below need it.
     zinhoml = liquid_inhomogeneity(convection_type, parameters)
-    # The floor applies to the path the library receives, factor included: a
-    # path above it scaled by a small factor must not re-enter the band whose
-    # derivative overflows (``mcica.NEGLIGIBLE_CLOUD_PATH_KG_M2``).
-    in_cloud_lwp_lib = resolvable_path(zinhoml * lax.cond(
+    zinhomi = parameters.cloud_inhomogeneity_ice
+    # The floor applies to the PHYSICAL (pre-scaling) path the library
+    # receives: #958 moved the ECHAM inhomogeneity scaling from here into the
+    # library's own ``cloud_tau_scale_{liq,ice}`` arguments, so this floor no
+    # longer sees the scaled path. zinhoml/zinhomi are O(0.4-0.85) (never
+    # below 0.4), so the floor's effective threshold on the SCALED path moves
+    # by under a factor of ~2.5x either way -- far inside the "~9 orders of
+    # magnitude of margin" the floor already has (see
+    # ``mcica.NEGLIGIBLE_CLOUD_PATH_KG_M2``), so no recalibration is needed.
+    in_cloud_lwp_lib = resolvable_path(lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
         icon_state.cloud_water_path,
     ))
-    in_cloud_ipath_lib = resolvable_path(
-        parameters.cloud_inhomogeneity_ice * lax.cond(
-            needs_reversal, lambda a: a[::-1], identity,
-            icon_state.cloud_ice_path,
-        ))
+    in_cloud_ipath_lib = resolvable_path(lax.cond(
+        needs_reversal, lambda a: a[::-1], identity,
+        icon_state.cloud_ice_path,
+    ))
 
+    # Per-g-point path = mask * in-cloud path, as a plain product. A
+    # surrogate on this product (making a covered-but-empty cell's
+    # contribution carry a non-vanishing derivative, matching
+    # ``in_cloud_condensate_with_mask_gradient`` above) was tried and
+    # measured NOT to reach the flux: jax-rrtmgp 0.5.0's own cloud optics
+    # (``rrtmgp.optics.cloud_optics``) multiplies this path by
+    # ``smooth_ops.smooth_gate(path, 0, 2*EPSILON)``, a C1 smoothstep whose
+    # VALUE AND FIRST DERIVATIVE are both exactly 0 at ``path = 0`` (by
+    # construction, so the gate has no slope discontinuity at either end of
+    # its ramp). ``d(path * gate(path))/dpath|_{path=0} = gate(0) + 0 =
+    # 0``, for ANY tangent on ``path`` -- confirmed empirically: feeding this
+    # exact function a non-vanishing tangent here still measures a zero
+    # ``jax.grad`` of the flux, while the SAME column one ULP off the
+    # degenerate point already has a large finite gradient. Closing this
+    # needs jax-rrtmgp's gate itself to carry a one-sided slope at its
+    # lower edge, which is outside jcm's RRTMGP backend; see jax-gcm#1093
+    # (filed from #973) for the measurement and the upstream ask.
     nlev = icon_state.temperature.shape[0]
     halo = 1
     cpl_lw_4d = _to_4d_per_gpoint(
@@ -873,8 +1204,9 @@ def radiation_scheme_rrtmgp(
     # Per-SW-band aerosol optics (Stevens 2017 wavelength scaling, jax-
     # rrtmgp PR #4). Each per-band field arrives as (n_bnd_sw, nlev)
     # from the column-vmap; reshape to (n_bnd_sw, 1, 1, nlev+2*halo)
-    # for ``compute_heating_rate``. LW is omitted — MACv2-SP only models
-    # SW aerosol effects per ``mo_bc_aeropt_splumes.f90``.
+    # for ``compute_heating_rate``. The longwave bundle follows below; the
+    # plumes themselves have no longwave optics
+    # (``mo_bc_aeropt_splumes.f90``).
     def _to_4d_per_band(arr_2d: jnp.ndarray) -> jnp.ndarray:
         """TOA-first (n_bnd, nlev) → (n_bnd, 1, 1, nlev+2*halo), library frame.
 
@@ -898,8 +1230,11 @@ def radiation_scheme_rrtmgp(
             "asymmetry_factor": _to_4d_per_band(aerosol_data.asy_sw_per_band),
         }
 
-    # Per-LW-band aerosol optics from the JAM online-aerosol optics term (#495).
-    # Zero/absent for MACv2-SP (SW-only) → ``aerosol_optics_lw=None``.
+    # Per-LW-band aerosol optics: the JAM online-aerosol optics term (#495)
+    # or the MACv2 natural background's coarse-mode absorption. The slot
+    # carries the radiation's longwave bands whenever it has any, so the
+    # bundle is passed (holding zeros for the plumes alone) and is ``None``
+    # only for a host with no longwave bands.
     aerosol_optics_lw: Optional[dict[str, jnp.ndarray]] = None
     if (hasattr(aerosol_data, "aod_lw_per_band")
             and aerosol_data.aod_lw_per_band.shape[0] > 0):
@@ -918,12 +1253,48 @@ def radiation_scheme_rrtmgp(
     # previously the hardcoded AtmosphericStateCfg scalars 0.07/0.98 were
     # used for every column, severing the ice-albedo feedback and leaving
     # the column solve inconsistent with the surface scheme's absorbed
-    # SW·(1−albedo_tile)). The library takes one BROADBAND SW albedo, so
-    # blend the surface scheme's vis/nir pair with the ~0.46/0.54 split of
-    # the TOA solar spectrum about 0.7 µm. jax-rrtmgp 0.5.0 takes per-band
-    # direct and diffuse albedos (``sfc_alb_dir``/``sfc_alb_dif``); building
-    # them from the surface scheme's vis/nir pair and passing them is #959.
+    # SW·(1−albedo_tile)). ``sfc_alb_broadband`` blends the surface scheme's
+    # vis/nir pair with the ~0.46/0.54 split of the TOA solar spectrum about
+    # 0.7 um; it is kept and passed as ``sfc_alb``, the library's broadband
+    # fallback for a call that supplies no per-band albedo.
+    #
+    # jax-rrtmgp 0.5.0 also takes per-band direct and diffuse albedos
+    # (``sfc_alb_dir``/``sfc_alb_dif``, jax-gcm#959): every band below
+    # 0.7 um takes the visible value, every band at or above it the
+    # near-infrared one (ECHAM's ``mo_surface`` split), read off
+    # jax-rrtmgp's own SW band table rather than a hardcoded band count
+    # (:func:`_sw_band_is_nir_mask`). The direct-beam and diffuse arrays
+    # differ only over open water, whose Fresnel direct albedo is not its
+    # diffuse albedo (``jcm.physics.surface.echam.albedo.ocean_albedo``);
+    # land and sea ice repeat the same value in both. Absent inputs (every
+    # call site predating #959) fall back to the BROADBAND BLEND
+    # (``sfc_alb_broadband``) in all four slots -- not the raw vis/nir pair.
+    # Falling back to raw vis/nir and then running them through the SAME
+    # per-band split as a real quartet would give every band below 0.7 um
+    # the visible value and every band at/above it the near-infrared one,
+    # which is a per-band albedo an existing caller with vis != nir never
+    # asked for and never saw before #959 (caught by Codex review: the
+    # regression tests only exercised vis == nir, which hid this because
+    # broadband == vis == nir there). Seeding every omitted slot from the
+    # SAME blended scalar instead makes the per-band split below collapse
+    # back to one uniform value across every band, for both beams --
+    # exactly today's single-albedo behaviour, verified bit-identical to
+    # the plain ``sfc_alb``-only call by
+    # ``TestRRTMGPPerBandSurfaceAlbedo::test_vis_equal_nir_and_dir_equal_dif_matches_broadband_bit_for_bit``.
     sfc_alb_broadband = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
+    if surface_albedo_vis_dir is None:
+        surface_albedo_vis_dir = sfc_alb_broadband
+    if surface_albedo_vis_dif is None:
+        surface_albedo_vis_dif = sfc_alb_broadband
+    if surface_albedo_nir_dir is None:
+        surface_albedo_nir_dir = sfc_alb_broadband
+    if surface_albedo_nir_dif is None:
+        surface_albedo_nir_dif = sfc_alb_broadband
+    nir_mask = _sw_band_is_nir_mask(rrtmgp_instance)
+    sfc_alb_dir = _per_band_surface_albedo(
+        surface_albedo_vis_dir, surface_albedo_nir_dir, nir_mask)
+    sfc_alb_dif = _per_band_surface_albedo(
+        surface_albedo_vis_dif, surface_albedo_nir_dif, nir_mask)
 
     # The library call is float32 end-to-end regardless of the host's x64
     # state, in two coordinated steps (either alone is insufficient — the
@@ -954,6 +1325,7 @@ def radiation_scheme_rrtmgp(
     lib_in = _f32_leaves(dict(
         zenith=zenith_angle, irrad=irrad_val,
         sfc_alb=sfc_alb_broadband, sfc_emis=surface_emissivity,
+        sfc_alb_dir=sfc_alb_dir, sfc_alb_dif=sfc_alb_dif,
         cloud_path_liq_lw_per_gpt=cpl_lw_4d,
         cloud_path_ice_lw_per_gpt=cpi_lw_4d,
         cloud_path_liq_sw_per_gpt=cpl_sw_4d,
@@ -961,37 +1333,70 @@ def radiation_scheme_rrtmgp(
         vmr_fields=vmr_fields or None,
         aerosol_optics_sw=aerosol_optics_sw,
         aerosol_optics_lw=aerosol_optics_lw,
+        # ECHAM's sub-grid inhomogeneity factors (#958): passed to the
+        # library instead of pre-scaling the paths above, so it weights
+        # ssa/asymmetry by the UNSCALED per-phase τ (``zinhoml``/``zinhomi``
+        # are per-column scalars; see the comment above ``in_cloud_lwp_lib``).
+        cloud_tau_scale_liq=zinhoml,
+        cloud_tau_scale_ice=zinhomi,
         **rrtmgp_input,
     ))
+    # ``compute_cre`` is a Python bool, so whether the library is asked for the
+    # clear-sky fluxes is decided at trace time.
+    # ``aerosol_free`` likewise: it asks the same call for the aerosol-free
+    # twin of every problem it solves (the AeroCom ``*noa`` fluxes, jax-gcm#583).
     with jax.enable_x64(False):
-        rrtmgp_output = rrtmgp_instance.compute_heating_rate(**lib_in)
+        rrtmgp_output = rrtmgp_instance.compute_heating_rate(
+            **lib_in, clear_sky_fluxes=compute_cre, lw_solver=lw_solver,
+            gas_optics_mode=gas_optics_mode, gpt_chunk=gpt_chunk,
+            use_scan=use_scan, aerosol_free_fluxes=aerosol_free,
+        )
 
-    # Optional clear-sky call for the cloud radiative effect. With the
-    # broadcast q_liq / q_ice already zero and no per-gpoint cloud
-    # paths supplied, this collapses to a clear-sky calculation.
+    # Aerosol-free (``*noa``) TOA fluxes: the all-sky and clear-sky problems
+    # solved once more with no aerosol optics mixed in, inside the same
+    # g-point loop (shared gas optics, Planck sources and cloud mix-in; only
+    # the cell properties and the transport are repeated). The cloud field is
+    # the same McICA draw by construction, so the difference to the fluxes
+    # with aerosol is the instantaneous aerosol radiative effect (the ERFari
+    # numerator), not an aerosol-cloud response. The clear-sky pair exists
+    # only with ``compute_cre``; the slots are zero otherwise, as the
+    # clear-sky fluxes themselves are.
+    toa_sw_up_all = rrtmgp_output["toa_sw_flux_outgoing_2d_xy"][0, 0]
+    if aerosol_free:
+        toa_sw_up_noa = rrtmgp_output[
+            "toa_sw_flux_outgoing_aerosolfree_2d_xy"][0, 0]
+        toa_lw_up_noa = rrtmgp_output[
+            "toa_lw_flux_outgoing_aerosolfree_2d_xy"][0, 0]
+    else:
+        toa_sw_up_noa = toa_lw_up_noa = jnp.zeros_like(toa_sw_up_all)
+    if aerosol_free and compute_cre:
+        toa_sw_up_clear_noa = rrtmgp_output[
+            "toa_sw_flux_outgoing_aerosolfree_clearsky_2d_xy"][0, 0]
+        toa_lw_up_clear_noa = rrtmgp_output[
+            "toa_lw_flux_outgoing_aerosolfree_clearsky_2d_xy"][0, 0]
+    else:
+        toa_sw_up_clear_noa = toa_lw_up_clear_noa = jnp.zeros_like(
+            toa_sw_up_all)
+
+    # Optional clear-sky fluxes for the cloud radiative effect: the cloud-free
+    # atmosphere, solved by the library inside the all-sky g-point loop so the
+    # gas optics are computed once.
     # Aerosols are intentionally included on the clear-sky branch — CMIP
-    # convention is that "clear-sky" means cloud-free, aerosols included.
+    # convention is that "clear-sky" means cloud-free, aerosols included — and
+    # the clear-sky solve sees the same inputs minus the cloud condensate.
     if compute_cre:
-        # Same float32 boundary + scoped-x64 rationale as the all-sky call;
-        # the clear-sky call is simply the same inputs minus the per-gpoint
-        # cloud paths.
-        clear_in = {k: v for k, v in lib_in.items()
-                    if not k.startswith("cloud_path_")}
-        with jax.enable_x64(False):
-            rrtmgp_output_clear = rrtmgp_instance.compute_heating_rate(
-                **clear_in,
-            )
         toa_sw_up_clear = (
-            rrtmgp_output_clear["toa_sw_flux_outgoing_2d_xy"][0, 0]
+            rrtmgp_output["toa_sw_flux_outgoing_clearsky_2d_xy"][0, 0]
         )
         toa_lw_up_clear = (
-            rrtmgp_output_clear["toa_lw_flux_outgoing_2d_xy"][0, 0]
+            rrtmgp_output["toa_lw_flux_outgoing_clearsky_2d_xy"][0, 0]
         )
         # Same g-point sum and vertical flip as the all-sky profiles, so
         # the clear-sky and all-sky interfaces line up element-wise.
         (sw_flux_up_clear, sw_flux_down_clear,
          lw_flux_up_clear, lw_flux_down_clear) = _flux_profiles(
-            rrtmgp_output_clear, _reverse_if_needed(icon_state.pressure),
+            rrtmgp_output, _reverse_if_needed(icon_state.pressure),
+            sky="clearsky_",
         )
     else:
         toa_sw_up_clear = jnp.zeros_like(
@@ -1014,15 +1419,38 @@ def radiation_scheme_rrtmgp(
     tendencies, diagnostics = prepare_icon_data(
         rrtmgp_output, icon_state,
         surface_albedo_vis, surface_albedo_nir, surface_emissivity,
+        surface_albedo_vis_dir, surface_albedo_vis_dif,
+        surface_albedo_nir_dir, surface_albedo_nir_dif,
     )
     diagnostics = diagnostics.copy(
         toa_sw_up_clear=toa_sw_up_clear,
         toa_lw_up_clear=toa_lw_up_clear,
+        toa_sw_up_noa=toa_sw_up_noa,
+        toa_lw_up_noa=toa_lw_up_noa,
+        toa_sw_up_clear_noa=toa_sw_up_clear_noa,
+        toa_lw_up_clear_noa=toa_lw_up_clear_noa,
         sw_flux_up_clear=sw_flux_up_clear,
         sw_flux_down_clear=sw_flux_down_clear,
         lw_flux_up_clear=lw_flux_up_clear,
         lw_flux_down_clear=lw_flux_down_clear,
         total_cloud_cover=total_cloud_cover,
+        total_cloud_cover_tau=total_cloud_cover_tau,
+        # The radii THIS call actually used -- its own ``r_eff_liq_um``/
+        # ``r_eff_ice_um`` arguments, TOA-first and never reoriented by
+        # ``prepare_rrtmgp_data`` (that flip is local to that function; see
+        # its docstring) -- so they line up with ``sw_heating``'s ICON
+        # orientation without any further flip. ``prepare_icon_data``
+        # itself cannot fill these (it never receives the radii), hence the
+        # zero placeholder there; populating them here, as
+        # ``radiation_scheme_emulated`` already does for its own call,
+        # keeps every direct caller of this canonical, ICON-signature
+        # function correct -- e.g. ``tools/radiation_emulator/
+        # generate_training_data.py``, which calls it directly rather than
+        # through ``RRTMGPRadiation`` (jax-gcm#1135 review finding: this
+        # function returned zeros here even though the term wrapper's own
+        # final ``RadiationData`` always overwrote them again downstream).
+        r_eff_liq_at_solve=r_eff_liq_um,
+        r_eff_ice_at_solve=r_eff_ice_um,
     )
     return tendencies, diagnostics
 
@@ -1039,12 +1467,16 @@ from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
-    current_cos_zenith,
+    apply_insolation,
+    echam_solve_cos_zenith,
+    solve_solar_geometry,
+    sw_solve_to_transmissivity,
     hold_land_albedo,
     radiation_should_compute,
-    rescale_cached_radiation,
+    surface_optics_bands_for_solve,
     surface_optics_for_solve,
 )
+from jcm.physics.resolution_defaults import check_defaults_grid  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
 
@@ -1056,39 +1488,144 @@ def _column_vector_rrtmgp(value: jnp.ndarray, ncols: int) -> jnp.ndarray:
 
 
 
-def _maybe_chunked_vmap(fn, in_axes):
-    """``jax.vmap`` over columns, optionally in rematerialized column blocks.
+#: Columns per device per scan step that ``column_block="auto"`` uses on CPU
+#: (see :func:`resolve_column_block`).
+CPU_COLUMN_BLOCK = 8
+#: Default of ``RRTMGPRadiation(column_block=...)``.
+DEFAULT_COLUMN_BLOCK = "auto"
 
-    The forward's per-column working set is small, so a single vmap over every
-    column is both fastest and well within memory. The *backward* is a different
-    matter: the reverse pass holds the per-g-point profiles of every column live
-    at once (arrays of ``(ncols, n_gpt, nlev+2)``), so its peak grows linearly
-    with the column count and reaches ~309 GiB at T63L47 -- far past a single 80
-    GiB device -- while T21L47 needs only ~19 GiB.
 
-    Setting ``JCM_RRTMGP_COL_CHUNKS=n`` splits the columns into ``n`` blocks and
-    maps a ``jax.checkpoint``-ed vmap over them, so the backward materializes
-    one block's intermediates at a time and recomputes the rest. Peak falls
-    roughly like ``1/n`` at the cost of one extra forward evaluation of
-    radiation. Unset (the default) reproduces the original single vmap exactly.
+def _check_column_block(column_block):
+    """Validate the static ``column_block`` option; return it unchanged."""
+    if column_block is None or column_block == "auto":
+        return column_block
+    if (isinstance(column_block, bool) or not isinstance(column_block, (int, np.integer))
+            or column_block < 1):
+        raise ValueError(
+            "column_block must be a positive integer, None or 'auto', got "
+            f"{column_block!r}.")
+    return int(column_block)
+
+
+def resolve_column_block(column_block, ncols: int, n_shards: int = 1,
+                         on_cpu: bool = False) -> int | None:
+    """Columns solved per device per scan step, or ``None`` for one vmap.
+
+    ``column_block`` is ``None`` (one vmap over every column), an integer B, or
+    ``"auto"``: B = :data:`CPU_COLUMN_BLOCK` when the columns are on CPU
+    devices (``on_cpu``), ``None`` otherwise -- an accelerator wants the whole
+    batch in one kernel, so the GPU program is the single vmap.
+
+    ``ncols`` is the global column count and ``n_shards`` the number of devices
+    the column axis is split over, so each device holds ``ncols // n_shards``
+    columns (``n_shards`` is taken as 1 if it does not divide ``ncols``). The
+    scan steps tile that per-device count exactly, so B is lowered to the
+    largest divisor of it that is <= B (a prime per-device count, which no
+    block size > 1 divides, therefore gives B = 1: correct, if slow). When the
+    resulting block is the whole per-device count there is nothing to scan and
+    the result is ``None``.
+    """
+    if column_block == "auto":
+        column_block = CPU_COLUMN_BLOCK if on_cpu else None
+    if column_block is None:
+        return None
+    per_device = ncols // n_shards if ncols % n_shards == 0 else ncols
+    block = next(d for d in range(min(int(column_block), per_device), 0, -1)
+                 if per_device % d == 0)
+    return None if block == per_device else block
+
+
+def _split_columns(x, n_shards: int, steps: int):
+    """Lay out a ``(ncols, ...)`` array as scan steps over column blocks.
+
+    ``n_shards == 1``: ``(steps, B, ...)``, step ``i`` holding the contiguous
+    columns ``[i*B, (i+1)*B)``. ``n_shards > 1``: ``(steps, n_shards, B, ...)``,
+    where ``[:, d]`` is the slice of device ``d``'s own contiguous column
+    range. The column axis of a sharded array is split contiguously over the
+    devices, so viewing it as ``(n_shards, steps, B)`` keeps the ``n_shards``
+    axis aligned with the sharding and moving ``steps`` to the front makes
+    every scan step take ``B`` columns from EACH device. Mapping contiguous
+    blocks of the global axis instead would put each block on one device and
+    the scan would run the devices one after another.
+    """
+    if n_shards == 1:
+        return x.reshape(steps, -1, *x.shape[1:])
+    return x.reshape(n_shards, steps, -1, *x.shape[1:]).swapaxes(0, 1)
+
+
+def _merge_columns(x, n_shards: int, ncols: int):
+    """Inverse of :func:`_split_columns` for an array of per-step results."""
+    if n_shards == 1:
+        return x.reshape(ncols, *x.shape[2:])
+    return x.swapaxes(0, 1).reshape(ncols, *x.shape[3:])
+
+
+def _maybe_chunked_vmap(fn, in_axes, *, column_block=None, n_shards: int = 1,
+                        on_cpu: bool = False):
+    """``jax.vmap`` over columns, optionally as a scan over column blocks.
+
+    Three programs, one layout (:func:`_split_columns`):
+
+    * one ``jax.vmap`` over every column;
+    * ``column_block`` (see :func:`resolve_column_block`): a ``lax.map`` whose
+      every step solves a block of columns -- B per device when the column axis
+      is sharded over ``n_shards`` devices. On CPU the solve is bound by cache,
+      not flops, and the working set of a step is ``n_gpt x block x nlev``, so
+      a small block keeps it resident
+      (``docs/source/design/rrtmgp_cpu_performance.md``);
+    * ``JCM_RRTMGP_COL_CHUNKS=n``: ``n`` steps, each a ``jax.checkpoint``-ed
+      block, for the reverse pass's memory (below).
+
+    ``JCM_RRTMGP_COL_CHUNKS`` (n > 1) wins when both are set: it is the explicit
+    memory request, and its guarantee (peak falls like ``1/n``) is a property
+    of the step count it names, which a per-device block size does not fix.
+
+    The forward's per-column working set is small, so on an accelerator a
+    single vmap over every column is both fastest and well within memory. The
+    *backward* is a different matter: the reverse pass holds the per-g-point
+    profiles of every column live at once (arrays of ``(ncols, n_gpt,
+    nlev+2)``), so its peak grows linearly with the column count and reaches
+    hundreds of GiB at T63L47 -- far past a single 80 GiB device -- while
+    T21L47 needs only ~19 GiB. The placement of the gas optics sets the
+    constant: XLA's backward scratch at T63L47 is 334 GiB for
+    ``per_gpt``/1/unrolled, 183 GiB for ``all_gpts``/4/unrolled and 271 GiB for
+    the jcm default ``all_gpts``/64/scanned (18.6, 10.2 and 15.1 MiB per
+    column; ``docs/source/design/rrtmgp_gpu_performance.md``).
+
+    ``JCM_RRTMGP_COL_CHUNKS=n`` splits the columns into ``n`` steps and maps a
+    ``jax.checkpoint``-ed vmap over them, so the backward materializes one
+    block's intermediates at a time and recomputes the rest. Peak falls roughly
+    like ``1/n`` at the cost of one extra forward evaluation of radiation. With
+    a sharded column axis each step still takes its columns from every device,
+    so ``ncols`` must be divisible by ``n_shards * n``. With both unset the
+    result is the original single vmap exactly.
     """
     import os
 
     n_chunks = int(os.environ.get("JCM_RRTMGP_COL_CHUNKS", "0"))
     vmapped = jax.vmap(fn, in_axes=in_axes, out_axes=(0, 0))
-    if n_chunks <= 1:
-        return vmapped
 
     def run(*args):
         # Mapped arguments may be pytrees (the aerosol struct), so split with
         # tree_map rather than assuming an array.
         first = next(a for a, ax in zip(args, in_axes) if ax == 0)
         ncols = jax.tree_util.tree_leaves(first)[0].shape[0]
-        if ncols % n_chunks:
-            raise ValueError(f"{ncols} columns is not divisible by {n_chunks} chunks")
-        size = ncols // n_chunks
+        shards = n_shards if ncols % n_shards == 0 else 1
+        if n_chunks > 1:
+            steps, remat = n_chunks, True
+            if ncols % (shards * steps):
+                raise ValueError(
+                    f"{ncols} columns over {shards} device(s) is not divisible "
+                    f"by {n_chunks} chunks per device")
+        else:
+            block = resolve_column_block(column_block, ncols, shards, on_cpu)
+            if block is None:
+                return vmapped(*args)
+            steps, remat = ncols // (shards * block), False
 
-        split = lambda x: x.reshape(n_chunks, size, *x.shape[1:])  # noqa: E731
+        step = vmapped if shards == 1 else jax.vmap(
+            vmapped, in_axes=in_axes, out_axes=(0, 0))
+        split = functools.partial(_split_columns, n_shards=shards, steps=steps)
         mapped = [
             jax.tree_util.tree_map(split, a) for a, ax in zip(args, in_axes) if ax == 0
         ]
@@ -1099,10 +1636,10 @@ def _maybe_chunked_vmap(fn, in_axes):
             rebuilt, statics = [], list(static)
             for ax in in_axes:
                 rebuilt.append(block.pop(0) if ax == 0 else statics.pop(0))
-            return vmapped(*rebuilt)
+            return step(*rebuilt)
 
-        tend, diag = lax.map(jax.checkpoint(body), tuple(mapped))
-        merge = lambda x: x.reshape(ncols, *x.shape[2:])  # noqa: E731
+        tend, diag = lax.map(jax.checkpoint(body) if remat else body, tuple(mapped))
+        merge = functools.partial(_merge_columns, n_shards=shards, ncols=ncols)
         return jax.tree_util.tree_map(merge, (tend, diag))
 
     return run
@@ -1119,15 +1656,23 @@ from jcm.physics.radiation.aerosol_free import (  # noqa: E402
     update_effect_fraction,
 )
 
-__all__ = ["RRTMGPRadiation"]
+__all__ = ["RRTMGPRadiation", "LW_SOLVERS", "GAS_OPTICS_MODES", "resolve_column_block"]
+
+# The library's longwave transports (``rrtmgp.rte.two_stream.LW_SOLVERS``),
+# listed here so a misspelt name fails at term construction rather than at
+# the first trace.
+LW_SOLVERS = ("two_stream", "noscat")
 
 
 class RRTMGPRadiation(PhysicsTerm):
     """RRTMGP full-spectrum radiation as a composable PhysicsTerm.
 
-    A single ``jax.vmap`` over all columns (like the rest of the physics):
-    the jax-rrtmgp shared-table fix keeps the per-column gas-optics working
-    set tiny (~1.5 GB at T63L47), so the *forward* needs no chunking.
+    A single ``jax.vmap`` over all columns (like the rest of the physics) on
+    an accelerator: the jax-rrtmgp shared-table fix keeps the per-column
+    gas-optics working set tiny (~1.5 GB at T63L47), so the *forward* needs no
+    chunking for memory. On CPU the solve is cache-bound and runs as a scan
+    over small column blocks strided across the mesh devices (``column_block``,
+    default ``"auto"``); see ``docs/source/design/rrtmgp_cpu_performance.md``.
 
     The **reverse pass** is different: it holds per-g-point profiles of every
     column live at once, so its peak memory grows linearly with the column
@@ -1135,9 +1680,12 @@ class RRTMGPRadiation(PhysicsTerm):
     T21L47, ~77 GiB at T31L47, ~171 GiB at T63L47), and XLA's own
     rematerialization pass cannot reduce it. For gradient-based calibration at
     T63L47 set the environment variable ``JCM_RRTMGP_COL_CHUNKS`` (for example
-    to ``8``, bringing the peak under 25 GiB); see ``_maybe_chunked_vmap``.
-    Unset, the code path is exactly this single vmap and forward-only runs are
-    unaffected.
+    to ``8``: the term's backward then peaks at 15 GiB and takes 1.2 s per call
+    with the default placement, 26 GiB and 7.5 s with ``per_gpt``); see
+    ``_maybe_chunked_vmap``. Its blocks are strided across the devices of a
+    sharded column axis, like ``column_block``'s, and it takes precedence over
+    ``column_block``. Unset, the column loop is the one ``column_block``
+    selects and forward-only runs are unaffected.
 
     Reads pressure / height / density from the moist-air diagnostics
     dict, cloud fraction from ``diagnostics["clouds"]`` and
@@ -1154,7 +1702,11 @@ class RRTMGPRadiation(PhysicsTerm):
     as ECHAM's radiation forms them inside ``cloud_optics``. The term
     publishes them as the diagnostic ``clouds.r_eff_liq`` /
     ``clouds.r_eff_ice`` (um, 0 where a phase is absent), which it never
-    reads back.
+    reads back -- UNLESS constructed with ``use_host_effective_radii=True``
+    (jax-gcm#1135), in which case the term reads them from the host's
+    ``clouds.r_eff_liq`` / ``clouds.r_eff_ice`` instead of forming them
+    itself; see :func:`~jcm.physics.radiation.cloud_optics.host_effective_radii`
+    and the constructor docstring.
     """
 
     name: ClassVar[str] = "rrtmgp_radiation"
@@ -1174,6 +1726,14 @@ class RRTMGPRadiation(PhysicsTerm):
         base_seed: int = 0,
         compute_cre: bool = True,
         aerosol_free_interval: int | None = None,
+        use_host_effective_radii: bool = False,
+        *,
+        params_are_defaults: bool = False,
+        lw_solver: str = "two_stream",
+        gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
+        gpt_chunk: int = DEFAULT_GPT_CHUNK,
+        use_scan: bool = DEFAULT_USE_SCAN,
+        column_block: int | str | None = DEFAULT_COLUMN_BLOCK,
     ):
         """Hold the scheme-native :class:`RadiationParameters`.
 
@@ -1183,34 +1743,195 @@ class RRTMGPRadiation(PhysicsTerm):
                 with ``model_step`` and the per-column index, so the
                 same ``base_seed`` always produces the same stochastic
                 sub-columns for a given run — bit-exact reruns.
-            compute_cre: if True (default), do an extra clear-sky
-                RRTMGP call per radiation step and populate
-                ``toa_{sw,lw}_up_clear`` for the cloud radiative
-                effect diagnostic. Set False for the 1× McICA-only
-                cost when CRE isn't needed.
+            compute_cre: if True (default), also take the clear-sky
+                fluxes from the RRTMGP solve (the library solves them inside
+                the all-sky g-point loop, on the shared gas optics) and
+                populate ``toa_{sw,lw}_up_clear`` for the cloud radiative
+                effect diagnostic. Set False to drop that transport when CRE
+                isn't needed.
             aerosol_free_interval: radiation steps between aerosol-free
                 companion solves, producing the AeroCom ``*noa`` fluxes
                 that ERFari is diagnosed from (jax-gcm#583). ``None``
                 (default) means no ``*noa`` fluxes at all; ``1`` is the
-                exact reference, costing ~+64 % runtime because radiation
-                dominates the step; ``N > 1`` runs the companion every Nth
+                exact reference: the twins are solved inside the one
+                radiation call on the shared gas optics, +48 % per
+                call at T63L47 on an A100 (``aerosol_free`` in
+                ``radiation_scheme_rrtmgp``); ``N > 1`` runs the companion every Nth
                 step and holds the aerosol effect in between — a monotonic
                 dial, cheaper and less accurate as N grows. The SIMULATION
-                is bit-identical at every N: only the diagnostic is
-                approximated. N > 1 logs a warning quoting the measured
+                is unchanged to float32 rounding at every N: the fluxes
+                with aerosol come out of a program that also solves the
+                twins, which XLA fuses differently, so they differ from a
+                run without the diagnostic by rounding (3e-4 W/m2 on a
+                shortwave flux of ~500, 1e-7 K/s in the heating, one CPU
+                column), and with N > 1 the companion calls run that
+                program while the others run the plain one. It was
+                bit-identical when the companion was a second solve; a
+                fence does not restore that (XLA's CPU backend drops
+                optimization barriers before fusion), so the diagnostic is
+                a rounding-level perturbation of the trajectory, as any
+                other change of the compiled program is. Only the
+                diagnostic is approximated by N. N > 1 logs a warning quoting the measured
                 error, since the choice is not recoverable from the output
                 files afterwards.
+            use_host_effective_radii: if True, read the droplet / crystal
+                effective radii from the host's ``diagnostics["clouds"]
+                .r_eff_liq`` / ``.r_eff_ice`` (um) instead of forming them
+                from the current state's ``qnc``/``qni`` or ECHAM's
+                prescribed profile (jax-gcm#1135, for jax-les: its liquid
+                radius follows jcm's own
+                ``cloud_utils.eff_liquid_droplet_radius`` +
+                ``breadth_factor`` law from its prescribed/prognostic
+                droplet number, and it has no ice-number tracer to drive
+                the ``qnc``/``qni`` path at all). Default False, matching
+                every prior release's behaviour exactly (bit-identical;
+                see ``rrtmgp_test.py::TestRRTMGPHostEffectiveRadii
+                .test_flag_off_matches_default_behaviour``).
+
+                This is a CONSTRUCTOR flag, not a ``RadiationParameters``
+                field, deliberately: ``RadiationParameters`` is a
+                ``tree_math.struct``, which (unlike ``flax.struct
+                .dataclass``) has no ``pytree_node=False`` mechanism, so a
+                boolean held there would be a genuine pytree leaf that
+                ``jax.jit`` traces into a 0-d array -- exactly the kind of
+                value a Python ``if`` cannot branch on, defeating the point
+                of a trace-time code-path selector (see
+                ``RadiationParameters.defaults_truncation``'s docstring for
+                the same constraint). A plain constructor attribute (this
+                class's existing pattern for ``compute_cre`` and
+                ``aerosol_free_interval``) IS genuinely static: it never
+                becomes a pytree leaf, so ``_compute_full`` branches on it
+                with an ordinary ``if`` with no retrace per call.
+
+                An explicit flag was chosen over silently preferring
+                ``clouds.r_eff_liq``/``r_eff_ice`` whenever they happen to be
+                non-default: every jcm composition that writes them (RRTMGP
+                itself, on the very step before this one) would then feed
+                its own last-published radius back into itself the next
+                solve, silently changing every existing run's results the
+                moment it is composed -- the issue names both forms and
+                rejects the silent one for exactly this reason.
+
+                Fails loudly (``ValueError``, from
+                :func:`~jcm.physics.radiation.cloud_optics.host_effective_radii`)
+                if the host's ``clouds`` diagnostic lacks ``r_eff_liq``/
+                ``r_eff_ice`` entirely, naming the actual remedy (construct
+                with ``use_host_effective_radii=False``, or publish the
+                fields) rather than a bare attribute-access traceback. Since
+                the flag is a static, trace-time selector, this check runs
+                on every ``__call__`` regardless of whether that particular
+                step ends up solving or replaying a cached step
+                (``jax.lax.cond`` traces both branches to build the
+                conditional, and this branch is part of the trace whenever
+                the flag is on) -- it cannot be silently skipped by landing
+                on a cached step. It cannot detect a host that supplies the
+                attributes but never actually fills them: the unfilled
+                ``CloudData.zeros()`` default reads as the table's SMALLEST
+                radius wherever condensate is present (the clamp raises any
+                value at or below the lower bound up to it, 0 included), the
+                most optically potent size, not an inert "cloud-free" one --
+                a documented limit of the structural check, not an oversight
+                (see :func:`~jcm.physics.radiation.cloud_optics.host_effective_radii`'s
+                docstring).
+
+                The radius is clamped to jax-rrtmgp's table range and
+                zeroed where this term's own in-cloud condensate test finds
+                no condensate, exactly the clamp
+                :func:`~jcm.physics.radiation.cloud_optics.echam_cloud_effective_radii`
+                applies to its own radius -- so the two paths are
+                interchangeable from the RRTMGP solve's point of view. The
+                ICE radius law is entirely the host's choice: with no
+                ice-number tracer there is no ECHAM counterpart for jcm to
+                defer to, so this flag does not second-guess it beyond that
+                shared clamp.
+            params_are_defaults: ``True`` when ``params`` are resolution
+                defaults built by ``echam_physics()`` (with or without field
+                overrides) rather than an object the caller supplied
+                directly. Only then does :meth:`cache_coords` warn if they
+                were built for another grid's truncation (#974), the same
+                contract as ``SundqvistCloudFraction``.
+            lw_solver: the longwave transport of the library solve.
+                ``"two_stream"`` (default) is jax-rrtmgp's two-stream solver,
+                which scatters cloud and aerosol. ``"noscat"`` is RTE's
+                absorption-only solver (``lw_solver_noscat_oneangle``: one
+                angle, secant 1/0.6096748751; cloud and aerosol enter through
+                ``tau (1 - ssa)``), which is what ECHAM6's
+                ``mo_lrtm_solver.f90`` does. It also solves the clear-sky
+                (CRE) fluxes. The shortwave is unaffected. Selectable, not the
+                default; see ``docs/source/science/radiation.md``.
+            gas_optics_mode: where jax-rrtmgp evaluates the gas optics:
+                ``"all_gpts"`` (default) for every g-point in one pass ahead of
+                its spectral loop, ``"per_gpt"`` inside the loop. Changes no
+                physics (the fluxes agree to a few float32 ulp, from XLA
+                fusion). Default and ``gpt_chunk`` are the measured A100
+                optimum; see the comment above :data:`GAS_OPTICS_MODES`.
+            gpt_chunk: g-points the library solves per spectral-loop iteration
+                (default 64, with ``use_scan``; 1 is the library's own default
+                and the smallest memory footprint, 16 the largest chunk that
+                adds no memory). Changes no physics.
+            use_scan: run the vertical recurrences as a ``lax.scan`` over
+                levels (default True) instead of an unrolled chain. Together
+                with ``gpt_chunk=64`` and ``gas_optics_mode="all_gpts"`` this is
+                the measured A100 optimum, at +4 GiB (T63L47) / +8 GiB (T63L95)
+                of peak memory over the unrolled form; the fluxes differ by at
+                most 12 float32 ulp. Set ``gas_optics_mode="per_gpt"`` on a TPU
+                that uses the matmul table lookup: ``all_gpts`` always gathers.
+            column_block: how the column solve is laid out; static, not a
+                pytree leaf, and no effect on the physics (fluxes agree with
+                the single vmap to float32 rounding). An integer B solves B
+                columns per device per scan step (a ``lax.map`` over blocks);
+                ``None`` is one ``jax.vmap`` over all columns; ``"auto"``
+                (default) is B = 8 when the columns are on CPU devices and
+                ``None`` otherwise. "On CPU" is decided from the platform of
+                the model's SPMD mesh devices when one is configured
+                (:meth:`cache_coords`), else from ``jax.default_backend()``
+                at trace time. On a GPU the single vmap is the A100-tuned
+                program, unchanged. On CPU a solve is bound by cache, not
+                flops: a step's working set is ``n_gpt x columns x nlev``, and
+                8 columns keeps it resident (T63L47, 24 CPU devices: 9.1 s ->
+                2.8 s per call; ``docs/source/design/rrtmgp_cpu_performance.md``).
+                With a sharded column axis the blocks are strided across the
+                devices -- each step takes B columns from every device, so the
+                devices run concurrently; contiguous blocks would serialise
+                them. The per-device column count must be tiled exactly, so B
+                is lowered to its largest divisor <= B, and when that is the
+                whole per-device count the single vmap is used. The
+                ``JCM_RRTMGP_COL_CHUNKS`` memory option (see
+                :func:`_maybe_chunked_vmap`) takes precedence when set.
+                ``gpt_chunk`` keeps its A100-tuned default of 64 on CPU: 16 is
+                faster in a standalone solve but not measurably so in the model.
 
         """
+        self._params_user_supplied = (params is not None
+                                      and not params_are_defaults)
         self.params = nnx.Param(params or RadiationParameters.default())
         # Plain Python attributes — these are static-at-trace-time so
         # the McICA seeding and the CRE branch fold into ``__call__``
         # without an extra pytree leaf.
         self._base_seed = int(base_seed)
         self._compute_cre = bool(compute_cre)
-        # AeroCom *noa fluxes (jax-gcm#583): a SECOND full radiation solve
-        # per compute step with the aerosol optics zeroed. Radiation
-        # dominates the step, so this is opt-in only.
+        self._use_host_effective_radii = bool(use_host_effective_radii)
+        if lw_solver not in LW_SOLVERS:
+            raise ValueError(
+                f"lw_solver must be one of {LW_SOLVERS}, got {lw_solver!r}.")
+        # Static at trace time: it selects which transport program is built.
+        self._lw_solver = lw_solver
+        # Static at trace time, like ``lw_solver``: both select the program.
+        self._gas_optics_mode = gas_optics_mode
+        self._gpt_chunk, self._use_scan = _check_library_options(
+            gas_optics_mode, gpt_chunk, use_scan)
+        # Static at trace time: it selects the column-loop program. The mesh
+        # facts are filled by ``cache_coords`` (no mesh: one shard, and the
+        # platform is read from the default backend when the solve is traced).
+        self._column_block = _check_column_block(column_block)
+        self._column_shards = 1
+        self._column_platform = None
+        # AeroCom *noa fluxes (jax-gcm#583): the aerosol-free twin of each
+        # problem, solved inside the one radiation call on the shared gas
+        # optics (``radiation_scheme_rrtmgp(aerosol_free=True)``). What is
+        # repeated per g-point is the cell properties and the transport, so
+        # the companion costs a fraction of a solve rather than a second one;
+        # still a cost, so opt-in only.
         #
         # Validated through the shared helper, which echam_physics() also
         # calls so any other radiation scheme is held to the same contract
@@ -1227,7 +1948,8 @@ class RRTMGPRadiation(PhysicsTerm):
         # and holding the flux would leave rsut and rsutnoa sampling
         # different step sets (measured at 0.04-0.14 W/m2 for a 2x
         # subsample — the same size as the error this is meant to avoid).
-        # Cost is (1 + 1/N) solves instead of 2.
+        # The twins' transports are paid on every Nth call instead of
+        # every call.
         self._aerosol_free_interval = interval or 1
         self._coords_cached = False
         # Eagerly create the global RRTMGP instance now (loads netCDF
@@ -1238,6 +1960,39 @@ class RRTMGPRadiation(PhysicsTerm):
         # ``output_averages=True`` runs in particular. Doing it here
         # forces a single non-traced load at term-construction time.
         _ensure_rrtmgp()
+
+    def legacy_surface_albedo_quartet(self, vis, nir):
+        """``(vis, nir)`` -> the ``(vis_dir, vis_dif, nir_dir, nir_dif)`` this
+        backend would have published for them before the quartet existed
+        (jax-gcm#959's checkpoint migration, ``jcm.checkpoint._DERIVED_ON_MIGRATION``).
+
+        RRTMGP's pre-#959 surface boundary condition was a single BLENDED
+        broadband scalar (``0.46*vis + 0.54*nir``, ``sfc_alb_broadband`` in
+        :func:`radiation_scheme_rrtmgp`) applied to every band, both beams
+        -- a fresh solve's own ``RadiationData`` still publishes exactly
+        this blend in all four quartet slots whenever the per-band
+        direct/diffuse inputs are omitted (see that function's ``None``
+        fallback). A migrated pre-#959 carry must match, not grey two-
+        stream's raw-pair convention (Codex review on PR #1125).
+        """
+        blend = 0.46 * vis + 0.54 * nir
+        return blend, blend, blend, blend
+
+    def legacy_effective_radii_at_solve(self, r_eff_liq, r_eff_ice):
+        """``(r_eff_liq, r_eff_ice)`` -> the ``(r_eff_liq_at_solve,
+        r_eff_ice_at_solve)`` this backend would have held before the
+        dedicated carry existed (jax-gcm#1135's checkpoint migration,
+        ``jcm.checkpoint._DERIVED_ON_MIGRATION``).
+
+        Before this PR added the dedicated carry, RRTMGP's ``__call__``
+        already published the solve's own radius onto
+        ``clouds.r_eff_liq``/``r_eff_ice`` every step (the
+        ``clouds_in.copy(...)`` below) and no host-radii door existed to
+        write anything else there, so the two were always identical -- the
+        checkpoint migration this method serves simply carries that
+        identity forward rather than guessing a formula.
+        """
+        return r_eff_liq, r_eff_ice
 
     def withheld_output_keys(self) -> tuple[str, ...]:
         """Hide the ``*noa`` and clear-sky slots when no companion solve runs.
@@ -1264,6 +2019,17 @@ class RRTMGPRadiation(PhysicsTerm):
         )
         if not self._compute_cre:
             withheld += tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS)
+            if self._aerosol_free:
+                # The clear-sky twins exist only with ``compute_cre``: with
+                # the companion on but the clear sky off, those two slots
+                # and their carried fractions are the same zero
+                # placeholders, and a published zero rsutcsnoa reads as a
+                # clear-sky ERFari equal to the whole clear-sky flux.
+                withheld += tuple(
+                    f"radiation.{k}_noa" for k in NOA_KEYS if "clear" in k
+                ) + tuple(
+                    f"radiation.noa_frac_{k}" for k in NOA_KEYS if "clear" in k
+                )
             # __call__ mirrors the clear-sky TOA fluxes onto the clouds
             # sub-struct for CRE diagnostics; without the companion solve
             # those mirrors are the same zero placeholders (the all-sky
@@ -1272,11 +2038,28 @@ class RRTMGPRadiation(PhysicsTerm):
         return withheld
 
     def cache_coords(self, coords) -> None:
-        """Cache per-column lat/lon (deg) for the radiation scheme."""
+        """Cache per-column lat/lon (deg); check the parameters' grid.
+
+        The grid check (#974) mirrors ``SundqvistCloudFraction.cache_coords``:
+        only warns, and only for resolution-defaulted parameters (never one
+        the caller supplied directly), since the parameter pytree was fixed
+        at construction and is not re-resolved here.
+        """
         lat, lon = column_lat_lon(coords.horizontal)
         self._lats = nnx.Variable(lat * 180.0 / jnp.pi)
         self._lons = nnx.Variable(lon * 180.0 / jnp.pi)
         self._coords_cached = True
+        # The mesh the column axis is sharded over decides how the column
+        # blocks are strided (``_maybe_chunked_vmap``) and whether "auto"
+        # means CPU. Imported here: composable_physics imports this module's
+        # package at load time.
+        from jcm.physics.composable_physics import flattened_column_shard_count
+        self._column_shards, self._column_platform = (
+            flattened_column_shard_count(coords))
+        if not self._params_user_supplied:
+            check_defaults_grid(
+                type(self).__name__,
+                self.params.get_value().defaults_truncation, coords)
 
     def __call__(
         self,
@@ -1288,23 +2071,29 @@ class RRTMGPRadiation(PhysicsTerm):
         """Compute or reuse cached RRTMGP heating rates."""
         params = self.params.get_value()
         radiation = diagnostics["radiation"]
-        # Solar geometry now. Needed on both branches: the compute branch
-        # stamps it so a later cached step knows which sun the fluxes were
-        # solved under, and the cached branch rescales the shortwave by the
-        # ratio of the two (#671). Pure trig, so it is cheap every step.
-        mu0_now = current_cos_zenith(
-            forcing.solar, self._lons.get_value(), self._lats.get_value(),
-        ).astype(radiation.cos_zenith.dtype)
-
         clouds_in = diagnostics["clouds"]
         # The published radii are a DIAGNOSTIC of the radius this term
         # radiated with, never an input to it: a solve forms its radii from
-        # the current state (``radiation_effective_radii``), and a cached
+        # the current state (``radiation_effective_radii``, or the host's
+        # own law under ``use_host_effective_radii=True``), and a cached
         # step reports the radii of the solve its heating came from.
-        radii_carried = (clouds_in.r_eff_liq, clouds_in.r_eff_ice)
+        #
+        # That "last solve" value is read from ``radiation.r_eff_liq_at_solve``
+        # / ``r_eff_ice_at_solve`` (the radiation term's OWN carry,
+        # ``RadiationData``), never from ``clouds_in.r_eff_liq``/``r_eff_ice``:
+        # in host mode a host writes a FRESH, un-clamped radius to the
+        # ``clouds`` diagnostic every step as ITS OWN input channel,
+        # regardless of whether this term is solving this step, so that
+        # field no longer reliably holds "the last solve's own output"
+        # (jax-gcm#1135 review finding). In the default (non-host) path
+        # these two sources always agree -- nothing else ever writes
+        # ``clouds.r_eff_liq``/``r_eff_ice`` -- so reading the dedicated
+        # carry instead changes nothing there; it only fixes host mode.
+        radii_at_last_solve = (radiation.r_eff_liq_at_solve,
+                               radiation.r_eff_ice_at_solve)
 
         def _compute():
-            tend, rad, radii = self._compute_full(
+            _tend, rad, radii = self._compute_full(
                 state, diagnostics, forcing, terrain, params)
             # Pin the compute branch to the carry's leaf dtypes: under
             # jax_enable_x64 (e.g. driving this scheme from a float64
@@ -1313,26 +2102,29 @@ class RRTMGPRadiation(PhysicsTerm):
             # to float64, and the two lax.cond branches would fail to
             # type-check against the uniform-dtype cached carry.
             rad = jax.tree.map(lambda n, o: n.astype(o.dtype), rad, radiation)
-            tend = jax.tree.map(
-                lambda t: t.astype(state.temperature.dtype), tend)
             radii = jax.tree.map(
                 lambda n, o: n.reshape(o.shape).astype(o.dtype),
-                radii, radii_carried)
-            return tend, rad, radii
+                radii, radii_at_last_solve)
+            return rad, radii
 
         def _use_cached():
-            rad = rescale_cached_radiation(radiation, mu0_now)
-            tend = cached_radiation_tendency(rad, state.temperature.shape)
-            # Same dtype pin as _compute: under x64 the cached heating ->
-            # tendency arithmetic can promote through float64 scalars.
-            tend = jax.tree.map(
-                lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad, radii_carried
+            return radiation, radii_at_last_solve
 
         solved = radiation_should_compute(diagnostics, params)
-        tendency, new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
+        new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
             solved, _compute, _use_cached,
         )
+        # The shortwave of EVERY step, solve or replay, is the carried
+        # transmissivity times the sun of this step (ECHAM ``zi0 * trsol``),
+        # and the heating the temperature tendency applies is rebuilt from it
+        # the same way -- one contract, no per-branch tendency.
+        new_radiation = apply_insolation(
+            new_radiation, forcing.solar, self._lons.get_value(),
+            self._lats.get_value(), params.solar_constant)
+        tendency = cached_radiation_tendency(
+            new_radiation, state.temperature.shape)
+        tendency = jax.tree.map(
+            lambda t: t.astype(state.temperature.dtype), tendency)
         # Advance the radiation-local step counter on every call (both
         # compute and cached paths). The McICA seed in ``_compute_full``
         # folds this counter in for per-(step, column) reproducibility,
@@ -1365,7 +2157,11 @@ class RRTMGPRadiation(PhysicsTerm):
 
         latitudes = self._lats.get_value()
         longitudes = self._lons.get_value()
-        solar = forcing.solar
+        # The solve is made at the middle of the radiation interval, as ECHAM
+        # does (``solve_solar_geometry``); every step's own sun is re-applied
+        # to the transmissivities it yields (``apply_insolation``).
+        solar = solve_solar_geometry(
+            forcing.solar, diagnostics["_dt_seconds"], params)
         # Scalar radiation step counter + per-column index drive the
         # McICA seed via ``mcica.column_key`` inside
         # ``radiation_scheme_rrtmgp``. The counter lives on the
@@ -1377,14 +2173,32 @@ class RRTMGPRadiation(PhysicsTerm):
         cloud_water, cloud_ice, cloud_fraction = radiation_cloud_fields(
             state, diagnostics,
         )
+        # The cover BEFORE ``radiation_cloud_fields``'s condensate mask, for
+        # the mask's derivative only (#973) -- the SAME diagnosed cover
+        # ``radiation_cloud_fields`` itself reads to build the masked
+        # ``cloud_fraction`` above.
+        cloud_fraction_raw = diagnostics["clouds"].cloud_fraction
         # Droplet and crystal effective radii from THIS step's state, formed
         # the way ECHAM's radiation forms them inside its own call
         # (mo_cloud_optics.f90::cloud_optics); see radiation_effective_radii
-        # for the inputs and their time levels.
-        r_eff_liq_um, r_eff_ice_um = radiation_effective_radii(
-            state, diagnostics, forcing, terrain,
-            cloud_water, cloud_ice, cloud_fraction, params.cld_frac_min,
-        )
+        # for the inputs and their time levels. ``self._use_host_effective_radii``
+        # is a plain constructor attribute (never a pytree leaf, see its
+        # docstring), so this ``if`` is a genuine trace-time branch, not a
+        # per-call dispatch: a host (jax-les, jax-gcm#1135) supplies its own
+        # radii on ``diagnostics["clouds"]`` instead of letting jcm form them
+        # from qnc/qni or the prescribed profile.
+        if self._use_host_effective_radii:
+            r_eff_liq_um, r_eff_ice_um = host_effective_radii(
+                diagnostics["clouds"],
+                cloud_water, cloud_ice, cloud_fraction, params.cld_frac_min,
+                cloud_fraction_raw=cloud_fraction_raw,
+            )
+        else:
+            r_eff_liq_um, r_eff_ice_um = radiation_effective_radii(
+                state, diagnostics, forcing, terrain,
+                cloud_water, cloud_ice, cloud_fraction, params.cld_frac_min,
+                cloud_fraction_raw=cloud_fraction_raw,
+            )
 
         # Greenhouse-gas sourcing (all converted ppmv -> mole fraction here):
         #   O3, CH4  <- the chemistry diagnostic (O3 analytic/climatology; CH4
@@ -1402,6 +2216,13 @@ class RRTMGPRadiation(PhysicsTerm):
         )
         (surface_albedo_vis_col, surface_albedo_nir_col,
          surface_emissivity_col) = surface_optics_for_solve(diagnostics, ncols)
+        # Per-band direct/diffuse quartet (jax-gcm#959): falls back to the
+        # broadband pair in both slots when the boundary-condition term
+        # published no quartet (see ``surface_optics_bands_for_solve``).
+        (surface_albedo_vis_dir_col, surface_albedo_vis_dif_col,
+         surface_albedo_nir_dir_col,
+         surface_albedo_nir_dif_col) = surface_optics_bands_for_solve(
+            diagnostics, ncols)
 
         aerosol_in = diagnostics["aerosol"]
         # Per-SW-band fields are ``(n_bnd_sw, nlev, ncols)`` from MACv2-SP;
@@ -1455,10 +2276,15 @@ class RRTMGPRadiation(PhysicsTerm):
             cloud_water=lev_to_col(cloud_water),
             cloud_ice=lev_to_col(cloud_ice),
             cloud_fraction=lev_to_col(cloud_fraction),
+            cloud_fraction_raw=lev_to_col(cloud_fraction_raw),
             surface_temperature=surface_temperature_col,
             surface_albedo_vis=surface_albedo_vis_col,
             surface_albedo_nir=surface_albedo_nir_col,
             surface_emissivity=surface_emissivity_col,
+            surface_albedo_vis_dir=surface_albedo_vis_dir_col,
+            surface_albedo_vis_dif=surface_albedo_vis_dif_col,
+            surface_albedo_nir_dir=surface_albedo_nir_dir_col,
+            surface_albedo_nir_dif=surface_albedo_nir_dif_col,
             latitudes=latitudes,
             longitudes=longitudes,
             aerosol=aerosol_col,
@@ -1477,8 +2303,17 @@ class RRTMGPRadiation(PhysicsTerm):
         # We tried a day/night split here (solve the dark ~half LW-only, skip
         # its shortwave) — bit-identical but ~25 % slower at T63L47, because
         # after the gas-optics gather fix the SW solve is no longer the
-        # bottleneck and the gather/scatter outweighs the skipped work. A plain
-        # single vmap over all columns is fastest.
+        # bottleneck and the gather/scatter outweighs the skipped work. All
+        # columns are solved together, as one vmap or in column blocks
+        # (``column_block``).
+        # ``lw_solver``, ``gas_optics_mode``, ``gpt_chunk`` and ``use_scan`` are bound by
+        # keyword rather than threaded through ``_in_axes``: they are static
+        # configuration, not mapped operands.
+        scheme = functools.partial(
+            radiation_scheme_rrtmgp, lw_solver=self._lw_solver,
+            gas_optics_mode=self._gas_optics_mode,
+            gpt_chunk=self._gpt_chunk, use_scan=self._use_scan,
+            solve_geometry=True)
         _in_axes = (
             0, 0, 0, 0, 0,
             0, 0, 0, 0,
@@ -1489,10 +2324,10 @@ class RRTMGPRadiation(PhysicsTerm):
             0, 0, 0, 0,          # ozone_vmr, co2_vmr, ch4_vmr, n2o_vmr
             0, 0,                # r_eff_liq_um, r_eff_ice_um
             0,                   # convection_type
+            0,                   # cloud_fraction_raw
+            0, 0, 0, 0,          # per-band albedo dir/dif quartet (#959)
         )
-        tendencies_vmapped, diagnostics_vmapped = _maybe_chunked_vmap(
-            radiation_scheme_rrtmgp, _in_axes,
-        )(
+        solve_args = (
             cols["temperature"], cols["specific_humidity"],
             cols["pressure_full"], cols["pressure_half"],
             cols["layer_thickness"], cols["air_density"],
@@ -1505,7 +2340,41 @@ class RRTMGPRadiation(PhysicsTerm):
             cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"], cols["n2o_vmr"],
             cols["r_eff_liq_um"], cols["r_eff_ice_um"],
             cols["convection_type"],
+            cols["cloud_fraction_raw"],
+            cols["surface_albedo_vis_dir"], cols["surface_albedo_vis_dif"],
+            cols["surface_albedo_nir_dir"], cols["surface_albedo_nir_dif"],
         )
+
+        def _solve(aerosol_free: bool):
+            """Run the column solve, with or without the aerosol-free twins."""
+            return _maybe_chunked_vmap(
+                functools.partial(scheme, aerosol_free=aerosol_free), _in_axes,
+                column_block=self._column_block, n_shards=self._column_shards,
+                on_cpu=(self._column_platform or jax.default_backend()) == "cpu",
+            )(*solve_args)
+
+        # AeroCom *noa fluxes (jax-gcm#583) come out of the same solve as the
+        # all-sky ones (``radiation_scheme_rrtmgp(aerosol_free=True)``: the
+        # library solves the aerosol-free twins in the same g-point loop).
+        # With a companion interval N > 1 the solve WITH the twins runs on
+        # every Nth radiation call and the plain solve on the others, under a
+        # ``lax.cond`` so only one runs per step; both programs are compiled.
+        # Between companions the aerosol EFFECT is held as a fraction of the
+        # all-sky flux (see below).
+        if self._aerosol_free and self._aerosol_free_interval > 1:
+            dt_s = diagnostics["_dt_seconds"]
+            spc = jnp.where(
+                params.radiation_interval > 0,
+                jnp.int32(jnp.round(params.radiation_interval / dt_s)),
+                jnp.int32(1),
+            )
+            rad_call = model_step // spc
+            is_companion = jnp.mod(rad_call, self._aerosol_free_interval) == 0
+            tendencies_vmapped, diagnostics_vmapped = jax.lax.cond(
+                is_companion, lambda: _solve(True), lambda: _solve(False),
+            )
+        else:
+            tendencies_vmapped, diagnostics_vmapped = _solve(self._aerosol_free)
 
         _fresh_toa = dict(
             toa_sw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_sw_up, ncols),
@@ -1516,71 +2385,22 @@ class RRTMGPRadiation(PhysicsTerm):
                 diagnostics_vmapped.toa_lw_up_clear, ncols),
         )
 
-        # Aerosol-free companion solve (jax-gcm#583): identical inputs but
-        # with the aerosol OPTICS zeroed — cdnc_factor and Nccn are kept so
-        # the cloud field is bit-identical and the difference to the all-sky
-        # fluxes is the instantaneous aerosol radiative effect (ERFari
-        # numerator), not an aerosol-cloud response. Zeroing the optical
-        # depths alone suffices (extinction scales everything), but ssa/asy
-        # are zeroed too so no path reads an unweighted property.
         if self._aerosol_free:
             all_sky = _fresh_toa
-            aerosol_noa = cols["aerosol"].copy(
-                aod_profile=jnp.zeros_like(aerosol_for_vmap.aod_profile),
-                ssa_profile=jnp.zeros_like(aerosol_for_vmap.ssa_profile),
-                asy_profile=jnp.zeros_like(aerosol_for_vmap.asy_profile),
-                aod_total=jnp.zeros_like(aerosol_for_vmap.aod_total),
-                aod_anthropogenic=jnp.zeros_like(
-                    aerosol_for_vmap.aod_anthropogenic),
-                aod_background=jnp.zeros_like(aerosol_for_vmap.aod_background),
-                aod_sw_per_band=jnp.zeros_like(aerosol_for_vmap.aod_sw_per_band),
-                ssa_sw_per_band=jnp.zeros_like(aerosol_for_vmap.ssa_sw_per_band),
-                asy_sw_per_band=jnp.zeros_like(aerosol_for_vmap.asy_sw_per_band),
-                aod_lw_per_band=jnp.zeros_like(aerosol_for_vmap.aod_lw_per_band),
-                ssa_lw_per_band=jnp.zeros_like(aerosol_for_vmap.ssa_lw_per_band),
-                asy_lw_per_band=jnp.zeros_like(aerosol_for_vmap.asy_lw_per_band),
-            )
-            def _solve_aerosol_free():
-                _, dnoa = _maybe_chunked_vmap(
-                    radiation_scheme_rrtmgp, _in_axes,
-                )(
-                    cols["temperature"], cols["specific_humidity"],
-                    cols["pressure_full"], cols["pressure_half"],
-                    cols["layer_thickness"], cols["air_density"],
-                    cols["cloud_water"], cols["cloud_ice"],
-                    cols["cloud_fraction"],
-                    cols["surface_temperature"], cols["surface_albedo_vis"],
-                    cols["surface_albedo_nir"], cols["surface_emissivity"],
-                    solar, cols["latitudes"], cols["longitudes"],
-                    params, aerosol_noa, cols["column_indices"],
-                    model_step, base_seed, compute_cre,
-                    cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
-                    cols["n2o_vmr"],
-                    cols["r_eff_liq_um"], cols["r_eff_ice_um"],
-                    cols["convection_type"],
-                )
-                return (
-                    _column_vector_rrtmgp(dnoa.toa_sw_up, ncols),
-                    _column_vector_rrtmgp(dnoa.toa_lw_up, ncols),
-                    _column_vector_rrtmgp(dnoa.toa_sw_up_clear, ncols),
-                    _column_vector_rrtmgp(dnoa.toa_lw_up_clear, ncols),
-                )
-
             _KEYS = NOA_KEYS
             _FRAC_FIELDS = tuple(f"noa_frac_{k}" for k in _KEYS)
+            # The twins of this call, from the solve above: the solved values
+            # on a companion step, zeros on a held one.
+            solved = tuple(
+                _column_vector_rrtmgp(getattr(diagnostics_vmapped, f"{k}_noa"),
+                                      ncols)
+                for k in _KEYS)
 
             if self._aerosol_free_interval > 1:
-                # Pay for the companion only every Nth radiation step. Between
-                # companions carry the aerosol EFFECT forward and apply it to
-                # the FRESH all-sky flux, so the pair always refers to the
-                # same state and rsut/rsutnoa never sample different step sets.
-                dt_s = diagnostics["_dt_seconds"]
-                spc = jnp.where(
-                    params.radiation_interval > 0,
-                    jnp.int32(jnp.round(params.radiation_interval / dt_s)),
-                    jnp.int32(1),
-                )
-                rad_call = model_step // spc
+                # Between companions carry the aerosol EFFECT forward and apply
+                # it to the FRESH all-sky flux, so the pair always refers to
+                # the same state and rsut/rsutnoa never sample different step
+                # sets.
                 fresh = tuple(_fresh_toa[k] for k in _KEYS)
                 prev_frac = tuple(getattr(diagnostics["radiation"], f)
                                   for f in _FRAC_FIELDS)
@@ -1594,15 +2414,15 @@ class RRTMGPRadiation(PhysicsTerm):
                 # flux it stands in for, and each fraction to the dtype of
                 # its carried slot.
                 def _companion():
-                    """Solve, and refresh the stored effect fraction."""
-                    vals = _solve_aerosol_free()
+                    """Take the solved twins; refresh the stored fraction."""
                     fracs = [
                         update_effect_fraction(_fresh_toa[k], noa_v,
                                                prev_frac[i]
                                                ).astype(prev_frac[i].dtype)
-                        for i, (k, noa_v) in enumerate(zip(_KEYS, vals))
+                        for i, (k, noa_v) in enumerate(zip(_KEYS, solved))
                     ]
-                    vals = tuple(v.astype(f.dtype) for v, f in zip(vals, fresh))
+                    vals = tuple(v.astype(f.dtype)
+                                 for v, f in zip(solved, fresh))
                     return vals, tuple(fracs)
 
                 def _held():
@@ -1619,13 +2439,11 @@ class RRTMGPRadiation(PhysicsTerm):
                             prev_frac)
 
                 noa_vals, new_frac = jax.lax.cond(
-                    jnp.mod(rad_call, self._aerosol_free_interval) == 0,
-                    _companion,
-                    _held,
+                    is_companion, _companion, _held,
                 )
                 frac_out = dict(zip(_FRAC_FIELDS, new_frac))
             else:
-                noa_vals = _solve_aerosol_free()
+                noa_vals = solved
                 # Only `paired` carries a fraction; every other mode
                 # solves fresh, so leave the slots at zero.
                 frac_out = {f: jnp.zeros((ncols,))
@@ -1658,6 +2476,18 @@ class RRTMGPRadiation(PhysicsTerm):
             surface_emissivity=_column_vector_rrtmgp(
                 diagnostics_vmapped.surface_emissivity, ncols,
             ),
+            surface_albedo_vis_dir=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_albedo_vis_dir, ncols,
+            ),
+            surface_albedo_vis_dif=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_albedo_vis_dif, ncols,
+            ),
+            surface_albedo_nir_dir=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_albedo_nir_dir, ncols,
+            ),
+            surface_albedo_nir_dif=_column_vector_rrtmgp(
+                diagnostics_vmapped.surface_albedo_nir_dif, ncols,
+            ),
             sw_flux_up=diagnostics_vmapped.sw_flux_up.T,
             sw_flux_down=diagnostics_vmapped.sw_flux_down.T,
             sw_heating_rate=tendencies_vmapped.shortwave_heating.T,
@@ -1687,6 +2517,20 @@ class RRTMGPRadiation(PhysicsTerm):
             total_cloud_cover=_column_vector_rrtmgp(
                 diagnostics_vmapped.total_cloud_cover, ncols,
             ),
+            total_cloud_cover_tau=_column_vector_rrtmgp(
+                diagnostics_vmapped.total_cloud_cover_tau, ncols,
+            ),
+            # The radii THIS solve actually used (fresh from the state, or
+            # the host, depending on ``use_host_effective_radii`` --
+            # ``r_eff_liq_um``/``r_eff_ice_um`` are already the exact
+            # values ``__call__`` publishes as ``clouds.r_eff_liq``/
+            # ``r_eff_ice`` on this solve). Stored on the carry so a LATER
+            # cached step can report them without re-reading
+            # ``clouds.r_eff_liq``/``r_eff_ice`` -- a host may be writing
+            # fresh, unclamped values there every step regardless of
+            # whether this term is solving (jax-gcm#1135 review finding).
+            r_eff_liq_at_solve=r_eff_liq_um,
+            r_eff_ice_at_solve=r_eff_ice_um,
             # Placeholder — the enclosing ``__call__`` overwrites
             # ``step`` after the compute-vs-cache cond.
             step=jnp.int32(0),
@@ -1699,4 +2543,5 @@ class RRTMGPRadiation(PhysicsTerm):
             specific_humidity=jnp.zeros((nlev, ncols)),
             tracers={},
         )
-        return tendency, rad_out, (r_eff_liq_um, r_eff_ice_um)
+        return tendency, sw_solve_to_transmissivity(rad_out), (
+            r_eff_liq_um, r_eff_ice_um)

@@ -33,9 +33,11 @@ semi-Lagrangian, automatically and without error.
 
 ## Why SPEEDY runs Eulerian
 
-- **SL buys SPEEDY nothing.** SPEEDY declares no extra tracers, and
-  ``specific_humidity`` is a *modal* field under both schemes (it takes part in
-  the implicit q↔Tᵥ coupling), so the ringing SL removes never arises. SL's
+- **SL buys SPEEDY nothing.** SPEEDY declares no extra tracers, so the
+  ringing SL removes never arises, and its humidity stays spectral on the
+  Eulerian core, as in the SPEEDY model it was tuned in (the gridpoint
+  humidity of ``dycore.nodal_humidity`` is a semi-Lagrangian arrangement,
+  ECHAM's, and does not apply to the Eulerian core). SL's
   other benefit, a longer stable timestep, is not used: SPEEDY's step is set by
   its explicit physics ({doc}`speedy_variable_levels`).
 - **Heritage.** SPEEDY was formulated and tuned on an Eulerian spectral

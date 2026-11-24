@@ -52,12 +52,27 @@ fields with `as_initial_condition=True`, which resets both clocks to the new
 experiment origin. Unstamped files still require the explicit unit assertion
 below. The `init=from_state` importer selects this initialization mode.
 
+## The TTE-TKE interface rows (schema 4)
+
+Schema 4 moved the TTE-TKE carry's `vertical_diffusion.tke`,
+`thv_variance`, `km` and `kh` from full levels onto ECHAM's interface rows
+(#996, {doc}`tte_tke_closure`): row `k` is the interface below full level
+`k`, where an earlier file's row `k` held the interface above it. Loading a
+file of schema 3 or earlier (stamped, or unstamped with `unstamped_scale`)
+moves those rows up one and gives the new surface row what the scheme writes
+there (0 for `km`/`kh`, the lowest interior interface's value for the variance
+and, until the scheme's first step replaces it with the surface layer's, for
+TKE); the INFO log
+names the fields moved. The migration keys on the field names the file
+carries, so it applies to any composition with a TTE-TKE term and to nothing
+else.
+
 ## What migrates automatically
 
 **A changed physics-carry field set.** A field the destination model
 carries but the file does not have takes the freshly bootstrapped model's
 value for it (`PhysicsTerm.initial_carry_state`, i.e. `.zeros()` for most
-slots, or the term's documented seed such as TTE-TKE's turbulence floor).
+slots, or the term's documented seed such as TTE-TKE's cold-start zero).
 A field the file has but this model no longer carries is dropped. Both are
 logged at INFO on the `jcm.checkpoint` logger, naming the fields, so a
 resume is auditable.
@@ -72,6 +87,40 @@ losing the restart. The land albedo of the last radiation solve
 held shortwave through) is such a cache field: a file without it restores it
 as 0, "unset", and the land uses the current step's albedo until the next
 solve, at most one radiation interval.
+
+**Except where a field is a deterministic function of another one the file
+does carry.** A field the destination model declares in
+`checkpoint._DERIVED_ON_MIGRATION` is computed from its registered source
+field instead of taking the generic fresh-carry seed, whenever that source
+field was itself genuinely restored (not also seeded). The class-default
+seed is wrong for exactly these fields: it reflects the term's documented
+*initial* value, not a function of whatever the restored sibling field
+evolved to. Two worked examples, both logged separately from a plain seed
+(naming the derived field):
+
+- `mod_radcon.emis2` (speedy_shortwave/speedy_longwave's `-expm1`-based
+  longwave layer emissivity, #571): a file from before it existed restores
+  the evolved `tau2` it was introduced to pair with, and the migration
+  derives `emis2 = 1 - tau2` from that restored value rather than seeding
+  the class default ("fully emissive"), which would otherwise mismatch
+  `tau2` for the one or two steps before the next radiation sub-step
+  recomputes both together.
+- The per-band direct/diffuse surface albedo quartet
+  (`radiation.surface_albedo_{vis,nir}_{dir,dif}`, jax-gcm#959): a file from
+  before the quartet existed carries only the broadband
+  `surface_albedo_vis`/`_nir` pair, but which value each radiation backend's
+  pre-quartet solve actually used it for is backend-specific — RRTMGP and
+  the NN emulator blended both into one scalar for every band, while grey
+  two-stream solved its two SW bands with the raw pair — so **the rule a
+  backend-specific migration must follow is to ask the resumed model's own
+  live term, never bake a fixed formula into `checkpoint.py`**: `fn` calls
+  the destination model's composed radiation term (found generically by
+  `category == "radiation"`, never a backend class name) through one method
+  every radiation `PhysicsTerm` implements,
+  `legacy_surface_albedo_quartet(vis, nir)`, and takes the matching element
+  of what it returns. A resumed run's held radiation diagnostic therefore
+  reads exactly as whichever backend is now composed would have published
+  it before the quartet existed, until the next solve publishes a real one.
 
 **Except where a slot is prognostic.** A term whose carry slot holds the
 only copy of a physical quantity declares it in
@@ -91,6 +140,32 @@ gauge's lagged expectation is zero on a first step by construction.
 The dycore state gets the same name matching but no filling or dropping:
 its leaves are the prognostic state, which is never invented. A name
 difference there means a different composition or backend and is refused.
+
+**The humidity representation.** The Dinosaur semi-Lagrangian core stores
+`tracers.specific_humidity` on the grid (`dycore.nodal_humidity`, the
+default) or as spectral coefficients (`nodal_humidity: false`, and every
+state written before the gridpoint default). The two have different shapes,
+so the loader identifies which one a file holds by shape and converts it to
+the destination model's representation
+(`jcm.checkpoint._migrate_humidity_representation`), logged at INFO, in both
+directions and for stamped and unstamped files alike:
+
+* spectral → grid: `to_nodal`, clipped at 0. The spectral field rings
+  slightly negative in the driest air, values the physics never saw
+  (`verify_state` clips them), so the result is exactly the gridpoint
+  humidity the donor's physics would have read next, and the carried copies
+  of it (`_post_physics_state`, `_prev_step.specific_humidity`) stay
+  consistent with it and are restored as they are.
+* grid → spectral: `to_modal`, which changes the gridpoint values by what the
+  truncation cannot hold. Those carried copies would then read that
+  difference as one step of dynamics tendency, so the loader marks them
+  "no previous step" (`_post_physics_state.valid = 0`, `_prev_step` humidity
+  zero), which their consumers treat exactly as on the first step of a run.
+
+No schema bump marks the change: the representation is recorded by the
+array's shape, so an older jcm refuses a gridpoint-humidity file with its
+ordinary shape error rather than misreading it, and a spectral-humidity file
+stays readable everywhere.
 
 ## What is refused
 

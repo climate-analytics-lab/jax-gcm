@@ -31,7 +31,12 @@ class OpticsIntegrationTest(unittest.TestCase):
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
-        coords = get_coords(np.linspace(0, 1, 21), spectral_truncation=21)
+        # T21 is the lowest spectral truncation get_coords accepts; 3 sigma
+        # levels (vs. the original 20) is a vertical-resolution choice the
+        # optics-wiring invariant below does not depend on and measurably
+        # shrinks the RRTMGP gas-optics compile (confirmed: aod_550 is still
+        # comfortably non-zero, ~8e-9, after the same 6 steps).
+        coords = get_coords(np.linspace(0, 1, 4), spectral_truncation=21)
         model = Model(
             coords=coords, time_step=30,
             terrain=TerrainData.aquaplanet(coords),

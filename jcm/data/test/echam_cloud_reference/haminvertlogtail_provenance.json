@@ -1,0 +1,23 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routine": "mo_ham_tools.f90::ham_m7_invertlogtail (325-419)",
+  "compiled_unmodified_source_md5": {
+   "mo_ham_tools.f90": "945bdd8d59fdda02b5db3302a3c842e5"
+  },
+  "extraction": "verbatim via sed line range into mo_ham_tools_wrap.f90 (own fresh module header/footer; mo_kind.f90/mo_math_constants.f90/mo_ham_m7ctl.f90/mo_ham_streams.f90 are declaration-only stubs, NOT copied from ECHAM)"
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -ffp-contract=off -fimplicit-none",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "path": "/scr/dwatsonparris/ham-m7/w2/nuc/harness/fortran_harness/echam_hamnuc",
+  "commit": "HEAD",
+  "uncommitted_changes": true,
+  "repository": "private scratch harness (fortran_harness/echam_hamnuc), not pushed"
+ },
+ "checks": {
+  "O0_vs_O2_max_abs": 0.0,
+  "n_cases": 33
+ }
+}

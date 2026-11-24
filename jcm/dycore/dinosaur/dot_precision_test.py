@@ -62,11 +62,32 @@ class ApplyWorkaroundTest(unittest.TestCase):
             self.assertEqual(jax_numpy_utils.FLOAT32_DOT_ALGORITHM, chosen)
             self.assertEqual(spherical_harmonic.FAST_TRANSFORM_DOT_ALGORITHM, chosen)
 
+    def test_none_transform_default_defers_to_the_float32_override(self):
+        # dinosaur >= 1.5.1 ships FAST_TRANSFORM_DOT_ALGORITHM = None: the
+        # transforms then resolve through FLOAT32_DOT_ALGORITHM on GPU and to
+        # HIGHEST elsewhere, so there is nothing to replace, and on an affected
+        # jaxlib the float32 override is what makes the transforms HIGHEST.
+        with mock.patch.object(jax_numpy_utils, "FLOAT32_DOT_ALGORITHM", X6), \
+                mock.patch.object(spherical_harmonic, "FAST_TRANSFORM_DOT_ALGORITHM", None):
+            changed = dot_precision.apply_dot_precision_workaround("0.11.1")
+            self.assertEqual(changed, {"float32": True, "fast_transform": False})
+            self.assertIsNone(spherical_harmonic.FAST_TRANSFORM_DOT_ALGORITHM)
+            self.assertEqual(dot_precision.effective_transform_dot_algorithm(), HIGHEST)
+            # dinosaur's own resolution agrees with the mirror on this backend.
+            x = jnp.ones((2, 2), jnp.float32)
+            resolved = jax_numpy_utils.resolve_dot_precision(
+                None, x, x, float32_algorithm=spherical_harmonic.FAST_TRANSFORM_DOT_ALGORITHM)
+            self.assertEqual(resolved, dot_precision.effective_transform_dot_algorithm())
+
     def test_applied_on_import(self):
-        # jcm imports jcm.dycore.dinosaur, which applies the workaround.
-        self.assertEqual(spherical_harmonic.FAST_TRANSFORM_DOT_ALGORITHM, HIGHEST)
+        # jcm imports jcm.dycore.dinosaur, which applies the workaround. What
+        # matters is the algorithm the transforms actually resolve to, whichever
+        # default this dinosaur release ships (X3 in 1.5.0, None since 1.5.1).
         if dot_precision.jaxlib_is_affected():
             self.assertEqual(jax_numpy_utils.FLOAT32_DOT_ALGORITHM, HIGHEST)
+            self.assertEqual(dot_precision.effective_transform_dot_algorithm(), HIGHEST)
+        else:
+            self.assertIn(dot_precision.effective_transform_dot_algorithm(), (HIGHEST, X6))
 
 
 @unittest.skipUnless(jax.default_backend() == "gpu", "the miscompile is GPU-only")

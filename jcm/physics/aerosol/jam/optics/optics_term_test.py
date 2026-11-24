@@ -666,6 +666,33 @@ class OpticsDiagnosticsTest(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(out["ssa440aer"]), 1.0)
         np.testing.assert_allclose(np.asarray(out["ang4487aer"]), 0.0)
 
+    def test_clean_column_gradient_is_finite_not_nan(self):
+        """#971's scan flagged ``ssa440aer``/``ang4487aer``/``ang550865aer``/
+        ``ec355aer`` (all ``x / jnp.maximum(y, _TINY)`` with both x and y
+        built from the same aerosol population): at this exact clean-column
+        state only the VALUE was checked above. Probed here with a full
+        per-element Jacobian (not a single combined scale, which an earlier
+        investigation found can hide a real asymmetry by construction) --
+        confirmed finite both eagerly and under ``jax.jit``; every per-mode
+        gate keeps numerator and denominator proportional at this point, so
+        the analytic derivative is genuinely 0/finite here, not masked.
+        """
+        state, diagnostics, band, _, _ = _setup()
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        aer0 = diagnostics["_jam_state"]
+        zero_mass = jnp.zeros_like(aer0.mass)
+        empty_tracers = {k: jnp.zeros_like(v) for k, v in state.tracers.items()}
+        keys = ("ssa440aer", "ang4487aer", "ang550865aer", "aerindex", "ec355aer")
+
+        def loss(number):
+            d = {**diagnostics, "_jam_state": aer0.copy(mass=zero_mass, number=number)}
+            _, out = term(state.copy(tracers=empty_tracers), d, None, None)
+            return jnp.stack([jnp.sum(out[k]) for k in keys])
+
+        jac = jax.jit(jax.jacrev(loss))(jnp.zeros_like(aer0.number))
+        self.assertTrue(np.all(np.isfinite(np.asarray(jac))))
+
     def test_extinction_profile_shape_and_units(self):
         """ec355aer is a 3-D extinction COEFFICIENT [m-1] = layer tau / dz,
         so integrating it back over dz must return the column AOD at 355.

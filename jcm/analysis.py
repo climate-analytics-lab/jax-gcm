@@ -43,8 +43,13 @@ from jcm.physics.clouds.cloud_overlap import max_random_cover
 
 #: Dimensions that are never horizontal. The horizontal dims of a field are
 #: everything *else* — this is the convention promoted from
-#: ``tools/jam_burden_report.py::_horizontal_dims``.
-_NON_HORIZONTAL = ("time", "level", "level_i", "mode")
+#: ``tools/jam_burden_report.py::_horizontal_dims``. ``plev`` (#258,
+#: :func:`to_pressure_levels`) is the pressure-surface counterpart of
+#: ``level``/``level_i`` and belongs here for the same reason: without it,
+#: ``global_mean`` of a ``plev``-dimensioned field would average over
+#: pressure as well as latitude/longitude, silently collapsing a vertical
+#: profile into a single number instead of reducing only the horizontal.
+_NON_HORIZONTAL = ("time", "level", "level_i", "plev", "mode")
 
 
 def _horizontal_dims(da: xr.DataArray) -> list[str]:
@@ -179,6 +184,413 @@ def column_integral(q: xr.DataArray, dp: xr.DataArray) -> xr.DataArray:
 def column_burden(ds: xr.Dataset, var: str) -> xr.DataArray:
     """Column burden [kg/m²] of ``ds[var]`` using the file's own layer Δp."""
     return column_integral(ds[var], layer_pressure_thickness(ds))
+
+
+def _interp_log_pressure(field, ln_pressure, target_ln_pressure, xp=np):
+    """Batched, broadcasting log-pressure linear interpolation (#258).
+
+    ``field``/``ln_pressure`` carry the vertical axis **last**
+    (``(..., nlev)``, any leading batch shape -- the convention
+    :func:`xarray.apply_ufunc` hands a gufunc with ``vectorize=False``, which
+    is how :func:`to_pressure_levels` calls this); ``target_ln_pressure`` is
+    ``(nplev,)``. Returns ``(..., nplev)``: ``field`` linearly interpolated in
+    ln(pressure) onto ``target_ln_pressure``, ``NaN`` wherever a target lies
+    outside that column's own ``[min, max]`` ln(pressure) range (below the
+    surface, or above the model lid -- extrapolating past the ends of the
+    actual profile is not a physically meaningful "pressure-level field"
+    value).
+
+    No assumption is made about ``ln_pressure``'s storage order (ascending,
+    the model's own surface-first descending, or anything else): it is
+    sorted internally, per column, before interpolating, so the result does
+    not depend on it.
+
+    ``xp`` is the array module -- plain ``numpy`` for the saved-output path
+    below, or ``jax.numpy`` (inside ``jax.jit``/``jax.grad``, no Python
+    loop over the batch shape) for a differentiable use. This is the same
+    array-module-agnostic pattern :func:`total_cloud_cover` uses for
+    :func:`jcm.physics.clouds.cloud_overlap.max_random_cover`.
+
+    ``ln_pressure`` is promoted to ``target_ln_pressure``'s dtype before any
+    comparison, whatever ``field``'s/``ln_pressure``'s own storage dtype:
+    ``target_ln_pressure`` is always float64 (it comes from the exact,
+    user-given ``levels_hpa``), and comparing it against a float32
+    ``ln_pressure`` (jcm output is written float32 for most fields) rounds
+    differently enough that an exact endpoint -- a target pressure equal to
+    the column's own top or bottom level -- can land a hair outside the
+    float32 range and get masked as NaN that a float64 comparison would not.
+    The returned array is cast back to ``field``'s own dtype, so this
+    function is dtype-preserving overall.
+
+    ``field`` and ``ln_pressure`` need not already share a shape -- a
+    time-varying field against a time-invariant ``pressure_full`` (no
+    ``time`` dim) is exactly the case ``xarray.apply_ufunc`` hands this
+    with ``vectorize=False``: it broadcasts dimension *labels* but passes
+    the underlying arrays as it finds them, not pre-broadcast to a common
+    shape, and ``take_along_axis`` below requires equal ranks. They are
+    broadcast to a common shape here first.
+    """
+    out_dtype = field.dtype
+    ln_pressure = ln_pressure.astype(target_ln_pressure.dtype)
+    field, ln_pressure = xp.broadcast_arrays(field, ln_pressure)
+    nlev = ln_pressure.shape[-1]
+    order = xp.argsort(ln_pressure, axis=-1)
+    ln_p = xp.take_along_axis(ln_pressure, order, axis=-1)
+    values = xp.take_along_axis(field, order, axis=-1)
+
+    # `idx_hi[..., j]` counts how many levels' ln(pressure) are <= target j,
+    # i.e. the index just past target j's lower bracket; clipped so the
+    # bracket [i_lo, i_lo+1] always exists, including for a target outside
+    # the column's range (masked separately below rather than by clipping
+    # the index, which would otherwise silently extrapolate flat).
+    cmp = ln_p[..., None, :] <= target_ln_pressure[:, None]   # (..., nplev, nlev)
+    idx_hi = xp.sum(cmp, axis=-1)
+    i_lo = xp.clip(idx_hi - 1, 0, nlev - 2)
+    i_hi = i_lo + 1
+
+    p_lo = xp.take_along_axis(ln_p, i_lo, axis=-1)
+    p_hi = xp.take_along_axis(ln_p, i_hi, axis=-1)
+    f_lo = xp.take_along_axis(values, i_lo, axis=-1)
+    f_hi = xp.take_along_axis(values, i_hi, axis=-1)
+    fraction = (target_ln_pressure - p_lo) / (p_hi - p_lo)
+    interpolated = f_lo + fraction * (f_hi - f_lo)
+
+    p_min = ln_p[..., :1]
+    p_max = ln_p[..., -1:]
+    out_of_range = (target_ln_pressure < p_min) | (target_ln_pressure > p_max)
+    nan = xp.asarray(np.nan, dtype=interpolated.dtype)
+    return xp.where(out_of_range, nan, interpolated).astype(out_dtype)
+
+
+def _nearest_level_value(field, ln_pressure, target_ln_pressure, fill_value,
+                         xp=np):
+    """Nearest-model-level (in ln(pressure)) selection for categorical fields.
+
+    :func:`to_pressure_levels` calls this instead of
+    :func:`_interp_log_pressure` for an integer or boolean ``field``: a
+    categorical diagnostic (a flag, a land/ocean/ice tile index) has no
+    meaningful value "40% of the way between" two model levels the way a
+    continuous physical field does, so it is NOT interpolated -- it takes
+    the value of whichever model level's ln(pressure) is closest to each
+    target, exactly, with no blending. Same batching convention, same
+    column-order independence and the same out-of-range test as
+    :func:`_interp_log_pressure` (below the surface or above the model
+    lid); there, that range masks the result ``NaN``, which neither an
+    int nor a bool array can hold, so it is ``fill_value`` here instead
+    (:func:`to_pressure_levels` documents the mask in the variable's
+    attrs, since the array itself cannot carry it).
+
+    ``field``/``ln_pressure`` are broadcast to a common shape first, for
+    the same reason (and the same ``xarray.apply_ufunc`` calling
+    convention) as :func:`_interp_log_pressure`.
+    """
+    field, ln_pressure = xp.broadcast_arrays(field, ln_pressure)
+    order = xp.argsort(ln_pressure, axis=-1)
+    ln_p = xp.take_along_axis(ln_pressure, order, axis=-1)
+    values = xp.take_along_axis(field, order, axis=-1)
+
+    distance = xp.abs(ln_p[..., None, :] - target_ln_pressure[:, None])
+    nearest = xp.argmin(distance, axis=-1)
+    selected = xp.take_along_axis(values, nearest, axis=-1)
+
+    p_min = ln_p[..., :1]
+    p_max = ln_p[..., -1:]
+    out_of_range = (target_ln_pressure < p_min) | (target_ln_pressure > p_max)
+    fill = xp.asarray(fill_value, dtype=selected.dtype)
+    return xp.where(out_of_range, fill, selected)
+
+
+def validate_pressure_levels(levels_hpa) -> np.ndarray:
+    """Validate ``run.pressure_levels``/``to_pressure_levels``'s ``levels_hpa``.
+
+    Shared by every entry point that takes this list -- :func:`to_pressure_levels`
+    itself, and the config-time check ``jcm.runners`` makes before any
+    integration starts -- so a typo (a negative or repeated pressure, a
+    stray ``NaN``) is refused the same way and at the earliest point
+    regardless of which door it came in by.
+
+    Returns the list as a 1-D float64 array (hPa, in the given order --
+    never re-sorted or de-duplicated for the caller).
+
+    Raises
+    ------
+    ValueError
+        If ``levels_hpa`` is not a non-empty 1-D sequence, contains a
+        non-finite value (``NaN``/``inf``), a non-positive pressure (a
+        pressure is a magnitude; log-pressure interpolation is undefined
+        for a vacuum or negative one), or repeats a pressure (an
+        unambiguous caller error -- the repeat could only ever read back
+        the same column values twice).
+
+    """
+    levels_hpa = np.asarray(levels_hpa, dtype=np.float64)
+    if levels_hpa.ndim != 1 or levels_hpa.size == 0:
+        raise ValueError(
+            "levels_hpa must be a non-empty 1-D list of pressures in hPa; "
+            f"got shape {levels_hpa.shape}.")
+    if not np.all(np.isfinite(levels_hpa)):
+        raise ValueError(
+            "levels_hpa must be finite (no NaN/inf); got "
+            f"{levels_hpa.tolist()!r}.")
+    if np.any(levels_hpa <= 0):
+        raise ValueError(
+            "levels_hpa must be positive pressures in hPa; got "
+            f"{levels_hpa.tolist()!r}.")
+    if np.unique(levels_hpa).size != levels_hpa.size:
+        raise ValueError(
+            "levels_hpa must not repeat a pressure; got "
+            f"{levels_hpa.tolist()!r}.")
+    return levels_hpa
+
+
+#: ``level``-dimensioned variables that describe the *sigma* grid itself
+#: rather than a physical field sampled on it -- interpolating them onto
+#: ``plev`` would be meaningless (``pressure_full`` would just read back
+#: close to the target pressures it was interpolated against) or actively
+#: wrong (``pressure_thickness`` is a sigma-layer thickness, not a
+#: per-pressure-level quantity). Left as they were, describing the sigma
+#: grid :func:`to_pressure_levels` interpolated *from*. Height on pressure
+#: surfaces (``height_full``, e.g. "Z500") is a standard, useful diagnostic
+#: and is deliberately *not* in this set -- it gets interpolated like any
+#: other field.
+_SIGMA_GRID_VARS = frozenset({"pressure_full", "pressure_thickness"})
+
+
+def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
+    """Interpolate every ``level``-dimensioned field onto pressure surfaces.
+
+    Log-pressure linear interpolation (:func:`_interp_log_pressure`) from the
+    model's own ``pressure_full`` [Pa] -- which varies with both column and
+    saved time, so it is read fresh per time/column rather than assumed
+    static -- onto the fixed list ``levels_hpa`` [hPa]. A point whose target
+    pressure falls below that column's surface or above the model lid is
+    ``NaN``; both ends are masked, not only the surface, because
+    extrapolating past either end of the actual profile would not describe a
+    real pressure-level field (#258 asks for sub-surface masking; masking
+    above the lid too is the same reasoning applied consistently -- see the
+    PR description for the tradeoff).
+
+    An integer or boolean ``level``-dimensioned field -- a categorical
+    diagnostic such as a surface-tile index or a convective-type flag, the
+    same class ``ModelPredictions.to_xarray`` already excludes from
+    interval-mean output because it has no defined mean -- is likewise not
+    linearly interpolated: it takes the value of whichever model level's
+    ln(pressure) is closest to the target (:func:`_nearest_level_value`),
+    with its dtype preserved. An out-of-range cell there is filled rather
+    than ``NaN``, which neither dtype can hold: ``False`` for a boolean
+    field, ``-1`` for a signed integer one, or that dtype's maximum
+    representable value for an UNSIGNED integer one (``-1`` is not
+    representable there; NumPy 2 raises rather than silently wrapping it).
+    The variable's ``comment`` attribute states the exact value used.
+
+    This is a pure function of ``ds`` -- the option that applies it at save
+    time (``run.pressure_levels``, see :ref:`monthly-means-cli`'s neighbour
+    in :doc:`running_at_scale`) calls this same function on the dataset about
+    to be written, so a saved run and a later call on its netCDF agree
+    exactly. Sigma (``level``) output is untouched by calling this: it
+    returns a new :class:`xarray.Dataset` built from ``ds``, the same
+    pattern as every other function in this module.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Must carry ``pressure_full`` [Pa] on a ``level`` dimension of size
+        >= 2 (the model's layer pressures, surface-first per
+        ``docs/source/design/output_vertical_conventions.md`` -- but see
+        "No assumption" above, the actual order does not matter here). A
+        single level has nothing to interpolate *between*: jcm never
+        configures the dycore or any physics package with one, and this
+        function does not treat it as a degenerate, always-matching case.
+    levels_hpa : sequence of float
+        Target pressures in hPa, in whatever order the caller wants them to
+        appear on the new ``plev`` axis (not re-sorted). Converted to Pa
+        before interpolating, so the new ``plev`` coordinate is in the same
+        units as ``pressure_full`` -- not hPa -- matching every other
+        pressure variable already in a jcm output file.
+
+    Returns
+    -------
+    xarray.Dataset
+        Every variable that had a ``level`` dimension now has ``plev``
+        instead (others, including ``pressure_full``/``pressure_half``
+        themselves, pass through unchanged — they describe the *sigma*
+        grid this was interpolated from, not the new one). A floating
+        variable is linearly interpolated -- exactly reproducing its
+        source value at a target pressure that matches one of the
+        column's own levels, for any ``ds`` with >= 2 levels -- and an
+        integer/boolean one takes its nearest model level instead, with
+        an out-of-range cell filled rather than ``NaN`` and a ``comment``
+        attribute saying so. ``plev`` carries CF attributes
+        (``standard_name="air_pressure"``, ``units="Pa"``,
+        ``positive="down"``, ``axis="Z"``).
+
+    Raises
+    ------
+    ValueError
+        If ``ds`` has no ``pressure_full``, ``pressure_full`` has no
+        ``level`` dimension, that dimension has fewer than 2 levels, or
+        ``levels_hpa`` fails :func:`validate_pressure_levels`.
+
+    """
+    if "pressure_full" not in ds:
+        raise ValueError(
+            "to_pressure_levels needs ds['pressure_full'] [Pa] -- the "
+            "model's own column pressures -- to interpolate from.")
+    if "level" not in ds["pressure_full"].dims:
+        raise ValueError(
+            "ds['pressure_full'] has no 'level' dimension to interpolate "
+            f"over (dims: {ds['pressure_full'].dims}).")
+    # jcm has no one-level configuration (the dycore and every physics
+    # package need at least two levels), and interpolating FROM one source
+    # level is undefined, not merely degenerate: with a single level,
+    # _interp_log_pressure's i_lo/i_hi bracket both gather that same level
+    # (there is no second one to bracket with), so p_hi - p_lo is zero and
+    # even an exactly-matching target divides 0/0 to NaN instead of
+    # returning it (GitHub Codex review finding). Reject loudly here,
+    # before either kernel runs, rather than let that play out as a
+    # silent NaN.
+    nlev = ds.sizes.get("level", 0)
+    if nlev < 2:
+        raise ValueError(
+            "to_pressure_levels needs at least 2 model levels on "
+            f"ds['pressure_full'] to interpolate between; got {nlev}.")
+    levels_hpa = validate_pressure_levels(levels_hpa)
+    target_pa = levels_hpa * 100.0
+    target_ln_pa = np.log(target_pa)
+
+    # float64, BEFORE the log -- jcm writes most level fields
+    # (``pressure_full`` included) float32, and ``np.log`` of a float32
+    # array rounds to float32 precision at the point it is taken;
+    # promoting the already-rounded result afterwards (as
+    # ``_interp_log_pressure`` still does, for a caller that hands it a
+    # float32 ``ln_pressure`` directly) cannot recover precision already
+    # lost. Comparing that rounded value against the float64 target below
+    # can otherwise mask an exact profile endpoint as a hair out of range.
+    #
+    # How that cast is done depends on what is backing ``pressure_full``:
+    #
+    # - A plain NumPy or **Dask** array: ``.astype(np.float64)`` is exact
+    #   and, for Dask, stays LAZY -- the cast becomes one more graph node,
+    #   not a trigger to materialise the whole array. A saved run opened
+    #   with ``xr.open_mfdataset(...)`` must stay lazy through this
+    #   conversion the same way it does through ``total_cloud_cover``.
+    # - A live **JAX** array -- the call this option makes right before
+    #   ``ds.to_netcdf(...)`` (``run.pressure_levels``) sees exactly that,
+    #   ``predictions.to_xarray()`` not having gone through a save/load
+    #   round trip -- is different: with the process-wide
+    #   ``jax_enable_x64`` default (off throughout jcm), JAX's own
+    #   ``astype`` silently keeps it float32, so the precision is lost
+    #   regardless. ``.values`` forces a host NumPy copy first (unlike
+    #   Dask, a JAX array has no useful "lazy" state to lose by doing so,
+    #   and this is exactly the device-to-host transfer ``ds.to_netcdf``
+    #   needs in a moment anyway), and NumPy's own ``astype`` on that real
+    #   host array is unrestricted.
+    import jax
+
+    pressure_full = ds["pressure_full"]
+    if isinstance(pressure_full.data, jax.Array):
+        pressure_full = pressure_full.copy(
+            data=np.asarray(pressure_full.values, dtype=np.float64))
+        ln_pressure_full = np.log(pressure_full)
+    else:
+        ln_pressure_full = np.log(pressure_full.astype(np.float64))
+    nplev = target_pa.size
+
+    def _interp(field_values, ln_p_values):
+        return _interp_log_pressure(field_values, ln_p_values, target_ln_pa)
+
+    data_vars = {}
+    for name, var in ds.data_vars.items():
+        if "level" not in var.dims or name in _SIGMA_GRID_VARS:
+            data_vars[name] = var
+            continue
+        # Categorical (int/bool) diagnostics -- a land/ocean/ice tile
+        # index, a convective-type flag -- are kept in instantaneous
+        # output precisely because they have no defined mean
+        # (``ModelPredictions.to_xarray``'s ``omitted_interval_mean_
+        # variables``); the same is true of a *blend* of two levels, so
+        # these take the nearest model level instead of being linearly
+        # interpolated (:func:`_nearest_level_value`), and an
+        # out-of-range cell -- which ``_interp_log_pressure`` marks NaN --
+        # is filled with ``fill_value`` (neither dtype can hold NaN),
+        # documented on the variable rather than carried as a separate
+        # mask array.
+        if var.dtype.kind in "iub":
+            # -1 is not representable in an UNSIGNED dtype (jcm's own
+            # land/ocean/ice tile indices and bit-flag diagnostics are
+            # typically uint8/uint32): NumPy 2 raises OverflowError
+            # casting it rather than silently wrapping, so the sentinel
+            # has to be chosen per dtype, not just per kind.
+            if var.dtype.kind == "b":
+                fill_value = False
+            elif var.dtype.kind == "u":
+                fill_value = np.iinfo(var.dtype).max
+            else:
+                fill_value = -1
+
+            def _nearest(field_values, ln_p_values, fill_value=fill_value):
+                return _nearest_level_value(
+                    field_values, ln_p_values, target_ln_pa, fill_value)
+
+            kernel, extra_attrs = _nearest, {
+                "comment": (
+                    "Categorical field: value of the nearest model level "
+                    "in ln(pressure), not interpolated. Cells below the "
+                    f"surface or above the model lid are filled with "
+                    f"{fill_value!r}.")}
+        else:
+            kernel, extra_attrs = _interp, {}
+        # ``dask="parallelized"`` (plus the output's new chunk size, which
+        # ``apply_ufunc`` cannot infer since ``plev`` replaces ``level``
+        # with a different length): a saved run opened lazily, e.g.
+        # ``xr.open_mfdataset(...)`` as the release-validation gate does for
+        # ``total_cloud_cover``, converts without first loading every
+        # chunk into memory -- both kernels run per dask block exactly as
+        # they do on a plain NumPy array, since a block IS one.
+        interpolated = xr.apply_ufunc(
+            kernel, var, ln_pressure_full,
+            input_core_dims=[["level"], ["level"]],
+            output_core_dims=[["plev"]],
+            exclude_dims={"level"},
+            dask="parallelized",
+            dask_gufunc_kwargs={"output_sizes": {"plev": nplev}},
+            output_dtypes=[var.dtype],
+        )
+        # ``apply_ufunc`` always appends ``output_core_dims`` LAST
+        # (broadcast dims first, core dims after), so a field whose
+        # vertical axis was not already trailing -- jcm's own
+        # ``(time, level, lon, lat)`` serialized layout -- comes back
+        # reordered to e.g. ``(time, lon, lat, plev)``. Put ``plev`` back
+        # where ``level`` was: every consumer of a jcm output file (a
+        # positional ``.values`` read, a netCDF writer/reader that is not
+        # dimension-name-aware) relies on the vertical axis staying put,
+        # same as every other ``level``-dimensioned variable in the file.
+        #
+        # ``var``'s own dims (``level`` mapped to ``plev``) may not be
+        # every dim ``interpolated`` now has: ``pressure_full`` broadcasting
+        # a dim ``var`` never had (e.g. a time-invariant field against a
+        # time-varying column pressure) introduces it into the result too.
+        # Those are listed first, in whatever order ``apply_ufunc`` already
+        # put them in -- there is no "original position" in ``var`` to put
+        # them back into -- followed by ``var``'s own dims in its own order.
+        mapped_var_dims = tuple(
+            "plev" if d == "level" else d for d in var.dims)
+        extra_dims = tuple(
+            d for d in interpolated.dims if d not in mapped_var_dims)
+        interpolated = interpolated.transpose(*extra_dims, *mapped_var_dims)
+        interpolated.attrs = {**dict(var.attrs), **extra_attrs}
+        data_vars[name] = interpolated
+
+    out = xr.Dataset(data_vars, attrs=dict(ds.attrs))
+    out = out.assign_coords(plev=("plev", target_pa))
+    out["plev"].attrs = {
+        "standard_name": "air_pressure",
+        "long_name": "pressure",
+        "units": "Pa",
+        "positive": "down",
+        "axis": "Z",
+    }
+    return out
 
 
 def total_cloud_cover(cloud_fraction: xr.DataArray,

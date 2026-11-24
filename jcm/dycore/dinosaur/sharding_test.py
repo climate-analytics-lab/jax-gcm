@@ -28,7 +28,7 @@ import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
 
-def _run_speedy_temperature(mesh, days=0.25):
+def _run_speedy_temperature(mesh, days=0.25, layers=8):
     """Run a short T31 SPEEDY aquaplanet and return the saved temperature field."""
     from jcm.model import Model
     from jcm.physics.speedy.speedy_coords import get_speedy_coords
@@ -36,7 +36,7 @@ def _run_speedy_temperature(mesh, days=0.25):
     from jcm.terrain import TerrainData
     from jcm.forcing import ForcingData
 
-    coords = get_speedy_coords(layers=8, spectral_truncation=31, spmd_mesh=mesh)
+    coords = get_speedy_coords(layers=layers, spectral_truncation=31, spmd_mesh=mesh)
     model = Model(
         coords=coords,
         terrain=TerrainData.aquaplanet(coords),
@@ -74,6 +74,34 @@ class DinosaurShardingRunTest(unittest.TestCase):
         rel = np.nanmax(np.abs(t_one - t_many)) / (np.nanmax(np.abs(t_one)) + 1e-12)
         self.assertLess(float(rel), 1e-4, f"sharded vs single-device rel diff {rel:.2e}")
 
+    def _assert_level_mesh_matches_single_device(self, layers):
+        n = jax.device_count()
+        t_one = _run_speedy_temperature((1, 1, 1), layers=layers)
+        t_many = _run_speedy_temperature((1, 1, n), layers=layers)
+        self.assertTrue(np.isfinite(t_many).all(), "sharded run produced NaN/Inf")
+        self.assertEqual(t_one.shape, t_many.shape)
+        rel = np.nanmax(np.abs(t_one - t_many)) / (np.nanmax(np.abs(t_one)) + 1e-12)
+        self.assertLess(float(rel), 1e-4, f"level mesh vs single-device rel diff {rel:.2e}")
+
+    def test_level_mesh_matches_single_device(self):
+        # (1, 1, n): the dycore splits levels, the physics splits longitude.
+        # 8 levels divide over 2 devices, so the state itself is level-sharded.
+        self._assert_level_mesh_matches_single_device(layers=8)
+
+    def test_level_mesh_with_indivisible_level_count(self):
+        # 7 levels do not divide over 2 devices (as ECHAM's 47 never do):
+        # get_coords leaves the state's level axis whole and only the
+        # transforms run level blocks per device.
+        if jax.device_count() != 2:
+            self.skipTest("written for the 2-device subprocess run")
+        from jax.sharding import PartitionSpec
+
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+        coords = get_speedy_coords(layers=7, spectral_truncation=31, spmd_mesh=(1, 1, 2))
+        self.assertEqual(coords.dycore_partition_spec, PartitionSpec(None, "x", "y"))
+        self._assert_level_mesh_matches_single_device(layers=7)
+
 
 class MultiDeviceSubprocessTest(unittest.TestCase):
     """Drive the full-model run on 2 CPU devices in a fresh interpreter.
@@ -87,8 +115,8 @@ class MultiDeviceSubprocessTest(unittest.TestCase):
     def test_full_model_on_two_cpu_devices(self):
         repo_root = Path(__file__).resolve().parents[3]
         env = dict(os.environ)
-        # Serialised CPU collectives match the documented multi-CPU recipe and
-        # keep complex graphs from over-subscribing the CPU thread rendezvous.
+        # The scheduler flag is the one configure_host_device_count appends;
+        # the rendezvous abort itself is handled by get_coords.
         env["XLA_FLAGS"] = (
             "--xla_force_host_platform_device_count=2 "
             "--xla_cpu_enable_concurrency_optimized_scheduler=false"

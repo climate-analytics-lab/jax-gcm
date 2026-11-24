@@ -219,11 +219,12 @@ class PysesHydraConfigTest(unittest.TestCase):
         """The ma-ne30 configuration presets compose and build on pySES.
 
         echam-jam's TiedtkeConvection declares an ``omega`` requirement
-        whenever the mid-level trigger is on (its default); pySES exposes
-        no omega provider (#698), so with the trigger on Model construction
-        raises. Both configuration YAMLs set ``physics.cu_lmfmid=false`` — the
-        launch blocker tracked in #715 — so the composed physics declares no
-        omega requirement and the Model builds. Uses a test-size grid; the
+        whenever the mid-level trigger is on (its default); pySES can now
+        supply omega (jax-gcm#698), but these two presets still set
+        ``physics.cu_lmfmid=false`` deliberately, pending the ne30
+        production campaign's own stability/climate-impact validation of
+        running ``cubasmc`` at that resolution (tracked separately from
+        #698 — see the presets' own comments). Uses a test-size grid; the
         canonical files document ne30.
         """
         from jcm.runners import build_model

@@ -1879,3 +1879,134 @@ class TestShallowLiquidConvectionType:
         _, out = term(state, diagnostics, SimpleNamespace(glacier_fraction=None), None)
         np.testing.assert_array_equal(np.asarray(out["convection"].ktype),
                                       [4, 2, 4, 1, 0, 2])
+
+
+class TestLargeScaleVerticalVelocityWiring:
+    """#705: the opportunistic ``diagnostics.get(...)`` reads inside
+    ``Echam1MMicrophysics.__call__`` -- ``diagnostics["_dycore_fields"]
+    ["omega"]`` and ``diagnostics["inversion_level"]`` -- actually reach
+    ``cloud_microphysics_column_sweep``'s ``lonacc_mask`` keyword, not just
+    ``lonacc_levels`` itself (tested directly elsewhere, and inert at the
+    1M's own ``cauloc = 0`` default regardless). Spies on
+    ``cloud_microphysics_column_sweep`` directly: unlike the 2M, the 1M
+    scheme calls it with no ``jax.vmap`` in between, so the captured keyword
+    is already a concrete array.
+
+    ``term._inversion_range`` is set directly rather than through
+    ``cache_coords`` for the same reason as the 2M's equivalent test
+    (``lohmann_2m_test.py::TestLargeScaleVerticalVelocityWiring``): that
+    half is already covered by ``sundqvist_test.py`` and the
+    ``TestPostPhysicsAnchor`` fake-coords regression test.
+    """
+
+    NLEV, NCOLS = 4, 2
+    JBMIN, JBMAX = 1, 3
+
+    def _inputs(self, omega, inversion_level, *, cauloc=10.0):
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = self.NLEV, self.NCOLS
+        shape = (nlev, ncols)
+        zeros = jnp.zeros(shape)
+        state = PhysicsState.zeros(
+            shape, temperature=jnp.full(shape, 285.0),
+            specific_humidity=jnp.full(shape, 1.0e-3),
+            tracers={"qc": zeros, "qi": zeros})
+        diagnostics = {
+            "_dt_seconds": 600.0, "pressure_full": jnp.full(shape, 5.0e4),
+            "air_density": jnp.full(shape, 0.7),
+            "layer_thickness": jnp.full(shape, 500.0),
+            "clouds": CloudData.zeros((ncols,), nlev),
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "_dycore_fields": {"omega": omega},
+        }
+        if inversion_level is not None:
+            diagnostics["inversion_level"] = inversion_level
+        # cauloc = 0 (ECHAM6.3's own default) makes the exception inert
+        # regardless of the mask, which would hide a wiring bug here.
+        term = Echam1MMicrophysics(MicrophysicsParameters.default(cauloc=cauloc))
+        term._inversion_range = (self.JBMIN, self.JBMAX)
+        return term, state, diagnostics
+
+    def test_lonacc_mask_matches_the_inversion_level_and_omega(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import jcm.physics.clouds.echam_1m as echam_1m_mod
+
+        captured = {}
+        real_sweep = echam_1m_mod.cloud_microphysics_column_sweep
+
+        def spy(*args, **kwargs):
+            captured["lonacc_mask"] = kwargs["lonacc_mask"]
+            return real_sweep(*args, **kwargs)
+
+        monkeypatch.setattr(
+            echam_1m_mod, "cloud_microphysics_column_sweep", spy)
+
+        omega = jnp.zeros((self.NLEV, self.NCOLS)).at[2].set(3.0)
+        inversion_level = jnp.full((self.NCOLS,), 2, dtype=jnp.int32)
+        term, state, diagnostics = self._inputs(omega, inversion_level)
+
+        term(state, diagnostics, SimpleNamespace(glacier_fraction=None), None)
+
+        expected = lonacc_levels(
+            inversion_level, omega, self.JBMIN, self.JBMAX, self.NLEV)
+        np.testing.assert_array_equal(
+            np.asarray(captured["lonacc_mask"]), np.asarray(expected))
+        assert bool(jnp.any(expected))   # the fixture actually exercises it
+
+    def test_missing_inversion_level_diagnostic_falls_back_to_no_exception(
+            self, monkeypatch):
+        from types import SimpleNamespace
+
+        import jcm.physics.clouds.echam_1m as echam_1m_mod
+
+        captured = {}
+        real_sweep = echam_1m_mod.cloud_microphysics_column_sweep
+
+        def spy(*args, **kwargs):
+            captured["lonacc_mask"] = kwargs["lonacc_mask"]
+            return real_sweep(*args, **kwargs)
+
+        monkeypatch.setattr(
+            echam_1m_mod, "cloud_microphysics_column_sweep", spy)
+
+        omega = jnp.full((self.NLEV, self.NCOLS), 3.0)   # subsidence everywhere
+        term, state, diagnostics = self._inputs(omega, inversion_level=None)
+
+        term(state, diagnostics, SimpleNamespace(glacier_fraction=None), None)
+
+        assert captured["lonacc_mask"] is None or not bool(
+            jnp.any(captured["lonacc_mask"]))
+
+    def test_no_cached_inversion_range_disables_the_exception(self, monkeypatch):
+        """A term that never had ``cache_coords`` called at all (an existing
+        unit-test convention throughout this file) must not raise, and must
+        pass ``lonacc_mask=None`` through -- the same "feature absent" path
+        it had before this feature existed.
+        """
+        from types import SimpleNamespace
+
+        import jcm.physics.clouds.echam_1m as echam_1m_mod
+
+        captured = {}
+        real_sweep = echam_1m_mod.cloud_microphysics_column_sweep
+
+        def spy(*args, **kwargs):
+            captured["lonacc_mask"] = kwargs["lonacc_mask"]
+            return real_sweep(*args, **kwargs)
+
+        monkeypatch.setattr(
+            echam_1m_mod, "cloud_microphysics_column_sweep", spy)
+
+        omega = jnp.full((self.NLEV, self.NCOLS), 3.0)
+        inversion_level = jnp.full((self.NCOLS,), 2, dtype=jnp.int32)
+        term, state, diagnostics = self._inputs(omega, inversion_level)
+        term._inversion_range = None
+
+        term(state, diagnostics, SimpleNamespace(glacier_fraction=None), None)
+
+        assert captured["lonacc_mask"] is None

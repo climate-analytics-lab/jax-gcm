@@ -21,7 +21,10 @@ Stages: ``pull`` (Tier A from the published mirror), ``sso``,
 ``era5``, ``ozone``, ``emissions`` (fat-node PBS job
 recommended — see ``--help``), ``aux`` (dms/oxidants via
 ``tools/prep_jam_aux_inputs.py``), ``dust`` (the five Tegen/HAMMOZ
-dust inputs), ``bundles``, ``amip`` (yearly
+dust inputs), ``dust-msg`` (the MSG-SEVIRI dust-source map, from the
+ECHAM-HAM emissions tree), ``ham-input`` (HAM's Kazil-Lovejoy and GCR
+nucleation tables, Tier A, from the same tree), ``biogenic`` (HAM's AeroCom II biogenic OC, Tier A), ``macv2`` (the MACv2 natural-aerosol background, from a
+copy of MPI-M's ``for_ICON`` tree), ``bundles``, ``amip`` (yearly
 transient forcing/emissions/ozone, ``--years first,last`` — issue #610),
 ``era5-transient`` (yearly all-ERA5 forcing incl. transient land —
 issue #629), ``registry`` (the published registry at the tip, with the files
@@ -78,6 +81,17 @@ TRANSIENT_GRIDS = frozenset({"t63", "t106"})
 # entry for a published grid raises loudly below rather than silently skipping.
 _NLAT = {"t63": 96, "t106": 160, "t127": 192, "t255": 384}
 GRIDS = {grid: _NLAT[grid] for grid in sorted(PUBLISHED_GRIDS)}
+
+#: Low-resolution Gaussian grids (``{grid: nlat}``) that carry the MACv2
+#: natural-aerosol background and nothing else: T31 and T42, the grids of the
+#: SPEEDY-family configurations (``grid=speedy_t31_l8``,
+#: ``grid=echam_t42_l8_sigma``). They are deliberately not in
+#: :data:`PUBLISHED_GRIDS`, which the manifest expands every other per-grid
+#: product over — no other bundle exists for them; the manifest lists them
+#: for ``macv2_natural_aerosol`` alone. Only the ``macv2`` stage builds them;
+#: ``--grids`` accepts their tokens so they can be built on their own.
+MACV2_ONLY_GRIDS = {"t31": 48, "t42": 64}
+assert not set(MACV2_ONLY_GRIDS) & PUBLISHED_GRIDS
 assert TRANSIENT_GRIDS <= PUBLISHED_GRIDS
 
 # Column (non-Gaussian) grids that carry a terrain bundle only.
@@ -116,10 +130,11 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "climatology", "key": "dms_file", "auto": True,
      "staged": True},
-    # The five Tegen/HAMMOZ dust inputs (#802). They replace the CAM
-    # erodibility product that used to sit at ``bundles/{grid}/dust.nc``; that
-    # name is retired rather than reused so no warm cache can resolve a CAM
-    # geomorphic map into a scheme that expects an effective-LAI fraction.
+    # The five Tegen/HAMMOZ dust inputs (#802) and the MSG map (#1017). They
+    # replace the CAM erodibility product that used to sit at
+    # ``bundles/{grid}/dust.nc``; that name is retired rather than reused so
+    # no warm cache can resolve a CAM geomorphic map into a scheme that
+    # expects an effective-LAI fraction.
     {"name": "dust_potential_sources",
      "path": "bundles/{grid}/dust_potential_sources.nc",
      "grids": "gaussian", "levels": False, "coverage": None,
@@ -142,6 +157,40 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "path": "bundles/{grid}/dust_surface_roughness.nc",
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "climatology", "key": "dust_roughness_file", "auto": True,
+     "staged": True},
+    # The MSG-SEVIRI Saharan dust-source-activation map (``ndust = 5``,
+    # jax-gcm#1017), built by the ``dust-msg`` stage from the ECHAM-HAM
+    # emissions tree (mirror/dust.py). Only ndust=5 reads it, so this key
+    # defaults to null in jcm/config/forcing/*.yaml and the preset that
+    # selects ndust=5 opts in with "auto".
+    {"name": "dust_msg_sources", "path": "bundles/{grid}/dust_msg_sources.nc",
+     "grids": "gaussian", "levels": False, "coverage": None,
+     "alignment": "static", "key": "dust_msg_file", "auto": True,
+     "staged": True},
+    # The MACv2 natural aerosol background (mirror/macv2.py), read by
+    # ``Macv2NaturalAerosol`` under the simple plumes. Published on the
+    # Gaussian grids and on :data:`MACV2_ONLY_GRIDS`. Twelve monthly means
+    # the reader blends between mid-month anchors itself, so ``climatology``.
+    {"name": "macv2_natural_aerosol",
+     "path": "bundles/{grid}/macv2_natural_aerosol.nc",
+     "grids": "gaussian+macv2", "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "natural_aerosol_file", "auto": True,
+     "staged": True},
+    # Volcanic SO2 point sources (#1190): CMIP6 degassing + the CMIP7 eruption
+    # list in one grid-free file, mapped onto any grid when the forcing loads
+    # (jcm.forcing.read_volcanic_emissions); built by the ``volcanic`` stage
+    # (mirror/volcanic.py). It holds every year, so it is ``static``.
+    {"name": "volcanic_so2", "path": "products/volcanic_so2_cmip.nc",
+     "grids": None, "levels": False, "coverage": None,
+     "alignment": "static", "key": "volcanic_file", "auto": True,
+     "staged": True},
+    # SLIM's surface properties (land_model: slim): the SimpleLand
+    # realistic_fromCLM5 dataset regridded to the model grid (area-weighted
+    # over land; provenance attribute in the file). The Gaussian grids only:
+    # the reader takes a lat/lon dataset, so ne30pg3 has none.
+    {"name": "slim", "path": "bundles/{grid}/slim.nc",
+     "grids": ("t63", "t106", "t127", "t255"), "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "slim_file", "auto": True,
      "staged": True},
     {"name": "ozone_pd", "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
      "grids": "gaussian", "levels": True, "coverage": None,
@@ -349,7 +398,8 @@ _UNRECORDED_STAGES = ("registry", "upload")
 
 #: Tier A products under ``build/`` that a full build stages into ``products/``.
 _TIER_A = ("ceds_anthro.zarr", "bb4cmip7.zarr",
-           "era5_land_climo_2005-2014_0p25.nc")
+           "era5_land_climo_2005-2014_0p25.nc",
+           "ham_biogenic_oc_aerocom2_t63_2000.nc", "ham_input")
 
 #: Seconds a published copy may predate a local file and still count as newer:
 #: HF commit dates are whole seconds and the two clocks differ.
@@ -581,7 +631,30 @@ def stage_ozone() -> None:
 
 
 def stage_emissions() -> None:
-    """Multi-GB streaming — run inside a PBS job, not a login node."""
+    """Multi-GB streaming — run inside a PBS job, not a login node.
+
+    Rebuild (Tier A + every grid's bundle) after a change to
+    ``jcm.data.mirror.emissions``/``jcm.data.mirror.bundles`` (e.g. the
+    ``residential``/``energy`` HAM-sizing subset channels, jax-gcm#1017
+    F6), on a site whose ``sites.input4mips`` resolves (Derecho/glade;
+    CEDS is not on Levante, see the module docstring above)::
+
+        python -m jcm.data.mirror.build_mirror \
+            --stage emissions,biogenic,bundles --products emissions
+
+    ``--stage emissions`` rewrites ``build/ceds_anthro.zarr`` and
+    ``build/bb4cmip7.zarr`` (every species, since ``build_store`` skips a
+    species already present — delete the stale store first to force a
+    full rebuild of an existing one); ``--stage bundles --products
+    emissions`` then rewrites every grid's ``upload/bundles/<grid>/
+    emissions_{pd,pi}.nc`` from those stores. What to upload afterwards
+    (not run here): the two Tier A zarr stores under ``build/`` and every
+    rewritten ``emissions_{pd,pi}.nc`` under ``upload/bundles/<grid>/`` —
+    ``--stage registry`` then ``--stage upload`` (the published HF
+    dataset; needs ``hf auth login`` with write access). The #1017
+    coordinator stages this data; do not run ``--stage upload`` from an
+    agent session.
+    """
     from jcm.data.mirror.emissions import (SPECIES, build_store,
                                            load_bb_species,
                                            load_ceds_species)
@@ -618,14 +691,15 @@ def stage_dust() -> None:
     """Build the five Tegen/HAMMOZ dust bundles (#802) from the HAMMOZ pool.
 
     Native at T63/T127/T255, conservatively remapped from the finest native
-    file elsewhere (t106), region mask regenerated — see mirror/dust.py.
+    file elsewhere (t106), region mask regenerated — see mirror/dust.py. The
+    sixth dust product, the MSG map, is the ``dust-msg`` stage's.
     """
-    from jcm.data.mirror.dust import DUST_PRODUCTS, build_dust_product
+    from jcm.data.mirror.dust import POOL_DUST_PRODUCTS, build_dust_product
 
     for grid, nlat in _grids().items():
         d = UPLOAD / "bundles" / grid
         d.mkdir(parents=True, exist_ok=True)
-        for name in DUST_PRODUCTS:
+        for name in POOL_DUST_PRODUCTS:
             build_dust_product(name, nlat, d / f"{name}.nc")
             print("dust:", grid, name, flush=True)
         # The retired CAM erodibility product: drop it from any upload tree
@@ -633,12 +707,125 @@ def stage_dust() -> None:
         (d / "dust.nc").unlink(missing_ok=True)
 
 
+def stage_dust_msg() -> None:
+    """Build the MSG-SEVIRI dust-source map bundles (``ndust = 5``, #1017).
+
+    Its source is the ECHAM-HAM emissions tree (``sites.Site.ham_emissions``,
+    or ``JCM_HAM_EMISSIONS_DIR``), which no declared site mounts, so this
+    stage is not in ``--stage all``; it runs where that tree is.
+    """
+    from jcm.data.mirror.dust import EMISSIONS_TREE_PRODUCTS, build_dust_product
+
+    for grid, nlat in _grids().items():
+        d = UPLOAD / "bundles" / grid
+        d.mkdir(parents=True, exist_ok=True)
+        for name in sorted(EMISSIONS_TREE_PRODUCTS):
+            build_dust_product(name, nlat, d / f"{name}.nc")
+            print("dust-msg:", grid, name, flush=True)
+
+
+def stage_ham_input() -> None:
+    """Stage HAM's ``nucleation_scheme=2`` inputs as Tier A (#1017).
+
+    The Kazil-Lovejoy PARNUC table and the O'Brien GCR ion-pair tables,
+    verbatim, from the ECHAM-HAM emissions tree's HAMMOZ T63 input directory
+    into ``build/ham_input/`` under the names :data:`jcm.data.ham_inputs.
+    HAM_INPUT_FILES` publishes, whichever of their aliases the tree carries.
+    Published by maintainer decision (2026-10-14). No declared site mounts
+    the tree, so this stage is not in ``--stage all``.
+    """
+    from jcm.data.ham_inputs import (HAM_INPUT_FILES, HAM_INPUT_PRODUCT,
+                                     HAM_INPUT_TREE_DIR)
+
+    src_dir = Path(SITE.ham_emissions) / HAM_INPUT_TREE_DIR
+    dst_dir = BUILD / HAM_INPUT_PRODUCT
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for published, aliases in HAM_INPUT_FILES.items():
+        src = next((src_dir / a for a in aliases if (src_dir / a).is_file()),
+                   None)
+        if src is None:
+            sys.exit(f"ham-input: none of {aliases} in {src_dir}")
+        shutil.copy2(src, dst_dir / published)
+        print(f"ham-input: {published} from {src}", flush=True)
+
+
+def stage_biogenic() -> None:
+    """Stage HAM's AeroCom II biogenic OC as the Tier A product (#1017 F7).
+
+    The product is the HAM file verbatim. Where the site provides an ECHAM-HAM
+    emissions tree (``sites.Site.ham_emissions``, or ``JCM_HAM_EMISSIONS_DIR``)
+    it is copied from there; elsewhere the published ``products/`` copy is
+    fetched at the pinned mirror revision, so every site builds its bundles
+    from the same bytes.
+    """
+    from jcm.data.mirror.emissions import (HAM_BIOGENIC_OC_PRODUCT,
+                                           HAM_BIOGENIC_OC_RELPATH)
+    from jcm.data.remote import fetch
+
+    dst = BUILD / HAM_BIOGENIC_OC_PRODUCT
+    if SITE.ham_emissions:
+        src = Path(SITE.ham_emissions) / HAM_BIOGENIC_OC_RELPATH
+        origin = str(src)
+    else:
+        src = Path(fetch(f"products/{HAM_BIOGENIC_OC_PRODUCT}"))
+        origin = f"the published mirror ({src})"
+    shutil.copy2(src, dst)
+    print(f"biogenic: {dst.name} from {origin}", flush=True)
+
+
+def stage_macv2() -> None:
+    """Build the MACv2 natural-aerosol background bundles (mirror/macv2.py).
+
+    The coarse mode and pre-industrial fine mode of the Kinne (2019)
+    climatology, the background the MACv2-SP plumes are an increment on. Its
+    source is a public download no declared site mounts
+    (``sites.Site.macv2``, or ``JCM_MACV2_DIR``), so this stage is not in
+    ``--stage all``; it runs where a copy of the tree is. Besides the
+    published grids it builds :data:`MACV2_ONLY_GRIDS`.
+    """
+    from jcm.data.mirror.macv2 import PRODUCT, build_macv2_natural
+
+    low = {g: n for g, n in MACV2_ONLY_GRIDS.items()
+           if _SELECTED is None or g in _SELECTED}
+    for grid, nlat in {**low, **_grids()}.items():
+        out = UPLOAD / "bundles" / grid / f"{PRODUCT}.nc"
+        build_macv2_natural(nlat, out, SITE.macv2)
+        print("macv2:", out, flush=True)
+
+
+def stage_volcanic() -> None:
+    """Build the grid-free volcanic SO₂ product (#1190) into ``products/``.
+
+    From the CESM inputdata tree's CMIP6 ``contvolcano`` file and the
+    input4MIPs CMIP7 ``utsvolcemis`` list (mirror/volcanic.py).
+    """
+    from jcm.data.mirror.volcanic import (DEGASSING_RELPATH,
+                                          ERUPTIONS_RELPATH,
+                                          VOLCANIC_PRODUCT,
+                                          build_volcanic_product)
+
+    d = UPLOAD / "products"
+    d.mkdir(parents=True, exist_ok=True)
+    ds = build_volcanic_product(f"{SITE.cesm_inputdata}/{DEGASSING_RELPATH}",
+                                sites.input4mips(ERUPTIONS_RELPATH))
+    ds.to_netcdf(d / VOLCANIC_PRODUCT)
+    print("volcanic:", d / VOLCANIC_PRODUCT, flush=True)
+
+
 def stage_bundles() -> None:
     from jcm.data.mirror.bundles import (build_emissions_nc, build_forcing,
                                          build_terrain)
+    from jcm.data.mirror.emissions import (HAM_BIOGENIC_OC_PRODUCT,
+                                           load_biogenic_oc)
     from jcm.data.regridding import gaussian_latlon
 
     era5 = BUILD / "era5_land_climo_2005-2014_0p25.nc"
+    # HAM's own AeroCom II biogenic-OC source (#1017 F7), the Tier A copy the
+    # ``biogenic`` stage left: one climatology (no PI/PD split, see
+    # load_biogenic_oc's docstring) that ``build_emissions_nc`` regrids for
+    # every grid and era.
+    biogenic_oc = (load_biogenic_oc(BUILD / HAM_BIOGENIC_OC_PRODUCT)
+                   if _want("emissions") else None)
     for grid, nlat in _grids().items():
         lats, lons = gaussian_latlon(nlat)
         d = UPLOAD / "bundles" / grid
@@ -653,7 +840,8 @@ def stage_bundles() -> None:
             if _want("emissions"):
                 build_emissions_nc(str(BUILD / "ceds_anthro.zarr"),
                                    str(BUILD / "bb4cmip7.zarr"), era, lats,
-                                   lons, str(d / f"emissions_{era}.nc"))
+                                   lons, str(d / f"emissions_{era}.nc"),
+                                   biogenic_oc=biogenic_oc)
 
     trunc = {grid: _truncation(grid) for grid in _grids()}
     for grid in _grids():
@@ -704,13 +892,15 @@ def stage_amip() -> None:
     CEDS/BB slices) and ``<grid>_l{47,95}/ozone_amip/<year>.nc`` (FZJ
     monthly on model levels). Not part of ``--stage all`` — run
     explicitly with ``--stage amip --years 1950,2022``. Needs the
-    ``era5`` and ``emissions`` stage outputs in ``build/``.
+    ``era5``, ``emissions`` and ``biogenic`` stage outputs in ``build/``.
     """
     from jcm.data.bc.interpolate_ozone import interpolate_ozone
     from jcm.data.mirror.amip_yearly import (_TIME_ENC, build_emissions_year,
                                              build_forcing_year,
                                              load_ozone_year,
                                              regrid_ozone_year)
+    from jcm.data.mirror.emissions import (HAM_BIOGENIC_OC_PRODUCT,
+                                           load_biogenic_oc)
     from jcm.data.regridding import gaussian_latlon
 
     first, last = _AMIP_YEARS
@@ -721,6 +911,11 @@ def stage_amip() -> None:
               "ozone); nothing to build", flush=True)
         return
     era5 = BUILD / "era5_land_climo_2005-2014_0p25.nc"
+    # Same single HAM AeroCom-II climatology ``stage_bundles`` feeds every
+    # era with (#1017 F7) -- replayed onto every AMIP year's time axis
+    # below rather than sliced, since there is no transient biogenic series.
+    biogenic_oc = (load_biogenic_oc(BUILD / HAM_BIOGENIC_OC_PRODUCT)
+                   if _want("emissions") else None)
     scratch = BUILD / "ozone_amip"
     scratch.mkdir(parents=True, exist_ok=True)
     for grid, nlat in _grids(transient=True).items():
@@ -739,7 +934,8 @@ def stage_amip() -> None:
                 build_emissions_year(str(BUILD / "ceds_anthro.zarr"),
                                      str(BUILD / "bb4cmip7.zarr"), year,
                                      lats, lons,
-                                     str(g / "emissions_amip" / f"{year}.nc"))
+                                     str(g / "emissions_amip" / f"{year}.nc"),
+                                     biogenic_oc=biogenic_oc)
             if _want("ozone"):
                 plev = scratch / f"ozone_{grid}_{year}_plev.nc"
                 regrid_ozone_year(load_ozone_year(year), lats,
@@ -844,6 +1040,10 @@ def build_manifest(staged_coverage: dict = None) -> dict:
             grids = sorted(TRANSIENT_GRIDS)
         elif row["grids"] == "gaussian+column":
             grids = gaussian + sorted(_COLUMN_GRIDS)
+        elif row["grids"] == "gaussian+macv2":
+            grids = sorted({*gaussian, *MACV2_ONLY_GRIDS})
+        elif isinstance(row["grids"], (list, tuple)):
+            grids = sorted(row["grids"])     # an explicit subset of the grids
         else:  # None -> grid-free single file
             grids = None
         products[row["name"]] = {
@@ -1157,14 +1357,29 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
     runs (see :func:`check_sources`), so a one-shot ``--stage pull,...,bundles``
     on a fresh root is not refused up front.
     """
+    from jcm.data.ham_inputs import HAM_INPUT_TREE_DIR
+    from jcm.data.mirror.emissions import (HAM_BIOGENIC_OC_PRODUCT,
+                                           HAM_BIOGENIC_OC_RELPATH)
+    from jcm.data.mirror.volcanic import DEGASSING_RELPATH, ERUPTIONS_RELPATH
+
     site = site or SITE
     i4m = f"{site.input4mips}/CMIP7/CMIP"
     rda = site.rda
     era5_moda = f"{rda}/d633001/e5.moda.an.sfc" if rda else None
-    hammoz = site.hammoz
-    dust = ([("ECHAM-HAMMOZ pool", f"{hammoz}/{rel}")
-             for rel in _dust_source_files()]
-            if hammoz else [("ECHAM-HAMMOZ pool", None)])
+    from jcm.data.mirror.dust import EMISSIONS_TREE_PRODUCTS, POOL_DUST_PRODUCTS
+
+    def _rooted(label, root, names):
+        return ([(label, f"{root}/{rel}") for rel in _dust_source_files(names)]
+                if root else [(label, None)])
+
+    from jcm.data.mirror.macv2 import source_files as macv2_source_files
+
+    macv2 = ([("MACv2 for_ICON tree", f"{site.macv2}/{rel}")
+              for rel in macv2_source_files()]
+             if site.macv2 else [("MACv2 for_ICON tree", None)])
+    dust = _rooted("ECHAM-HAMMOZ pool", site.hammoz, POOL_DUST_PRODUCTS)
+    dust_msg = _rooted("ECHAM-HAM emissions tree (MSG dust map)",
+                       site.ham_emissions, EMISSIONS_TREE_PRODUCTS)
     oxid = [(f"WACCM CCMI REFC1 oxidants {d}-{d + 9}",
              f"{site.waccm_oxidants}/oxid_ozone_WACCM_CCMI_REFC1_"
              f"f.e11.FWTREFC1.{d}-{d + 9}.f19_f19.ccmi34.001_monthly.nc")
@@ -1174,6 +1389,7 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
     ceds = ("Tier A CEDS store", str(BUILD / "ceds_anthro.zarr"))
     pcmdi = ("PCMDI AMIP SST/ice (input4MIPs)", f"{i4m}/PCMDI/PCMDI-AMIP-1-1-10")
     bb = ("Tier A BB4CMIP7 store", str(BUILD / "bb4cmip7.zarr"))
+    biogenic = ("Tier A HAM biogenic OC", str(BUILD / HAM_BIOGENIC_OC_PRODUCT))
     return {
         "pull": (),
         "sso": (("GMTED2010 DEM", str(GMTED)),
@@ -1189,12 +1405,25 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
                  f"{site.cesm_inputdata}/atm/cam/chem/ocnexch/"
                  "Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc"), *oxid),
         "dust": tuple(dust),
+        "dust-msg": tuple(dust_msg),
+        "macv2": tuple(macv2),
+        "ham-input": ((("ECHAM-HAM emissions tree (HAM nucleation inputs)",
+                        f"{site.ham_emissions}/{HAM_INPUT_TREE_DIR}"
+                        if site.ham_emissions else None),)),
+        # Without an emissions tree the stage fetches the published copy.
+        "biogenic": ((("ECHAM-HAM emissions tree (AeroCom II biogenic OC)",
+                       f"{site.ham_emissions}/{HAM_BIOGENIC_OC_RELPATH}"),)
+                     if site.ham_emissions else ()),
+        "volcanic": (("CMIP6 contvolcano SO2 (CESM inputdata)",
+                      f"{site.cesm_inputdata}/{DEGASSING_RELPATH}"),
+                     ("CMIP7 utsvolcemis eruptions (input4MIPs)",
+                      f"{site.input4mips}/{ERUPTIONS_RELPATH}")),
         "bundles": tuple(
             src for product, srcs in (
                 ("terrain", (era5_climo,
                              ("SSO statistics", str(BUILD / "sso")))),
                 ("forcing", (pcmdi, era5_climo)),
-                ("emissions", (ceds, bb)),
+                ("emissions", (ceds, bb, biogenic)),
                 ("ozone", (("ozone stage output", str(BUILD / "ozone")),)),
                 ("oxidants", (("aux stage output", str(BUILD / "aux")),)),
                 ("dms", (("aux stage output", str(BUILD / "aux")),)))
@@ -1204,7 +1433,7 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
                 ("forcing", (pcmdi, era5_climo,
                              ("CR-CMIP GHGs (input4MIPs)",
                               f"{i4m}/CR/CR-CMIP-1-0-0"))),
-                ("emissions", (ceds, bb)),
+                ("emissions", (ceds, bb, biogenic)),
                 ("ozone", (("FZJ ozone (input4MIPs)",
                             f"{i4m}/FZJ/FZJ-CMIP-ozone-1-0"),)))
             if _want(product) for src in srcs),
@@ -1218,8 +1447,8 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
     }
 
 
-def _dust_source_files() -> list[str]:
-    """Every pool-relative HAMMOZ file the dust stage may read.
+def _dust_source_files(names) -> list[str]:
+    """Every source-relative file building the dust products ``names`` may read.
 
     Not narrowed by ``--grids``: a grid HAMMOZ does not ship reads the finest
     native file, so checking the whole set is the simple, safe superset.
@@ -1227,7 +1456,7 @@ def _dust_source_files() -> list[str]:
     from jcm.data.mirror.dust import NATIVE_SOURCES
 
     return sorted({rel for table in NATIVE_SOURCES.values()
-                   for product in table.values()
+                   for name, product in table.items() if name in names
                    for rel, _ in product.values()})
 
 
@@ -1236,7 +1465,13 @@ _UNAVAILABLE_HINTS = {
     "RDA ERA5": "--stage pull fetches the published ERA5 Tier A instead",
     "ECHAM-HAMMOZ": ("build dust where the HAMMOZ pool is mounted (Levante) "
                      "or set JCM_HAMMOZ_DIR to a copy of it"),
+    "ECHAM-HAM emissions": ("run dust-msg/ham-input where the ECHAM-HAM "
+                            "emissions tree is (the UCSD devbox) with "
+                            "JCM_HAM_EMISSIONS_DIR set to it"),
     "CESM ne30": "exclude ne30pg3 with --grids",
+    "MACv2": ("download MPI-M's for_ICON tree "
+              "(jcm.data.mirror.macv2.SOURCE_URL) and set JCM_MACV2_DIR to "
+              "the copy"),
 }
 
 
@@ -1313,6 +1548,7 @@ def _pulled_tier_a() -> bool:
 #: climatology arrays (``*_clim``) plus coordinates and metadata are needed.
 _TIER_A_PULL = (
     "products/era5_land_climo_2005-2014_0p25.nc",
+    "products/ham_biogenic_oc_aerocom2_t63_2000.nc",
     "products/ceds_anthro.zarr/zarr.json",
     "products/ceds_anthro.zarr/*_clim/**",
     "products/bb4cmip7.zarr/zarr.json",
@@ -1343,7 +1579,7 @@ def stage_pull() -> None:
                       revision=revision, allow_patterns=list(_TIER_A_PULL),
                       local_dir=str(stage))
     for name in ("era5_land_climo_2005-2014_0p25.nc", "ceds_anthro.zarr",
-                 "bb4cmip7.zarr"):
+                 "bb4cmip7.zarr", "ham_biogenic_oc_aerocom2_t63_2000.nc"):
         dst = BUILD / name
         if not dst.exists():
             dst.symlink_to(stage / "products" / name)
@@ -1472,17 +1708,27 @@ def stage_upload() -> None:
 
 STAGES = {"pull": stage_pull, "sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
           "emissions": stage_emissions, "aux": stage_aux, "dust": stage_dust,
+          "dust-msg": stage_dust_msg, "ham-input": stage_ham_input,
+          "biogenic": stage_biogenic, "macv2": stage_macv2,
+          "volcanic": stage_volcanic,
           "bundles": stage_bundles, "amip": stage_amip,
           "era5-transient": stage_era5_transient,
           "manifest": stage_manifest,
           "registry": stage_registry, "upload": stage_upload}
 
 #: Heavy / source-gated opt-in stages excluded from ``--stage all``: multi-GB
-#: builds or the push to the remote.
-_NOT_IN_ALL = ("pull", "amip", "era5-transient", "upload")
+#: builds, the push to the remote, or a source no declared site mounts.
+_NOT_IN_ALL = ("pull", "amip", "era5-transient", "dust-msg", "ham-input",
+               "macv2", "upload")
 
 
 def main() -> None:
+    # The builders are CPU data pipelines: never let anything they import
+    # claim a (possibly shared) GPU, which JAX preallocates on first use.
+    if not os.environ.get("JAX_PLATFORMS"):
+        import jax
+
+        jax.config.update("jax_platforms", "cpu")
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--stage", default="all",
                     help="comma-separated stage list, or 'all' "
@@ -1491,7 +1737,8 @@ def main() -> None:
     ap.add_argument("--grids", default=None,
                     help="comma-separated subset of the published grids to "
                          f"build ({', '.join(sorted({**GRIDS, **_COLUMN_GRIDS}))}"
-                         "); default all")
+                         "); default all. The macv2 stage also takes "
+                         f"{', '.join(sorted(MACV2_ONLY_GRIDS))}")
     ap.add_argument("--products", default=None,
                     help="comma-separated subset of the bundle products the "
                          f"bundles/amip stages build ({', '.join(BUNDLE_PRODUCTS)}"
@@ -1516,7 +1763,8 @@ def main() -> None:
     _AMIP_YEARS = (first, last)
     if args.grids:
         _SELECTED = frozenset(args.grids.split(","))
-        unknown = sorted(_SELECTED - set(GRIDS) - set(_COLUMN_GRIDS))
+        unknown = sorted(_SELECTED - set(GRIDS) - set(_COLUMN_GRIDS)
+                         - set(MACV2_ONLY_GRIDS))
         if unknown:
             sys.exit(f"Unknown grid(s) {unknown}; published: "
                      f"{', '.join(sorted({**GRIDS, **_COLUMN_GRIDS}))}")

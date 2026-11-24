@@ -394,10 +394,11 @@ class TestCoupledEchamSmoke(unittest.TestCase):
         model = Model(
             dycore=dycore,
             time_step=dycore.dt_seconds / 60.0,
-            # pySES publishes no ``omega`` (#698), so ECHAM's ``lmfmid``
-            # mid-level convection trigger cannot run here — turn it off
-            # with the reference's own switch, as the config comment in
-            # ``dycore/pyses_ne30l47.yaml`` documents.
+            # Kept off here (rather than the default) to minimize moving
+            # parts for this dtype-plumbing test; pySES can supply omega
+            # (jax-gcm#698), so this is a deliberate simplification, not a
+            # forced workaround — see omega_provider_test.py for the
+            # cubasmc-active path.
             physics=idealized_echam_physics(
                 convection=ConvectionParameters.default(cu_lmfmid=False),
             ),
@@ -431,10 +432,11 @@ class TestCoupledEchamSmoke(unittest.TestCase):
         model = Model(
             dycore=dycore,
             time_step=dycore.dt_seconds / 60.0,
-            # pySES publishes no ``omega`` (#698), so ECHAM's ``lmfmid``
-            # mid-level convection trigger cannot run here — turn it off
-            # with the reference's own switch, as the config comment in
-            # ``dycore/pyses_ne30l47.yaml`` documents.
+            # Kept off here (rather than the default) to minimize moving
+            # parts for this dtype-plumbing test; pySES can supply omega
+            # (jax-gcm#698), so this is a deliberate simplification, not a
+            # forced workaround — see omega_provider_test.py for the
+            # cubasmc-active path.
             physics=idealized_echam_physics(
                 convection=ConvectionParameters.default(cu_lmfmid=False),
             ),

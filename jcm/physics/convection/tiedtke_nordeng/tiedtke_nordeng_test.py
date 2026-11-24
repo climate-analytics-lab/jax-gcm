@@ -225,9 +225,9 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
 
     # The fake runs under jax.vmap, so probe values must flow OUT through
     # the returned tendencies rather than Python side effects: the closure
-    # profile rides ``dqdt`` (zero dtedt keeps the heating cap inactive,
-    # cap_scale == 1) and the environment (T, q) inputs ride qc_conv/qi_conv,
-    # which the wrapper republishes untouched on the convection diagnostic.
+    # profile rides ``dqdt`` and the environment (T, q) inputs ride
+    # qc_conv/qi_conv, which the wrapper republishes untouched on the
+    # convection diagnostic.
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
@@ -246,8 +246,8 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
             precip_formation=jnp.zeros_like(temperature),
             precip_flux=jnp.zeros_like(temperature),
             precip_floor_source=jnp.zeros((), temperature.dtype),
-            # Probe: ride thvsig out on an otherwise-unused scalar. dtedt is
-            # zero so cap_scale == 1 and it passes through unscaled.
+            # Probe: ride thvsig out on an otherwise-unused scalar — the
+            # wrapper publishes precip_conv unscaled.
             precip_conv=thvsig,
             # Probe: the humidity the moist ``cp`` is built from rides out
             # on the (unscaled) qc tendency.
@@ -328,22 +328,41 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     )
 
 
-def test_cap_scales_momentum_consistently_with_ledger(monkeypatch):
-    """The ``_DTDT_MAX`` cap scales dudt/dvdt by the SAME factor as T/q.
+def test_strong_heating_passes_through_at_full_amplitude_with_budgets_closed(
+    monkeypatch,
+):
+    """A column over the old 5 K/hr cap is applied unscaled; budgets close.
 
-    jax-gcm#676 item 2 (and the #641 doc follow-up): when the 5 K/hr safety
-    cap fires, ``TiedtkeConvection.__call__`` rescales the whole ledger by
-    ``cap_scale = _DTDT_MAX/|dtedt|``. Momentum transport shares the same
-    mass flux, so it must carry the same scaling; the previous code returned
-    dudt/dvdt UNSCALED, delivering a capped plume's momentum at full
-    amplitude. Here a fake scheme returns a heating 2× over the cap
-    (⇒ cap_scale = 0.5) and known dudt/dvdt; the wrapper must return them
-    halved, i.e. the momentum/heating ratio is preserved.
+    #961 removed the jcm-only ``_DTDT_MAX`` heating-rate limiter (no ECHAM
+    counterpart; a 30-day A/B showed no measurable climate effect from
+    disabling it). ``TiedtkeConvection.__call__`` now hands the scheme's
+    ledger to the dynamics exactly as returned, with no rescale of any
+    kind — this is the regression guard for that: a fake scheme returns a
+    single-level ledger whose peak heating is 2x the old cap (10 K/hr) and
+    whose dqdt/precip_conv/dudt/dvdt are chosen to close the column's water
+    and moist-static-energy budgets (the same closure
+    ``half_level_ledger_test.py`` pins on the standalone scheme), and the
+    wrapper must publish every field unattenuated — were any field still
+    scaled (even consistently with the others, as the removed cap used to
+    be), the heating would no longer equal the raw value injected below.
     """
-    nlev, ncols = 4, 2
+    from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
+
+    nlev, ncols = 4, 1
     shape = (nlev, ncols)
-    dtedt_raw = 2.0 * convection_module._DTDT_MAX  # 2× over ⇒ cap_scale 0.5
+    dt = 900.0
+    mass = jnp.array([200.0, 300.0, 400.0, 500.0])  # kg/m^2 per layer
+
+    q0 = 1.0e-3
+    cp0 = float(moist_isobaric_heat_capacity(jnp.asarray(q0)))
+    dtedt0 = 10.0 / 3600.0  # 10 K/hr: 2x the old 5 K/hr cap
+    # MSE closure at the single active level: cp*dT + Lv*dq = 0.
+    dqdt0 = -cp0 * dtedt0 / c.alhc
+    # Water closure at that level: dq*mass + precip_conv = 0.
+    precip_conv0 = -dqdt0 * mass[0]
     dudt_raw, dvdt_raw = 3.0, -1.5
+
+    assert abs(dtedt0) > 5.0 / 3600.0, "fixture no longer exceeds the old cap"
 
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
@@ -352,15 +371,17 @@ def test_cap_scales_momentum_consistently_with_ledger(monkeypatch):
         layer_mass=None, humidity_m1=None, use_updraft_cover=False,
         pressure_half=None,
     ):
-        ones = jnp.ones_like(temperature)
         zeros = jnp.zeros_like(temperature)
+        dtedt = zeros.at[0].set(dtedt0)
+        dqdt = zeros.at[0].set(dqdt0)
         return ConvectionTendencies(
-            dtedt=ones * dtedt_raw, dqdt=zeros,
-            dudt=ones * dudt_raw, dvdt=ones * dvdt_raw,
+            dtedt=dtedt, dqdt=dqdt,
+            dudt=jnp.ones_like(temperature) * dudt_raw,
+            dvdt=jnp.ones_like(temperature) * dvdt_raw,
             qc_conv=zeros, qi_conv=zeros,
             precip_formation=zeros, precip_flux=zeros,
             precip_floor_source=jnp.zeros((), temperature.dtype),
-            precip_conv=jnp.zeros_like(temperature[0]),
+            precip_conv=precip_conv0,
             dqc_dt=zeros, dqi_dt=zeros,
         ), None
 
@@ -370,30 +391,58 @@ def test_cap_scales_momentum_consistently_with_ledger(monkeypatch):
     state = PhysicsState.zeros(
         shape,
         temperature=jnp.ones(shape) * 280.0,
-        specific_humidity=jnp.ones(shape) * 1.0e-3,
+        specific_humidity=jnp.ones(shape) * q0,
         tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
     )
     diagnostics = {
-        "_dt_seconds": 900.0,
+        "_dt_seconds": dt,
         "pressure_full": jnp.ones(shape) * 80000.0,
-        "layer_thickness": jnp.ones(shape) * 500.0,
+        # air_density = 1 so layer_thickness IS the per-layer mass [kg/m^2]
+        # (the wrapper's fallback mass measure, absent pressure_half).
+        "layer_thickness": mass[:, None],
         "air_density": jnp.ones(shape),
         "clouds": CloudData.zeros((ncols,), nlev),
     }
     terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
-    tendency, _ = TiedtkeConvection()(
+    tendency, out = TiedtkeConvection()(
         state, diagnostics, forcing=None, terrain=terrain,
     )
-    # Heating is capped exactly at _DTDT_MAX (cap_scale = 0.5).
+    convection = out["convection"]
+
+    # Full amplitude: nothing attenuates the raw scheme output.
     np.testing.assert_allclose(
-        np.asarray(tendency.temperature), convection_module._DTDT_MAX,
-        rtol=1e-6,
+        np.asarray(tendency.temperature)[0, 0], dtedt0, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(tendency.specific_humidity)[0, 0], dqdt0, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(convection.precip_conv)[0], precip_conv0, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(tendency.u_wind), dudt_raw, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(tendency.v_wind), dvdt_raw, rtol=1e-6)
+
+    # The published ledger — exactly what a live run hands the dynamics —
+    # still closes both budgets, since nothing was scaled inconsistently.
+    dq_col = np.asarray(tendency.specific_humidity)[:, 0]
+    dqc_col = np.asarray(tendency.tracers["qc"])[:, 0]
+    dqi_col = np.asarray(tendency.tracers["qi"])[:, 0]
+    dt_col = np.asarray(tendency.temperature)[:, 0]
+    mass_np = np.asarray(mass)
+    water_residual = (
+        float(np.sum((dq_col + dqc_col + dqi_col) * mass_np))
+        + float(np.asarray(convection.precip_conv)[0])
     )
-    # Momentum carries the SAME 0.5 factor — not the raw amplitude.
-    np.testing.assert_allclose(
-        np.asarray(tendency.u_wind), 0.5 * dudt_raw, rtol=1e-6)
-    np.testing.assert_allclose(
-        np.asarray(tendency.v_wind), 0.5 * dvdt_raw, rtol=1e-6)
+    heat_term = cp0 * dt_col * mass_np
+    latent_term = float(c.alhc) * dq_col * mass_np
+    mse_residual = float(np.sum(heat_term) + np.sum(latent_term))
+    mse_scale = float(np.sum(np.abs(heat_term)))
+    np.testing.assert_allclose(water_residual, 0.0, atol=1e-12)
+    # The terms are built from a traced float32 forward pass (the term's
+    # internal arithmetic runs at jnp's default precision), so the exact
+    # cancellation constructed above is tight only to float32 round-off,
+    # not to the float64 construction arithmetic used to derive dqdt0.
+    assert abs(mse_residual) < 1e-5 * mse_scale, (
+        f"MSE budget open by {mse_residual:.3e} of scale {mse_scale:.3e}")
 
 
 def test_wrapper_feeds_true_layer_mass_and_interfaces_to_the_scheme(monkeypatch):
@@ -426,8 +475,8 @@ def test_wrapper_feeds_true_layer_mass_and_interfaces_to_the_scheme(monkeypatch)
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
             # Probe: ride the received layer mass out on dqdt and the
-            # received interfaces' Δp/g on dqc_dt (dtedt is zero, so
-            # cap_scale == 1 and both pass through unscaled).
+            # received interfaces' Δp/g on dqc_dt — the wrapper publishes
+            # both unscaled.
             dtedt=zeros, dqdt=layer_mass, dudt=zeros, dvdt=zeros,
             qc_conv=zeros, qi_conv=zeros,
             precip_formation=zeros, precip_flux=zeros,
@@ -497,20 +546,22 @@ def test_wrapper_feeds_true_layer_mass_and_interfaces_to_the_scheme(monkeypatch)
 
 
 def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch):
-    """The convection diagnostic exposes the *applied* (post-cap) T/q rates.
+    """The convection diagnostic exposes the *applied* T/q rates, unscaled.
 
-    ``heating_rate`` / ``moistening_rate`` must mirror the tendencies actually
-    handed back to the dynamics — i.e. after the ``_DTDT_MAX`` heating cap — so
-    an RCE convective-vs-radiative balance can be read straight off the saved
-    trajectory. We feed a heating profile that straddles the cap to pin the
-    diagnostic to the capped value rather than the raw scheme output.
+    ``heating_rate`` / ``moistening_rate`` must mirror the tendencies
+    actually handed back to the dynamics, so an RCE convective-vs-radiative
+    balance can be read straight off the saved trajectory. The heating
+    profile deliberately spans what used to be the (#961-removed) 5 K/hr
+    cap, to pin that the diagnostic is the raw scheme output at every
+    level now — nothing between the scheme and the published ledger
+    rescales it.
     """
     nlev, ncols = 4, 2
     dt = 60.0
     shape = (nlev, ncols)
 
-    cap = 5.0 / 3600.0  # _DTDT_MAX, K/s
-    # Levels 0/1 exceed the cap (must clip); levels 2/3 sit below it (pass through).
+    # Levels 0/1 sit above the old 5 K/hr cap; levels 2/3 sit below it.
+    # Both bands must pass through identically now.
     dtedt_col = jnp.array([10.0 / 3600.0, -8.0 / 3600.0, 1.0 / 3600.0, 0.0])
     dqdt_col = jnp.array([1.0e-7, -2.0e-7, 3.0e-7, 0.0])
 
@@ -566,92 +617,26 @@ def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch)
     assert jnp.allclose(convection.heating_rate, tendency.temperature)
     assert jnp.allclose(convection.moistening_rate, tendency.specific_humidity)
 
-    # ...which is the *capped* ledger, not the raw scheme output. The cap
-    # scales the WHOLE per-level ledger proportionally (T and q together)
-    # so the local energy/water pairing survives the guard — clipping T
-    # alone left the moistening at the uncapped rate (review finding 2.8).
-    # The cap is a per-COLUMN homogeneous scale now (tightest per-level
-    # ratio applied to the whole ledger incl. precip_conv): per-level
-    # clipping left the precip diagnostic unscaled and opened the
-    # composed column water budget at every capped burst.
-    cap_scale = jnp.min(
-        jnp.clip(cap / jnp.maximum(jnp.abs(dtedt_col), 1e-30), 0.0, 1.0)
-    )
-    expected_dt = jnp.broadcast_to((dtedt_col * cap_scale)[:, None], shape)
-    expected_dq = jnp.broadcast_to((dqdt_col * cap_scale)[:, None], shape)
+    # ...which is the RAW scheme output, unscaled, at every level — levels
+    # 0/1 (above the old cap) and 2/3 (below it) all pass through
+    # identically, since there is no longer a mechanism that would treat
+    # them differently.
+    expected_dt = jnp.broadcast_to(dtedt_col[:, None], shape)
+    expected_dq = jnp.broadcast_to(dqdt_col[:, None], shape)
     assert jnp.allclose(convection.heating_rate, expected_dt)
     assert jnp.allclose(convection.moistening_rate, expected_dq)
-    # Guard the "post-cap" semantics: the raw (uncapped) profile would differ.
-    assert not jnp.allclose(
-        convection.heating_rate, jnp.broadcast_to(dtedt_col[:, None], shape)
-    )
-
-
-def test_tendency_cap_scale_matches_the_ratio_it_is_named_for():
-    """The cap factor is ``min(1, _DTDT_MAX/|dtedt|)``, exactly.
-
-    Pins the forward behaviour of the safe-denominator form against the
-    plain ratio it implements, over levels that are inactive (0), tiny,
-    below the limit and over it — so a future rewrite of the guard cannot
-    drift the physics while keeping the gradient finite.
-    """
-    cap = convection_module._DTDT_MAX
-    rng = np.random.default_rng(0)
-    dtedt = jnp.asarray(np.concatenate([
-        np.zeros(8),
-        rng.standard_normal(200) * 1.0e-8,      # far below the limit
-        rng.standard_normal(200) * 1.0e-2,      # straddling it
-    ]).reshape(2, -1), jnp.float32)
-
-    reference = jnp.min(
-        jnp.clip(cap / jnp.maximum(jnp.abs(dtedt), 1e-30), 0.0, 1.0),
-        axis=1, keepdims=True,
-    )
-    assert jnp.array_equal(convection_module._tendency_cap_scale(dtedt),
-                           reference)
-
-
-def test_tendency_cap_scale_gradient_is_finite_where_convection_is_off():
-    """The 5 K/hr cap must not poison the gradient on inactive levels.
-
-    A level with ``dtedt == 0`` — every convectively inactive level, i.e.
-    most of the grid — is where a ``dtdt_max/|dtedt|`` computed for all
-    levels and masked afterwards produces ``0 * inf = nan`` in both AD
-    modes while the forward pass stays finite (the #558 poison class).
-    """
-    cap = convection_module._DTDT_MAX
-
-    def capped_total(dtedt):
-        return jnp.sum(dtedt * convection_module._tendency_cap_scale(dtedt))
-
-    all_inactive = jnp.zeros((2, 5))
-    # One column with a single sub-limit level, one with a level over it,
-    # both padded with the inactive zeros that trigger the poison.
-    mixed = jnp.zeros((2, 5)).at[0, 2].set(1.0e-5).at[1, 4].set(10.0 / 3600.0)
-
-    for label, dtedt in (("all inactive", all_inactive), ("mixed", mixed)):
-        grad = jax.grad(capped_total)(dtedt)
-        assert bool(jnp.all(jnp.isfinite(grad))), (label, grad)
-        _, tangent = jax.jvp(capped_total, (dtedt,), (jnp.ones_like(dtedt),))
-        assert bool(jnp.isfinite(tangent)), (label, tangent)
-
-    # An uncapped column is the identity, so its gradient is exactly 1.
-    np.testing.assert_allclose(jax.grad(capped_total)(all_inactive),
-                               jnp.ones((2, 5)))
-    # And a capped level holds |dtedt|*scale at the limit, so raising it
-    # further changes nothing.
-    assert float(jax.grad(capped_total)(mixed)[1, 4]) == 0.0
-    assert float(cap) > 0.0
 
 
 def test_term_jvp_wrt_diagnostics_is_finite_on_a_quiescent_column():
     """``TiedtkeConvection`` differentiates through a non-convecting column.
 
-    The whole-term counterpart of the cap guard above: a stable column
-    produces ``dtedt == 0`` at every level, which is exactly the operating
-    point at which a masked-inf inside the cap NaNs every jvp of the term
-    with respect to its ``diagnostics`` inputs while the forward tendency
-    stays a clean zero.
+    A stable column produces ``dtedt == 0`` at every level — the operating
+    point where a masked-denominator guard elsewhere in the scheme (e.g. a
+    ``switches.py`` surrogate, or ``cuadjtq_newton``'s safe-division form)
+    could in principle NaN every jvp of the term with respect to its
+    ``diagnostics`` inputs while the forward tendency stays a clean zero
+    (the #558 poison class). This is the whole-term regression for that
+    failure mode.
     """
     nlev, ncols = 8, 3
     shape = (nlev, ncols)
@@ -846,18 +831,23 @@ def test_wrapper_publishes_detrainment_exactly_as_added_to_clouds():
         rtol=1e-6, atol=1e-12)
 
 
-def test_published_detrainment_carries_the_tendency_cap(monkeypatch):
-    """The fields are the POST-cap detrainment, like the qc/qi advance.
+def test_published_detrainment_matches_the_raw_scheme_above_5k_per_hour(
+    monkeypatch,
+):
+    """Published detrainment is the RAW scheme output, like the qc/qi advance.
 
-    A fake scheme returns heating 2x over ``_DTDT_MAX`` (so the column's
-    ``cap_scale`` is 0.5) and known detrainment; the published fields must
-    be half of it, i.e. exactly what was added to ``clouds.qc/qi``.
+    A fake scheme returns heating well over the old (#961-removed) 5 K/hr
+    limit together with known detrainment; the published
+    ``conv_detrainment_qc/qi`` and the increment added to ``clouds.qc/qi``
+    must both equal the scheme's raw values exactly — there is no longer
+    any column-wide rescale for a strong heating burst to interact with.
     """
     nlev, ncols = 4, 2
     shape = (nlev, ncols)
     dt = 900.0
     dqc_col = jnp.array([0.0, 1.0e-7, 3.0e-7, 0.0])
     dqi_col = jnp.array([4.0e-7, 2.0e-7, 0.0, 0.0])
+    dtedt_raw = 20.0 / 3600.0  # 4x the old 5 K/hr cap
 
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
@@ -866,7 +856,7 @@ def test_published_detrainment_carries_the_tendency_cap(monkeypatch):
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
-            dtedt=jnp.ones_like(temperature) * 2.0 * convection_module._DTDT_MAX,
+            dtedt=jnp.ones_like(temperature) * dtedt_raw,
             dqdt=zeros, dudt=zeros, dvdt=zeros,
             qc_conv=zeros, qi_conv=zeros,
             precip_formation=zeros, precip_flux=zeros,
@@ -896,8 +886,10 @@ def test_published_detrainment_carries_the_tendency_cap(monkeypatch):
         terrain=SimpleNamespace(fmask=jnp.zeros(ncols)),
     )
     clouds = out["clouds"]
-    expected_qc = 0.5 * np.broadcast_to(np.asarray(dqc_col)[:, None], shape)
-    expected_qi = 0.5 * np.broadcast_to(np.asarray(dqi_col)[:, None], shape)
+    np.testing.assert_allclose(
+        np.asarray(tendency.temperature), dtedt_raw, rtol=1e-6)
+    expected_qc = np.broadcast_to(np.asarray(dqc_col)[:, None], shape)
+    expected_qi = np.broadcast_to(np.asarray(dqi_col)[:, None], shape)
     np.testing.assert_allclose(
         np.asarray(clouds.conv_detrainment_qc), expected_qc, rtol=1e-6)
     np.testing.assert_allclose(

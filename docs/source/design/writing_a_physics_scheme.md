@@ -46,7 +46,7 @@ do the real work.
 | `name` | Human-readable identifier. Shown in error messages and used as a fallback diagnostic key. Keep it unique within a composition. |
 | `category` | The slot this term occupies (`radiation`, `convection`, `clouds`, `surface`, `vertical_diffusion`, `gravity_waves`, `aerosol`, `chemistry`, …). Used by `replace()` and `remove()` to find the term to swap out. Two terms with the same category are allowed; `replace()` collapses them. |
 | `requires` | Diagnostic keys that some upstream term must already have written. Validated at construction time — see [Validation](#validation) below. |
-| `provides` | Diagnostic keys this term writes into the dict it returns. Validation flags two terms claiming the same key. |
+| `provides` | Diagnostic keys this term writes into the dict it returns. Two terms claiming the same key are not rejected: the later one overwrites. |
 
 The keys in `requires` / `provides` are the public-facing keys in the
 diagnostics dict (`pressure_full`, `air_density`, `convection`,
@@ -93,13 +93,13 @@ Inputs:
   everything upstream terms have written. Read by key; **never**
   mutate — always return a new dict.
 - `forcing`: a `ForcingData` already sliced to the current step
-  (`Model._get_step_fn_factory` calls `ForcingData.select(date)`).
+  (`Model._get_op_split_step_fn` calls `ForcingData.select(date)`).
 - `terrain`: a `TerrainData` with `orog`, `fmask`, `gsl`, `vlt`, …
 
 Outputs:
 
 - A `PhysicsTendency` (winds, temperature, humidity, tracers). Most
-  schemes use `PhysicsTendency.zero(...)` as a base and `.copy(...)`
+  schemes use `PhysicsTendency.zeros(shape)` as a base and `.copy(...)`
   to fill in just the fields they touch.
 - A new diagnostics dict — typically `{**diagnostics, "my_key": data}`.
 
@@ -136,23 +136,16 @@ class MyScheme(PhysicsTerm):
 
 If the scheme is a single-column algorithm and the host package uses
 `vectorize_columns=True` (as `echam_physics()` does), `ComposablePhysics`
-wraps each term in a `jax.vmap` over the horizontal axes. Inside the
-term you can write the calculation as if it acted on one column.
-
-Most ECHAM terms are written this way; `MoistAirColumnState` is a
-counter-example that runs on the full 3-D grid because it is upstream
-of the per-column vmap.
+reshapes the state to `(nlev, ncols)` before the term loop, so every term
+sees column-format arrays and can treat the trailing axis as a batch of
+independent columns.
 
 ## Validation
 
 `ComposablePhysics(terms=[...])` runs `_validate_ordering` at
 construction time:
 
-1. **Single-writer per key.** If two terms list the same key in their
-   `provides`, the second would overwrite the first and is almost
-   always a misconfiguration. Validation raises with the offending
-   categories.
-2. **All `requires` resolved upstream.** Each term's `requires` must
+1. **All `requires` resolved upstream.** Each term's `requires` must
    appear in the union of upstream terms' `provides`. Errors point at
    the first unsatisfied dependency.
 
@@ -213,7 +206,7 @@ class RayleighDamping(PhysicsTerm):
         rate = (weight / p.timescale_seconds)[:, None, None]
         u_t = -rate * state.u_wind
         v_t = -rate * state.v_wind
-        tend = PhysicsTendency.zero(state).copy(u_wind=u_t, v_wind=v_t)
+        tend = PhysicsTendency.zeros(state.temperature.shape, u_wind=u_t, v_wind=v_t)
         return tend, diagnostics
 ```
 
@@ -306,7 +299,7 @@ Two cheap checks before you commit:
 - **Don't** mutate `diagnostics` in place. Always return
   `{**diagnostics, "my_key": ...}`.
 - **Don't** read the model timestep from a parameter struct. Use
-  `diagnostics["_date"].dt_seconds`. The model dt may change across
+  `diagnostics["_dt_seconds"]`. The model dt may change across
   configurations and should never be smuggled through `Parameters`.
 - **Don't** add a leading underscore to a `provides` key unless the
   data is genuinely internal (caches, transient state). Public keys

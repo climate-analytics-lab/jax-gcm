@@ -10,6 +10,7 @@ Reference architecture: Ukkonen (2024), https://github.com/peterukk/rte-rrtmgp-n
 """
 
 import dataclasses
+import functools
 import warnings
 from typing import Tuple, Optional
 
@@ -71,6 +72,7 @@ def radiation_scheme_emulated(
     band_mode: str = "per_band",
     r_eff_liq_um: Optional[jnp.ndarray] = None,
     r_eff_ice_um: Optional[jnp.ndarray] = None,
+    solve_geometry: bool = False,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """Emulated radiation scheme — drop-in replacement for ``radiation_scheme_rrtmgp``.
 
@@ -95,6 +97,13 @@ def radiation_scheme_emulated(
     applies the uniform 0.8 liquid factor.
 
     Additional Args:
+        solve_geometry: True when called by the radiation TERM, which stores
+            the shortwave as transmissivities and re-applies the real sun
+            every step (:func:`jcm.physics.radiation.apply_insolation`): the
+            zenith is then ECHAM's solve zenith, curvature-corrected and
+            floored at 0.1 (:func:`~jcm.physics.radiation.echam_solve_cos_zenith`),
+            so night columns carry a finite transmissivity. False (default)
+            keeps the geometric zenith and zero night flux. Static.
         emulator_weights: Trained NN weights (``EmulatorWeights``). Must be
             provided; passed through the parameters mechanism in EchamPhysics.
         sw_scaling: Input normalization for SW network.
@@ -119,13 +128,18 @@ def radiation_scheme_emulated(
         orbital_time, longitude, latitude, parameters.solar_constant
     )
     sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
-    # The ACTUAL cosine is what RadiationData must carry: the cached-step
-    # rescale divides by it, so storing the clipped value would rescale
-    # twilight columns by mu_now/min_cos_zenith instead of mu_now/mu_at_solve
-    # (PR #730 review). The clip exists only to keep the network FEATURE in
-    # its trained range.
+    # ``cos_zenith`` is the zenith the solve is made at: the geometric one for
+    # a standalone call, ECHAM's floored solve zenith when the term stores the
+    # result as a transmissivity (``solve_geometry``). The ``min_cos_zenith``
+    # clip below exists only to keep the network FEATURE in its trained range.
     cos_zenith = sin_altitude
-    mu0_feature = jnp.maximum(sin_altitude, parameters.min_cos_zenith)
+    if solve_geometry:
+        from jcm.physics.radiation import echam_solve_cos_zenith
+        from jax_solar import direct_solar_irradiance
+        cos_zenith = echam_solve_cos_zenith(sin_altitude)
+        toa_flux = direct_solar_irradiance(
+            solar.orbital_phase, parameters.solar_constant) * cos_zenith
+    mu0_feature = jnp.maximum(cos_zenith, parameters.min_cos_zenith)
 
     # --- Prepare inputs common to SW and LW ---
     # Water vapour mixing ratio
@@ -155,7 +169,20 @@ def radiation_scheme_emulated(
             "form them with "
             "jcm.physics.radiation.cloud_optics.radiation_effective_radii."
         )
-    r_eff_liq_um, r_eff_ice_um = emulator_radius_features(
+    # Kept in SEPARATE variables from ``r_eff_liq_um``/``r_eff_ice_um``: the
+    # features below are the network's TRAINED-RANGE inputs (a phase-free
+    # layer's physical zero replaced by the packaged weights' training
+    # fill, 11um*cdnc_factor**(-1/3) / 83.8um -- see
+    # ``emulator_radius_features``), while ``r_eff_liq_um``/``r_eff_ice_um``
+    # stay the caller's PHYSICAL radii (zero where the phase is absent, the
+    # same convention RRTMGP's own ``r_eff_liq_at_solve``/``r_eff_ice_at_solve``
+    # publish) for the ``RadiationData`` diagnostic below. Reassigning them
+    # in place to the filled features reported the training fill as "the
+    # radius this solve used" in every phase-free layer (Codex review on
+    # PR #1146: the term wrapper's own final ``RadiationData`` never showed
+    # this because it keeps its own pre-vmap physical radii instead of
+    # reading this function's output back).
+    r_eff_liq_feature, r_eff_ice_feature = emulator_radius_features(
         r_eff_liq_um, r_eff_ice_um,
         in_cloud_condensate(cloud_water, cloud_fraction,
                             eps=parameters.cld_frac_min),
@@ -175,12 +202,16 @@ def radiation_scheme_emulated(
     sw_input = preprocess_sw_inputs(
         temperature, pressure_levels, h2o_vmr, ozone_vmr,
         cwp, cip, cloud_fraction, mu0_feature, sw_scaling,
-        r_eff_liq_um, r_eff_ice_um,
+        r_eff_liq_feature, r_eff_ice_feature,
         aerosol_data.aod_sw_per_band, aerosol_data.ssa_sw_per_band,
         aerosol_data.asy_sw_per_band, band_mode,
     )
-    # Same 0.46/0.54 vis/NIR weighting RRTMGP is driven with, so the
-    # emulator sees the boundary condition its labels were made under.
+    # Same 0.46/0.54 vis/NIR broadband weighting RRTMGP's training labels
+    # were made under (now RRTMGP's ``sfc_alb`` fallback value, since
+    # jax-gcm#959 moved its own solve to per-band direct/diffuse albedos),
+    # so the emulator sees the boundary condition its labels were made
+    # under. The emulator is NOT retrained on the per-band quartet in this
+    # change (gated off; see ``RadiationData`` construction below).
     surface_albedo = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
     sw_nn_output = lw_emulator_column(
         sw_input, jnp.atleast_1d(surface_albedo), emulator_weights.sw,
@@ -195,7 +226,7 @@ def radiation_scheme_emulated(
     lw_input = preprocess_lw_inputs(
         temperature, pressure_levels, h2o_vmr, ozone_vmr,
         cwp, cip, cloud_fraction, co2_vmr, lw_scaling,
-        r_eff_liq_um, r_eff_ice_um,
+        r_eff_liq_feature, r_eff_ice_feature,
         aerosol_data.aod_lw_per_band, aerosol_data.ssa_lw_per_band,
         aerosol_data.asy_lw_per_band, band_mode,
     )
@@ -223,6 +254,19 @@ def radiation_scheme_emulated(
         surface_albedo_vis=jnp.atleast_1d(surface_albedo_vis),
         surface_albedo_nir=jnp.atleast_1d(surface_albedo_nir),
         surface_emissivity=jnp.atleast_1d(surface_emissivity),
+        # GATED OFF (jax-gcm#959): the emulator was trained with the single
+        # 0.46·vis + 0.54·nir broadband albedo as its surface feature, and
+        # ``surface_albedo`` above -- not the raw vis/nir pair -- is what
+        # ``sw_nn_output`` was actually evaluated with. Publishing anything
+        # else here would describe a spectral split the held fluxes were
+        # never solved with (Codex review: the raw pair was published
+        # instead, an inconsistent last-solve diagnostic whenever
+        # vis != nir). Retraining on separate direct/diffuse features is
+        # future work; see ``docs/source/science/radiation.md``.
+        surface_albedo_vis_dir=jnp.atleast_1d(surface_albedo),
+        surface_albedo_vis_dif=jnp.atleast_1d(surface_albedo),
+        surface_albedo_nir_dir=jnp.atleast_1d(surface_albedo),
+        surface_albedo_nir_dif=jnp.atleast_1d(surface_albedo),
         sw_flux_up=sw_flux_up,
         sw_flux_down=sw_flux_down,
         sw_heating_rate=sw_heating,
@@ -274,6 +318,20 @@ def radiation_scheme_emulated(
             ),
             jnp.shape(sw_flux_up[0]),
         ),
+        total_cloud_cover_tau=jnp.zeros(jnp.shape(sw_flux_up[0])),  # no sub-columns
+        # The PHYSICAL radii this solve was fed -- the caller's own
+        # ``r_eff_liq_um``/``r_eff_ice_um`` arguments, deliberately NOT the
+        # ``r_eff_{liq,ice}_feature`` the network actually saw (which fill
+        # a phase-free layer's true zero with the packaged weights'
+        # training constant; see the comment above
+        # ``emulator_radius_features``) -- stashed on the carry the same
+        # way RRTMGP does (jax-gcm#1135), with the same zero-where-absent
+        # convention. Redundant here since the emulator never reads
+        # ``clouds.r_eff_liq``/``r_eff_ice`` back, but populating it with
+        # the real value rather than a placeholder costs nothing and keeps
+        # every ``RadiationData`` writer consistent.
+        r_eff_liq_at_solve=r_eff_liq_um,
+        r_eff_ice_at_solve=r_eff_ice_um,
         # ``step`` is owned by the enclosing ``NNEmulatorRadiation``
         # carry — the standalone scheme emits 0 and the term bumps it
         # after its compute-vs-cache cond.
@@ -296,11 +354,12 @@ from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.clouds.cloud_data import radiation_cloud_fields  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
+    apply_insolation,
     cached_radiation_tendency,
-    current_cos_zenith,
     hold_land_albedo,
     radiation_should_compute,
-    rescale_cached_radiation,
+    solve_solar_geometry,
+    sw_solve_to_transmissivity,
     surface_optics_for_solve,
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
@@ -537,6 +596,38 @@ class NNEmulatorRadiation(PhysicsTerm):
         self._weights_file = getattr(self, "_weights_file", None)
         self._coords_cached = False
 
+    def legacy_surface_albedo_quartet(self, vis, nir):
+        """``(vis, nir)`` -> the ``(vis_dir, vis_dif, nir_dir, nir_dif)`` this
+        backend would have published for them before the quartet existed
+        (jax-gcm#959's checkpoint migration, ``jcm.checkpoint._DERIVED_ON_MIGRATION``).
+
+        The emulator is evaluated with the single BLENDED broadband scalar
+        ``surface_albedo = 0.46*vis + 0.54*nir`` (see
+        :func:`radiation_scheme_emulated`) as its surface feature, trained
+        on RRTMGP's own broadband convention -- never the raw vis/nir pair,
+        and never grey two-stream's raw-pair convention (Codex review on
+        PR #1125). A fresh solve's own ``RadiationData`` still publishes
+        exactly this blend in all four quartet slots, so a migrated
+        pre-#959 carry must match.
+        """
+        blend = 0.46 * vis + 0.54 * nir
+        return blend, blend, blend, blend
+
+    def legacy_effective_radii_at_solve(self, r_eff_liq, r_eff_ice):
+        """``(r_eff_liq, r_eff_ice)`` -> the ``(r_eff_liq_at_solve,
+        r_eff_ice_at_solve)`` this backend would have held before the
+        dedicated carry existed (jax-gcm#1135's checkpoint migration,
+        ``jcm.checkpoint._DERIVED_ON_MIGRATION``).
+
+        Before this PR added the dedicated carry, ``__call__`` already
+        published the solve's own radius onto ``clouds.r_eff_liq``/
+        ``r_eff_ice`` every step (the ``clouds_in.copy(...)`` below), and
+        this scheme has no host-radii door to write anything else there, so
+        the two were always identical -- the checkpoint migration this
+        method serves simply carries that identity forward.
+        """
+        return r_eff_liq, r_eff_ice
+
     def withheld_output_keys(self) -> tuple[str, ...]:
         """Hide the aerosol-free slots the emulator never fills.
 
@@ -644,52 +735,55 @@ class NNEmulatorRadiation(PhysicsTerm):
         """Compute or reuse cached NN-emulated heating rates."""
         params = self.params.get_value()
         radiation = diagnostics["radiation"]
-        # Solar geometry now. Needed on both branches: the compute branch
-        # stamps it so a later cached step knows which sun the fluxes were
-        # solved under, and the cached branch rescales the shortwave by the
-        # ratio of the two (#671). Pure trig, so it is cheap every step.
-        mu0_now = current_cos_zenith(
-            forcing.solar, self._lons.get_value(), self._lats.get_value(),
-        ).astype(radiation.cos_zenith.dtype)
-
         clouds_in = diagnostics["clouds"]
         # The published radii are a DIAGNOSTIC of the radius fed to the
         # network, never an input: a solve forms its radii from the current
         # state, a cached step reports those of the solve its heating came
         # from (as RRTMGPRadiation does).
-        radii_carried = (clouds_in.r_eff_liq, clouds_in.r_eff_ice)
+        #
+        # Read from ``radiation.r_eff_liq_at_solve``/``r_eff_ice_at_solve``
+        # (the radiation term's OWN carry), not ``clouds_in.r_eff_liq``/
+        # ``r_eff_ice``: this scheme never reads either back today (no
+        # host-radii door exists here), so the two sources currently always
+        # agree, but RRTMGPRadiation's own ``__call__`` had to stop trusting
+        # ``clouds_in`` for exactly this read once a host could write to it
+        # (jax-gcm#1135 review finding) -- matching the pattern here too
+        # means this scheme is not carrying the same latent trap forward
+        # if a host-radii door is ever added to it.
+        radii_at_last_solve = (radiation.r_eff_liq_at_solve,
+                               radiation.r_eff_ice_at_solve)
 
         def _compute():
-            tend, rad, radii = self._compute_full(
+            _tend, rad, radii = self._compute_full(
                 state, diagnostics, forcing, terrain, params)
             # Pin the compute branch to the carry's leaf dtypes (see the
             # identical guard in rrtmgp.py / the grey scheme): keeps the
             # two lax.cond branches type-identical for float32 states
             # under jax_enable_x64.
             rad = jax.tree.map(lambda n, o: n.astype(o.dtype), rad, radiation)
-            tend = jax.tree.map(
-                lambda t: t.astype(state.temperature.dtype), tend)
             radii = jax.tree.map(
                 lambda n, o: n.reshape(o.shape).astype(o.dtype),
-                radii, radii_carried)
-            return tend, rad, radii
+                radii, radii_at_last_solve)
+            return rad, radii
 
         def _use_cached():
-            rad = rescale_cached_radiation(radiation, mu0_now)
-            tend = cached_radiation_tendency(rad, state.temperature.shape)
-            # Same dtype pin as _compute: under x64 the cached heating ->
-            # tendency arithmetic can promote through float64 scalars.
-            tend = jax.tree.map(
-                lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad, radii_carried
+            return radiation, radii_at_last_solve
 
         solved = radiation_should_compute(diagnostics, params)
-        tendency, new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
+        new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
             solved, _compute, _use_cached,
         )
-        # Zeroed downstream of the cond, so it covers the cached branch
-        # too: that one rebuilds the tendency from the heating rates on
-        # the carry, and with radiation sub-stepping most steps take it.
+        # The shortwave of EVERY step, solve or replay, is the carried
+        # transmissivity times the sun of this step (ECHAM ``zi0 * trsol``);
+        # the heating is rebuilt from it the same way -- one contract.
+        new_radiation = apply_insolation(
+            new_radiation, forcing.solar, self._lons.get_value(),
+            self._lats.get_value(), params.solar_constant)
+        tendency = cached_radiation_tendency(
+            new_radiation, state.temperature.shape)
+        tendency = jax.tree.map(
+            lambda t: t.astype(state.temperature.dtype), tendency)
+        # Zeroed after the rebuild so it covers every step.
         tendency = self._zero_if_requested(tendency)
         # Advance the radiation-local step counter on every call (both
         # compute and cached paths). Mirrors the carry-side step bump
@@ -723,7 +817,10 @@ class NNEmulatorRadiation(PhysicsTerm):
 
         latitudes = self._lats.get_value()
         longitudes = self._lons.get_value()
-        solar = forcing.solar
+        # Solved at the middle of the radiation interval (ECHAM
+        # ``radiation_time``); each step's own sun is re-applied afterwards.
+        solar = solve_solar_geometry(
+            forcing.solar, diagnostics["_dt_seconds"], params)
 
         cloud_water, cloud_ice, cloud_fraction = radiation_cloud_fields(
             state, diagnostics,
@@ -787,7 +884,7 @@ class NNEmulatorRadiation(PhysicsTerm):
         band_mode = self._band_mode
 
         tendencies_vmapped, diagnostics_vmapped = jax.vmap(
-            radiation_scheme_emulated,
+            functools.partial(radiation_scheme_emulated, solve_geometry=True),
             in_axes=(
                 1, 1, 1, 1, 1,
                 1, 1, 1, 1,
@@ -824,6 +921,24 @@ class NNEmulatorRadiation(PhysicsTerm):
             ),
             surface_emissivity=_column_vector_emulated(
                 diagnostics_vmapped.surface_emissivity, ncols,
+            ),
+            # Gated off; see the comment on the standalone-scheme
+            # construction above. Reads the already-correct (blended)
+            # quartet the standalone call published -- rebuilding it here
+            # from the raw vis/nir pair would reintroduce exactly the
+            # inconsistent-diagnostic bug that construction's comment
+            # documents.
+            surface_albedo_vis_dir=_column_vector_emulated(
+                diagnostics_vmapped.surface_albedo_vis_dir, ncols,
+            ),
+            surface_albedo_vis_dif=_column_vector_emulated(
+                diagnostics_vmapped.surface_albedo_vis_dif, ncols,
+            ),
+            surface_albedo_nir_dir=_column_vector_emulated(
+                diagnostics_vmapped.surface_albedo_nir_dir, ncols,
+            ),
+            surface_albedo_nir_dif=_column_vector_emulated(
+                diagnostics_vmapped.surface_albedo_nir_dif, ncols,
             ),
             sw_flux_up=diagnostics_vmapped.sw_flux_up.T,
             sw_flux_down=diagnostics_vmapped.sw_flux_down.T,
@@ -873,6 +988,13 @@ class NNEmulatorRadiation(PhysicsTerm):
             total_cloud_cover=_column_vector_emulated(
                 diagnostics_vmapped.total_cloud_cover, ncols,
             ),
+            total_cloud_cover_tau=jnp.zeros((ncols,)),  # no sub-columns: not computed
+            # The radii this solve was fed (same values as the diagnostic
+            # feature the network saw), stashed the same way RRTMGP does
+            # (jax-gcm#1135); see the comment on the standalone-scheme
+            # construction above.
+            r_eff_liq_at_solve=r_eff_liq_um,
+            r_eff_ice_at_solve=r_eff_ice_um,
             # Placeholder — the enclosing ``__call__`` overwrites
             # ``step`` after the compute-vs-cache cond.
             step=jnp.int32(0),
@@ -885,7 +1007,8 @@ class NNEmulatorRadiation(PhysicsTerm):
             specific_humidity=jnp.zeros((nlev, ncols)),
             tracers={},
         )
-        return tendency, rad_out, (r_eff_liq_um, r_eff_ice_um)
+        return tendency, sw_solve_to_transmissivity(rad_out), (
+            r_eff_liq_um, r_eff_ice_um)
 
 
 def guard_ghg_forcing(physics, forcing) -> None:

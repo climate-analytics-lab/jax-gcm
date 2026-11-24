@@ -56,8 +56,8 @@ Installation and dependencies
 
 .. code-block:: console
 
-   $ pip install --upgrade jcm                # 3.0.0 is a normal release
-   $ pip install "jcm==3.0.0"                 # or pin it
+   $ pip install --upgrade jcm                # a normal release
+   $ pip install "jcm==3.1.0"                 # or pin it
 
 Minimum versions that changed, and why each floor is a floor rather than a
 preference:
@@ -598,6 +598,9 @@ The packaged preset group was renamed, with **no compatibility alias group**:
    $ python -m jcm.main +experiment=t63-echam-jam      # v2
    $ python -m jcm.main +configuration=t63-echam-jam   # v3
 
+(From v3.1 ``t63-echam-jam`` runs the M7 population; the MAM4 configuration
+these lines named is now ``t63-echam-jam-mam4``.)
+
 The Python door moved with it — ``jcm.experiments`` → ``jcm.configurations``
 (``load()``, ``available()``). A downstream project that composes the tree
 through ``hydra.searchpath: [pkg://jcm.config]`` must also change
@@ -644,9 +647,11 @@ which is why the canonical configuration in
 wherever a tracer reaches the boundary negative. Keep the explicit value there,
 or delete it deliberately.
 
-A shape consequence worth knowing if you index a dycore-native state:
-``specific_humidity`` stays **modal** for the implicit q↔Tᵥ coupling while
-every extra tracer is **nodal**, so the two no longer share a shape.
+A shape consequence worth knowing if you index a dycore-native state: every
+extra tracer is **nodal** (gridpoint-shaped) under semi-Lagrangian transport,
+and so is ``specific_humidity`` (``dycore.nodal_humidity``, the default; it is
+**modal** on the Eulerian core and with ``nodal_humidity: false``), while
+vorticity, divergence, temperature and surface pressure are modal.
 
 .. _v3-tiedtke-parameters:
 
@@ -729,7 +734,7 @@ On the CLI, ``physics=echam`` is the RRTMGP term list, so the separate
 .. code-block:: console
 
    $ python -m jcm.main physics=echam-rrtmgp   # v2 — now a Hydra missing-config error
-   $ python -m jcm.main physics=echam          # v3 — the same term list
+   $ python -m jcm.main physics=echam grid=echam_t63_l47_hybrid   # v3 — the same term list
 
 (The ``+configuration=t63-echam-rrtmgp`` *configuration* preset is a different
 group and still exists.) The factory-built presets (``echam-jam*``,
@@ -1272,7 +1277,7 @@ deliberate behaviour change, not a side effect. Opt out with:
        sl_options={"mass_fixer": False},
    )
 
-The same switch also turns off the fixer for the modal ``specific_humidity``.
+The same switch also turns off the fixer for ``specific_humidity``.
 That fixer, together with cubic vertical interpolation, closes the global
 water budget: before them semi-Lagrangian transport created 0.22–0.24 mm/day of
 water, about 9 % of precipitation (see :doc:`design/tracer_mass_conservation`).
@@ -1656,7 +1661,7 @@ unchanged.
 Support matrix
 --------------
 
-:doc:`science/configurations` is the authoritative, exhaustive roster: all 19
+:doc:`science/configurations` is the authoritative, exhaustive roster of the
 packaged configurations, tiered, with grid, timestep and forcing per row. This
 table is the other cut through the same information — **backend against physics
 package** — because that is the axis a v2 user is most likely to assume is
@@ -1671,27 +1676,34 @@ free.
      - pySES CAM-SE (``jcm[pyses]``)
    * - ``speedy``
      - **Release-validated**, T31 L8 on SPEEDY's sigma table (``speedy-t31``);
-       every gate passes on the release tree
+       every gate passes on ``3.1.0rc1``
      - Composes and builds; no packaged configuration, never validated
    * - ``echam`` (1M)
-     - **Release-validated**, T63 and T106 L47; both years miss the offline
-       cloud-cover floor (0.47 and 0.42 vs 0.5; T106 is the untuned cover
-       blend, #1014), accepted and documented in the release notes
-     - No packaged configuration; composes only with ``cu_lmfmid=false``
-       (:ref:`v3-limitation-omega`)
+     - **Release-validated**, T63 and T106 L47; every gate passes on
+       ``3.1.0rc1``. Both read the cover set fitted on the 2M host at T63
+       (interpolated toward ECHAM's T127 row at T106); neither has a fit of
+       its own (#1014)
+     - No packaged configuration; composes with ``cu_lmfmid`` on since
+       #1175 (:ref:`v3-limitation-omega`)
    * - ``echam-rrtmgp-2m``
-     - **Release-validated**, T63 and T106 L47; T63 misses the offline
-       cloud-cover floor by 0.005, T106 misses the TOA band by 0.2 W/m² and
-       the cover floor (untuned cover blend at T106, #1014), all accepted
-       and documented in the release notes
-     - No packaged configuration; composes only with ``cu_lmfmid=false``
-       (:ref:`v3-limitation-omega`)
+     - **Release-validated**, T63 and T106 L47; every gate passes on
+       ``3.1.0rc1``. T106 reads a cover blend interpolated from the T63 fit,
+       not a fit of its own (#1014)
+     - No packaged configuration; composes with ``cu_lmfmid`` on since
+       #1175 (:ref:`v3-limitation-omega`)
    * - ``echam-jam``
-     - **Release-validated**, T63 L47 (cold year on the calibration targets;
-       warm state published); T63 L95 validated to day 310 of its year (a
-       cluster storage outage interrupted it)
+     - **Release-validated**, T63 L47 and T63 L95 (``ma-t63-l47``,
+       ``ma-t63-l95``) on ``3.1.0rc1``: each cold year fails only the
+       six-month burden-drift line, which reads the seasonal POA, SOA and dust
+       sources as drift, and a warm-started second year passes every gate
+       (:doc:`design/jam_regression`)
      - Benchmark-validated at ne30 L47/L95, with ``cu_lmfmid=false`` and
        prescribed-emission-free (below)
+   * - ``echam-jam-m7``
+     - **Release-validated** (matrix member), T63 L47 (``t63-echam-jam``) on
+       ``3.1.0rc1``, the same way (its cold year fails the drift line on OC
+       and dust only); with its regression fixture; needs ``jcm[m7]``
+     - No packaged configuration
    * - ``echam-emulated-2m``
      - Benchmark-validated, T63 L47
      - No packaged configuration
@@ -1722,8 +1734,8 @@ explicitly, as a ``GreyTwoStreamRadiation`` term.
 "Release-validated" means a member of ``tools/release_validation/matrix.yaml``:
 a full A100 year with 5-day means, scored by ``health.py`` against TOA net,
 precipitation, cloud cover, near-surface temperature and AOD bands (plus the
-JAM burden-drift and budget-residual gates). **All seven release-validated
-members run on the Dinosaur backend.** "Benchmark-validated" means a
+JAM burden-drift and budget-residual gates). **All eight release-validated
+members (``echam-jam-m7`` included) run on the Dinosaur backend.** "Benchmark-validated" means a
 configuration-group preset exercised by ``tools/benchmark.py`` and long
 campaign runs, but not scored by the release matrix.
 
@@ -1742,6 +1754,13 @@ pySES publishes no ``omega``, so mid-level convection is off there
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 *Documented limitation (proposed) — #698.*
+
+.. note::
+
+   **Resolved after v3.0** (#1175): ``PysesCamSEDycore`` now has a
+   ``compute_omega`` provider, which ``Model`` switches on automatically when
+   the physics requires ``omega``, so ECHAM physics with ``cu_lmfmid`` on
+   composes on pySES. The text below records the v3.0 behaviour.
 
 pySES computes the vertical pressure velocity internally but does not publish
 it, and ``PysesCamSEDycore`` has no ``compute_omega`` provider to switch on.
@@ -1764,10 +1783,12 @@ and **its spelling depends on the shape of the physics group**, because
 
    # term-list groups (physics=echam, echam-rrtmgp-2m, ...)
    $ python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year \
+       physics.land_model=prescribed \
        +physics.terms.tiedtke_convection.params.cu_lmfmid=false
 
    # factory-built groups (physics=echam-jam*, i.e. builder: echam_physics)
    $ python -m jcm.main dycore=pyses_ne30l47 physics=echam-jam run=pyses_year \
+       physics.land_model=prescribed \
        +physics.cu_lmfmid=false
 
 The wrong spelling fails loudly rather than falling back to the default. The
@@ -1835,24 +1856,33 @@ VMRs) while the ledger covers only ``specific_humidity`` and
 
 .. _v3-limitation-prescribed-carry:
 
-``PrescribedStateModel`` re-diagnoses carried state from a cold start
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+``PrescribedStateModel`` threads carried state sequentially (resolved)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-*Documented limitation (proposed) — #623.*
+*Resolved — #623.*
 
-``PrescribedStateModel`` (``run.mode=prescribed``) evaluates every state
-independently with a ``vmap``, passing no cross-step physics carry. Each time
-is therefore diagnosed as a cold start, every carry slot at the value its term
-assumes without one. Slots a term rebuilds each step lose nothing; state that
-accumulates across steps does: TTE-TKE turbulence takes its spin-up value, and
-JAM's cloud-borne aerosol — whose only copy lives in the carry under the
-default storage — is an empty reservoir, so wet deposition, aqueous chemistry,
-ice nucleation and the AeroCom burdens re-diagnosed from a saved state see no
-cloud-borne phase. Construction warns once, naming the slots.
-
-To analyse the cloud-borne phase of a saved run, read that run's own
-``jam_cloud_borne.*`` output. Threading the carry (a scan over the states
-rather than a ``vmap``) is a structural change left for after v3.0.
+At 3.0.0, ``PrescribedStateModel`` (``run.mode=prescribed``) evaluated every
+state independently with a ``vmap``, passing no cross-step physics carry
+(the limitation this page originally documented). A composition with
+carry slots now threads them SEQUENTIALLY instead, with ``lax.scan``: each
+state's physics genuinely sees the carry the physics produced diagnosing the
+previous state, the way a live run does. What differs from a live run is
+the seed — with no donor carry supplied
+(``PrescribedStateModel.run(..., initial_physics_state=...)``), the carry
+cold-starts at the FIRST state, so carry-dependent terms (TTE-TKE turbulence;
+JAM's cloud-borne aerosol, whose only copy lives in the carry) are in a
+spin-up for the first few times rather than inheriting a true prior state.
+The two host-written step-lagged anchors (``_prev_step``,
+``_post_physics_state``), whose consumers difference them against the next
+state over one ``dt``, are threaded only between states exactly
+``dt_seconds`` apart and reset to their cold template across any other gap,
+so a daily-snapshot re-diagnosis reads "no known dynamics" in Tiedtke's
+moisture-convergence gate and the cloud schemes' dynamics increment, as at
+3.0.0, rather than a tendency inflated by ``gap / dt``.
+A composition with no carry slots (Held-Suarez, SPEEDY) is unaffected: every
+time was already independent of every other, so it keeps the ``vmap`` path.
+See :doc:`running_at_scale` and the "Initial physics carry" section of
+:doc:`design/operator_split_physics` for the current semantics.
 
 No ne30 dust product; dust tuning is a T63 quantity
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1876,16 +1906,10 @@ See :doc:`science/boundary_conditions` and :doc:`science/aerosol`.
 Validation gaps in the release matrix
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-*Documented limitation (proposed) — #638.*
+*Documented limitation.*
 
-Two things the matrix does not currently establish, each worth knowing before
-quoting a validated configuration:
-
-* the **T106 members' multi-GPU mesh configurations have never been run for a
-  full year**;
-* ``echam-jam`` at **L95** ran on the release tree to day 310 of its year
-  before a cluster storage outage interrupted it; its band is the previous
-  one.
+The matrix runs every member on one A100, so the **T106 members' multi-GPU
+mesh configurations have never been run for a full year**.
 
 A ``FAIL`` from ``health.py`` is also a recorded verdict rather than
 automatically a blocker: several members fail a gate by design until the

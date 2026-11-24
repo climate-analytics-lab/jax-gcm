@@ -74,10 +74,42 @@ request, resolved to the same cell as always.
 ``run.mode=prescribed`` evaluates each state at its own time: the file's
 ``time`` coordinate gives the offsets from the first state, so date-aligned
 forcing is selected (and its coverage checked) at the snapshot dates, not at
-synthetic model steps. Each state is diagnosed on its own, so physics state
-carried between steps — TTE-TKE turbulence, JAM's cloud-borne aerosol — is
-re-diagnosed from a cold start at every time; a physics with such carry slots
-warns once, naming them (``jcm.prescribed_state_model.PrescribedStateModel``).
+synthetic model steps. A physics composition with cross-step carry slots —
+TTE-TKE turbulence, JAM's cloud-borne aerosol — has that carry threaded
+SEQUENTIALLY across the states with ``lax.scan``, so each state's physics
+genuinely sees the carry the physics produced diagnosing the PREVIOUS state,
+the same flow a live run has (#623). What differs from a live run is the
+seed: with no donor carry given
+(``PrescribedStateModel.run(..., initial_physics_state=...)``), the carry
+cold-starts at the first state rather than inheriting a true prior one, so
+carry-dependent terms are in a spin-up for the first few states; every such
+call warns, naming the slots. A composition with no carry slots
+(Held-Suarez, SPEEDY) is unaffected — every state is already independent of
+every other, so it stays an embarrassingly-parallel ``vmap``. See
+:doc:`design/operator_split_physics` for how the carry is built, and read a
+saved run's own ``jam_cloud_borne.*`` output for cloud-borne analysis that
+needs the exact record rather than a re-diagnosis.
+
+The scan advances the carry once per SAVED state, not once per
+``dt_seconds`` — exact for the carry the physics actually produces from
+those states, but a coarser approximation of its trajectory the more the
+save interval exceeds ``dt_seconds`` (daily snapshots against an
+hourly-to-half-hourly ``dt`` is the normal case here). Nothing repairs
+that: the intermediate states a live run stepped through are not in the
+file. Two host-written slots are treated differently because for them a
+longer gap is not an approximation at all: ``_prev_step`` and the
+post-physics anchor ``_post_physics_state`` are differenced against the
+next received state over ONE ``dt`` by their consumers (Tiedtke's
+moisture-convergence gate, the cloud schemes' dynamics increment), so
+across a daily gap they would report that one-step tendency inflated by
+``gap / dt``. The scan therefore threads them into a state only when it
+sits exactly ``dt_seconds`` after the previous one, and resets them to
+their cold template otherwise (the first state included), so those
+consumers read "no known dynamics" there — what they read on a live run's
+first step. A run with any gap other than ``dt_seconds`` warns once per
+call, stating both effects. A state file saved every ``dt_seconds`` is the
+only input that gives a live step's inputs; for everything else the saved
+run's own carry-derived output remains the exact record.
 Where the first state sits:
 
 * a file with a decoded date axis (``datetime64``/``cftime`` — any v3 output)
@@ -136,13 +168,15 @@ sponge, for instance, goes NaN within days at L47. The ``configuration`` group
 promotes each *known-good* combination to a single named composition, so one
 command is one validated configuration::
 
-   python -m jcm.main +configuration=t63-echam-jam     # T63L47 ECHAM + JAM aerosol
+   python -m jcm.main +configuration=t63-echam-jam     # T63L47 ECHAM + JAM (M7) aerosol
    python -m jcm.main +configuration=speedy-t31        # SPEEDY T31L8 reference
    python -m jcm.main +configuration=ma-t63-l95        # middle-atmosphere JAM sweep
 
 Some configurations need an **optional extra** on top of the base install: the
-JAM recipes (``*-jam*``, ``ma-*``) select the MAM4-JAX core and need
-``pip install jcm[mam4]``; the pySES recipes need ``jcm[pyses]``; the COSP
+default JAM recipe (``t63-echam-jam``, the M7 population) needs ``jcm[m7]``,
+after ``pip install "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e"``
+(m7-jax is not on PyPI yet); the MAM4 JAM recipes (``t63-echam-jam-mam4``, ``*-jam-aerocom*``,
+``ma-*``) select the MAM4-JAX core and need ``pip install jcm[mam4]``; the pySES recipes need ``jcm[pyses]``; the COSP
 satellite-simulator variant needs ``jcm[cosp]`` (its ``jax-cosp`` is not on
 PyPI yet: ``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``
 first); ERA5 init/nudging (below) needs ``jcm[era5]``. A missing extra fails
@@ -194,7 +228,7 @@ Two consequences worth committing to memory:
   ``physics/echam.yaml`` (each field falls back to the scheme's
   ``Parameters.default()``), so overriding one field needs the append prefix::
 
-     python -m jcm.main physics=echam \
+     python -m jcm.main physics=echam grid=echam_t63_l47_hybrid \
          +physics.terms.tiedtke_convection.params.entrpen=4e-4
 
   The factory-built presets (``physics=echam-jam``, ``echam-forced-flux``:
@@ -202,7 +236,7 @@ Two consequences worth committing to memory:
   block is the factory's per-scheme argument (``convection``, ``clouds``,
   ``microphysics_2m``, ``radiation``, ``vertical_diffusion``, ...)::
 
-     python -m jcm.main physics=echam-jam \
+     python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
          +physics.convection.entrpen=4e-4 +physics.convection.tau=3600
 
   The field is applied on top of what that preset would otherwise use, and
@@ -223,8 +257,8 @@ Two consequences worth committing to memory:
 Online-aerosol (JAM) inputs default to ``auto``
 ------------------------------------------------
 
-When a prognostic-aerosol package is active (``physics=echam-jam`` and its
-AeroCom variants), the prescribed-emission inputs — ``forcing.emissions_file``,
+When a prognostic-aerosol package is active (``physics=echam-jam``, its
+AeroCom variants, and ``echam-jam-m7``), the prescribed-emission inputs — ``forcing.emissions_file``,
 ``forcing.dms_file``, ``forcing.dust_file`` and ``forcing.oxidants_file`` —
 default to ``auto``. ``auto`` resolves the per-grid present-day bundle from the
 project data mirror for the composed grid (e.g. ``bundles/t63/emissions_pd.nc``)
@@ -237,6 +271,12 @@ transient by-date run (``forcing=amip``/``era5``) left on ``auto`` breathes
 present-day aerosol emissions over a historical circulation — the runner warns
 and names the keys; override ``forcing.emissions_file``/``forcing.oxidants_file``
 with year-matched products for a consistent transient run.
+
+``forcing.volcanic_file`` defaults to ``auto`` as well, and resolves one
+grid-free file of volcanic SO₂ point sources on every grid: continuous
+degassing, plus the eruptions of whichever years the model calendar passes
+through (``forcing.volcanic_eruption_year`` replays one year's instead). See
+:doc:`design/jam_volcanic_so2`.
 
 The data mirror — ``hf://`` paths
 ----------------------------------
@@ -363,6 +403,18 @@ when the working directory is ephemeral (a container, a scratch job) — and run
 unhealthy chunk instead of integrating a doomed state for hours; set it
 ``false`` to log and keep going.
 
+Beyond NaNs and the fixed absolute-blowup bounds, the gate also enforces two
+configurable ceilings, ``run.health.max_wind_speed`` (250 m/s) and
+``run.health.max_temperature`` (400 K) — loose enough that no validated
+configuration trips them, but tight enough to catch an unforced or
+underdamped dry core (no physics, or physics such as SSO drag that only ever
+removes energy/momentum) drifting arbitrarily far outside any physical
+regime without ever producing a NaN (#1145). Set either to ``null`` to
+disable it for a deliberately hot/windy experiment::
+
+   python -m jcm.main +configuration=t63-echam-rrtmgp run=longrun \
+       run.health.max_wind_speed=300.0
+
 A chunk's host work — the device-to-host copy, the health check, the netCDF,
 monthly and checkpoint writes — runs on a background thread while the next
 chunk integrates, so it adds no wall time unless it outlasts a chunk; each
@@ -370,6 +422,25 @@ report's ``Host:`` line says how long it took. A chunk's report therefore
 prints after the next chunk's ``Model starting`` line, and a bailing run stops
 one chunk later, discarding that chunk unwritten. See
 :doc:`design/chunked_run_io_overlap`.
+
+Set ``run.progress_bar=true`` for an opt-in, HOST-ONLY progress bar (off by
+default): one tick per chunk, right after each chunk's integration
+returns. Uses ``tqdm`` if it is importable, else a plain fallback printer;
+never a hard dependency, and never added to the compiled integration when
+left off, so it cannot change a run's compilation or timing (see
+:mod:`jcm.progress`). There is no reporting at a finer grain *within* one
+chunk: an earlier version ticked once per saved interval from inside the
+jitted scan, but three rounds of review each found that broken a
+different way (an ordered callback cannot compile under a multi-device
+``NamedSharding``; an unordered one has no delivery-order guarantee and,
+even carrying its own data dependency, is still a *pure* primitive the
+compiler may drop or duplicate) — see :mod:`jcm.progress`'s module
+docstring for the full history. The same ``progress=True`` keyword works
+on :meth:`jcm.model.Model.run` / :meth:`~jcm.model.Model.resume` directly,
+outside the CLI, where it shows the whole call as a single unit (0 -> 1)
+rather than per-chunk. It supports one active bar per process, not per
+thread — pass ``progress=False`` for every concurrent run but one, or a
+second thread's bar raises ``RuntimeError``.
 
 Multi-day integrations on preemptible compute (spot instances, Slurm
 ``--requeue`` queues, NRP Nautilus) can be killed at short notice. Set
@@ -407,12 +478,28 @@ first interval of the next month arrives (#901). The means are
 duration-weighted and accumulated in float64, and the files do not depend on
 ``run.chunk_days`` or on where a run was killed and resumed. A partial first
 or last month carries its actual ``time_bounds`` plus ``time_coverage`` and
-``time_coverage_fraction``. It needs ``run.output_averages=true`` and save
-intervals that tile the months from ``run.start_time`` (daily or sub-daily
-saves from a midnight start); a schedule that would cross a month edge is
-refused before integrating. ``run.save_chunks=false`` keeps only the monthly
-files — a year of daily means for a JAM configuration is hundreds of GB — and
-is refused without ``run.monthly_means=true``, which would write nothing.
+``time_coverage_fraction``. It needs ``run.output_averages=true``.
+
+``run.start_time`` and ``run.save_interval`` need not already tile the
+calendar (#903): a non-midnight start, or a save interval that does not
+evenly divide every month (5 days, say), is scheduled automatically rather
+than refused. The run is laid out as a sequence of sub-runs — the configured
+``save_interval`` for most of each month, and a single shorter *edge* sub-run
+(exactly one output interval) wherever a regular interval would otherwise
+cross the next midnight, a month start, or the run's end — built by
+:func:`jcm.temporal_aggregation.schedule_monthly_segments` (also usable
+directly, outside the chunked runner, by a bring-your-own-driver workflow).
+Only a request with no valid schedule — an edge whose duration is not a
+whole number of model steps, e.g. a 7-minute time step against a save
+interval whose month-boundary remainder is off that grid — is refused, and
+still before any integration. The long-standing refusal in
+:func:`jcm.temporal_aggregation.monthly_means` /
+:class:`~jcm.temporal_aggregation.MonthlyMeanAccumulator` for an interval that
+does cross a month boundary stays as the safety net for anything that still
+reaches them without going through a schedule. ``run.save_chunks=false``
+keeps only the monthly files — a year of daily means for a JAM configuration
+is hundreds of GB — and is refused without ``run.monthly_means=true``, which
+would write nothing.
 
 With a checkpoint, the pending month is persisted as
 ``{run.checkpoint_path}.monthly``: staged as ``.monthly.new`` just before
@@ -476,6 +563,35 @@ state while resetting the clock is the separate
 :func:`jcm.initial_states.checkpoint_state` path in the getting-started
 guide.)
 
+Constant pressure-surface output
+---------------------------------
+
+``run.pressure_levels`` (null by default, sigma output unaffected) converts
+every ``level``-dimensioned field in a file about to be written onto a fixed
+list of pressures in hPa, log-pressure linearly interpolated from the
+model's own ``pressure_full``:
+
+.. code-block:: console
+
+   python -m jcm.main run.pressure_levels='[1000, 925, 850, 700, 500, 300, 200, 100, 50, 10]'
+
+It applies to every output file alike — the plain run, each
+``run.chunk_days`` chunk, each monthly file, and the ``run.snapshot_interval``
+stream (which has no ``level`` dimension to convert, so is unaffected either
+way) — using that file's own ``pressure_full``, so a monthly mean is
+converted using its own mean column pressures, not day by day first. A point
+whose target pressure falls below that column's surface or above the model
+lid comes back ``NaN`` rather than extrapolated past the actual profile.
+``pressure_full`` (and ``pressure_thickness``) describe the sigma grid
+interpolated *from* and are left as they were.
+
+:func:`jcm.analysis.to_pressure_levels` is the same conversion as a plain
+function on an already-saved (or in-memory) Dataset — see
+:doc:`advanced_features`'s "Output on constant pressure surfaces" and
+``docs/source/design/output_vertical_conventions.md``'s `plev` section — so
+a run saved on sigma levels does not need to be re-run to get pressure-level
+output.
+
 Nudging from config
 -------------------
 
@@ -494,7 +610,7 @@ Prefetch on a login node first when compute nodes lack internet
 nudging is automatically masked off above ``nudging.min_pressure_hpa`` (default
 60); see ``jcm/config/nudging/era5.yaml`` for the knobs (``tau_hours``,
 ``pbl_levels``, ``nudge_temperature``, ``freq``). Wiring nudging in code against
-an arbitrary reference dataset is covered in the getting-started guide.
+an arbitrary reference dataset is covered in :doc:`advanced_features`.
 
 Multi-device parallelization
 ----------------------------
@@ -523,10 +639,10 @@ vertical)``, and their product must equal the device count:
    model = Model(coords=coords)
    predictions = model.run(save_interval=5.0, total_time=30.0)
 
-Rules of thumb: longitude (x) usually has the most grid points, so split it
-first; physics with many layers (32/64) can benefit from vertical sharding of
-the dycore instead; and higher resolutions (T85+) gain the most from sharding.
-See :doc:`design/parallelization` for the sharding design and the strong-scaling
+Rules of thumb: on GPU split longitude (x) only; on CPU devices (set
+``XLA_FLAGS=--xla_force_host_platform_device_count=N`` before starting Python) a
+level mesh ``(1, 1, N)`` is fastest at T63, with ``N`` a divisor of the longitude
+count; higher resolutions (T85+) gain the most from sharding on GPU. See :doc:`design/parallelization` for the sharding design and the strong-scaling
 results.
 
 Docker

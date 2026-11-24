@@ -5,7 +5,8 @@ import jax
 from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
-from jcm.physics.speedy.physical_constants import epssw, solc, epsilon
+from jcm.physics.speedy.physical_constants import epssw, epsilon
+import jcm.constants as c
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.utils import cast_like
 from jcm.physics.speedy.physics_data import PhysicsData
@@ -67,8 +68,26 @@ def get_shortwave_rad_fluxes(
             (state, physics_data, parameters, forcing, terrain, zero_tendencies))
         tendencies = pin_tendency(tendencies)
         shortwave_rad = new_physics_data.shortwave_rad.copy(heating_rate=tendencies.temperature)
-        return tendencies, cast_like(new_physics_data.copy(shortwave_rad=shortwave_rad),
-                                     physics_data)
+        # The same pass with the clouds removed, a diagnostic only: its
+        # net TOA flux and surface insolation are the clear-sky shortwave
+        # fluxes, and the longwave transmissivities it builds are the
+        # cloud-free ones the upward longwave pass reuses for the clear-sky
+        # OLR (ClearSkyRadiationData). Held between radiation steps exactly
+        # as the all-sky fluxes are.
+        no_cloud = jnp.zeros_like(physics_data.shortwave_rad.cloudc)
+        clear_in = physics_data.copy(shortwave_rad=physics_data.shortwave_rad.copy(
+            cloudc=no_cloud, cloudstr=no_cloud))
+        _, clear_out, _, _, _, _ = shortwave_rad_fluxes(
+            (state, clear_in, parameters, forcing, terrain, zero_tendencies))
+        clear_sky = physics_data.clear_sky.copy(
+            ftop_sw=clear_out.shortwave_rad.ftop,
+            rsds=clear_out.shortwave_rad.rsds,
+            tau2=clear_out.mod_radcon.tau2,
+            emis2=clear_out.mod_radcon.emis2,
+        )
+        return tendencies, cast_like(
+            new_physics_data.copy(shortwave_rad=shortwave_rad, clear_sky=clear_sky),
+            physics_data)
 
     def _replay(_):
         tendencies = PhysicsTendency.zeros(shape=shape, temperature=physics_data.shortwave_rad.heating_rate)
@@ -128,28 +147,58 @@ def shortwave_rad_fluxes(operand):
     # function of layer mass, ozone (in the statosphere),
     # abs. humidity and cloud cover (in the troposphere)
     psaz = psa*physics_data.shortwave_rad.zenit
+
+    # Clear-sky backscatter (molecular and aerosol), an addition to SPEEDY,
+    # whose clear sky only absorbs: a visible-band reflectance proportional to
+    # the slant air mass psa*zenit -- Rayleigh optical depth scales with the
+    # column mass and the path with the zenith factor SPEEDY already applies to
+    # its absorptivities -- held in the top layer's reflectance channel, so the
+    # downward pass removes it before any absorption and the upward pass
+    # returns it to space unattenuated, the way the cloud-top reflectance is
+    # handled. refclr = 0 (the default) is the reference scheme exactly.
+    clear_reflectance = jnp.minimum(
+        parameters.shortwave_radiation.refclr * psaz, 1.0)
+    tau2 = tau2.at[0, :, :, 2].add(clear_reflectance)
     acloud = cloudc*jnp.minimum(
         parameters.shortwave_radiation.abscl1*physics_data.shortwave_rad.qcloud,
         parameters.shortwave_radiation.abscl2
     )
-    tau2 = tau2.at[0,:,:,0].set(jnp.exp(-psaz*dhs[0]*parameters.shortwave_radiation.absdry))
+    # Channels 0 and 1 of ``tau2`` are shortwave transmissivities
+    # ``exp(-optical_depth)``; ``get_clouds``/below also needs each channel's
+    # absorptivity ``1 - exp(-optical_depth)`` (dfabs below). Forming that as
+    # ``1 - tau2[...]`` once ``tau2`` already holds the *rounded* exponential
+    # is the textbook cancellation this issue (#571) targets: for an
+    # optically thin layer (dry upper atmosphere, low humidity) the
+    # subtraction of two close-to-1 floats loses most of its significant
+    # digits in float32. Each optical depth is kept as a local variable so
+    # the absorptivity can be formed directly with ``-expm1(-x)`` -- the
+    # non-cancelling idiom jax-rrtmgp#17 used -- alongside the matching
+    # ``exp(-x)`` transmissivity, both computed once from the same ``x``.
+    od0_top = psaz * dhs[0] * parameters.shortwave_radiation.absdry
+    tau2 = tau2.at[0, :, :, 0].set(jnp.exp(-od0_top))
+    one_minus_tau0 = jnp.zeros((kx, ix, il))
+    one_minus_tau0 = one_minus_tau0.at[0].set(-jnp.expm1(-od0_top))
 
     abs1 = parameters.shortwave_radiation.absdry + parameters.shortwave_radiation.absaer * fsg[1:nl1] ** 2
     cloudy = jnp.arange(2, nl1+1)[:, jnp.newaxis, jnp.newaxis] >= icltop
-    
-    tau2 = tau2.at[1:nl1, :, :, 0].set(
-        jnp.exp(-psaz * dhs[1:nl1, jnp.newaxis, jnp.newaxis] * (
-            abs1[:, jnp.newaxis, jnp.newaxis] +
-            parameters.shortwave_radiation.abswv1 * qa[1:nl1] +
-            cloudy * acloud
-        ))
+
+    od0_mid = psaz * dhs[1:nl1, jnp.newaxis, jnp.newaxis] * (
+        abs1[:, jnp.newaxis, jnp.newaxis] +
+        parameters.shortwave_radiation.abswv1 * qa[1:nl1] +
+        cloudy * acloud
     )
+    tau2 = tau2.at[1:nl1, :, :, 0].set(jnp.exp(-od0_mid))
+    one_minus_tau0 = one_minus_tau0.at[1:nl1].set(-jnp.expm1(-od0_mid))
 
     abs1 = parameters.shortwave_radiation.absdry + parameters.shortwave_radiation.absaer*fsg[kx - 1]**2
-    tau2 = tau2.at[kx-1,:,:,0].set(jnp.exp(-psaz*dhs[kx - 1]*(abs1 + parameters.shortwave_radiation.abswv1*qa[kx - 1])))
-    tau2 = tau2.at[1:kx,:,:,1].set(
-        jnp.exp(-psaz*dhs[1:kx, jnp.newaxis, jnp.newaxis]*parameters.shortwave_radiation.abswv2*qa[1:kx])
-    )
+    od0_bot = psaz*dhs[kx - 1]*(abs1 + parameters.shortwave_radiation.abswv1*qa[kx - 1])
+    tau2 = tau2.at[kx-1,:,:,0].set(jnp.exp(-od0_bot))
+    one_minus_tau0 = one_minus_tau0.at[kx - 1].set(-jnp.expm1(-od0_bot))
+
+    od1 = psaz*dhs[1:kx, jnp.newaxis, jnp.newaxis]*parameters.shortwave_radiation.abswv2*qa[1:kx]
+    tau2 = tau2.at[1:kx,:,:,1].set(jnp.exp(-od1))
+    one_minus_tau1 = jnp.zeros((kx, ix, il))
+    one_minus_tau1 = one_minus_tau1.at[1:kx].set(-jnp.expm1(-od1))
 
     # 3. Shortwave downward flux
     # 3.1 Initialization of fluxes
@@ -216,7 +265,9 @@ def shortwave_rad_fluxes(operand):
         flux_2[1],
         tau2[1:kx])
     flux_2 = flux_2.at[1:kx].set(flux_2_scan)
-    dfabs = dfabs.at[1:kx].add(flux_2[:kx-1]*(1 - tau2[1:kx,:,:,1])) # changed k to kx double check this
+    # -expm1-based absorptivity (#571), not ``1 - tau2[...,1]``: see the
+    # construction of ``one_minus_tau1`` above.
+    dfabs = dfabs.at[1:kx].add(flux_2[:kx-1]*one_minus_tau1[1:kx]) # changed k to kx double check this
 
     # 4. Shortwave upward flux
 
@@ -235,7 +286,9 @@ def shortwave_rad_fluxes(operand):
     )
     flux_1 = flux_1.at[:-1].set(flux_1_scan[::-1])
     
-    dfabs += flux_1*(1 - tau2[:,:,:,0])
+    # -expm1-based absorptivity (#571), not ``1 - tau2[...,0]``: see the
+    # construction of ``one_minus_tau0`` above.
+    dfabs += flux_1*one_minus_tau0
 
     flux_1 = flux_1.at[1:].set(flux_1[:-1])
     flux_1 = flux_1.at[0].set(tau2[0,:,:,0]*flux_1[0] + tau2[0,:,:,2])
@@ -247,9 +300,16 @@ def shortwave_rad_fluxes(operand):
     # 5.1 Longwave transmissivity:
     # function of layer mass, abs. humidity and cloud cover.
 
-    # Base absorptivities
+    # Base absorptivities. The window band's has a dry part (ablwin) and the
+    # water-vapour self continuum, ablwvc * q^2 * p/p0: the continuum optical
+    # depth of a layer goes as its vapour amount (q * dp) times the vapour
+    # pressure (q * p), which is what lets the lower tropical troposphere
+    # close the window while the dry and cold columns keep it open. Absent
+    # from SPEEDY (ablwvc = 0 is the reference).
+    pressure_ratio = fsg[:, jnp.newaxis, jnp.newaxis] * psa
     absorptivity = jnp.stack([
-        parameters.shortwave_radiation.ablwin * jnp.ones_like(qa),
+        parameters.shortwave_radiation.ablwin
+        + parameters.shortwave_radiation.ablwvc * qa * qa * pressure_ratio,
         physics_data.mod_radcon.ablco2 * jnp.ones_like(qa),
         parameters.shortwave_radiation.ablwv1 * qa,
         parameters.shortwave_radiation.ablwv2 * qa
@@ -259,7 +319,9 @@ def shortwave_rad_fluxes(operand):
     # SPEEDY zeroed the water-vapour bands at k=0 only; we zero them for every
     # layer with sigma<0.2 (the stratosphere). qa is already ~0 there so this is
     # mostly a clean-up, but it keeps the "stratosphere has no water vapour"
-    # statement nlev-independent. strat_mask is static.
+    # statement nlev-independent. strat_mask is static. The window band keeps
+    # its continuum term there: q^2 * p/p0 is negligible at those levels, and
+    # the fitted longwave (speedy_longwave_fit.md) was fitted with it in place.
     strat_mask = stratosphere_mask(fsg)
     absorptivity = absorptivity.at[:, :, :, 2:].set(
         jnp.where(strat_mask[:, jnp.newaxis, jnp.newaxis, jnp.newaxis], 0.0, absorptivity[:, :, :, 2:])
@@ -283,10 +345,21 @@ def shortwave_rad_fluxes(operand):
         )
     )
 
-    # Now compute tau2
+    # Now compute tau2: the longwave transmissivity ECHAM calls ``tau2``
+    # here is read back in speedy_longwave.py as ``emis = 1 - tau2``, the
+    # per-band layer *emissivity*. Forming that subtraction after ``tau2``
+    # is already rounded to ``exp(-x)`` is the same cancellation #571
+    # targets above -- and here it crosses a function boundary (SPEEDY's
+    # `mod_radcon.tau2` carry), so the fix has to travel with it: the
+    # companion ``emis2 = -expm1(-x)`` is computed from the SAME optical
+    # depth ``x`` and carried alongside ``tau2`` rather than reconstructed
+    # from it (``-log(tau2)`` would not recover the precision ``tau2``'s own
+    # rounding to a float near 1 already lost).
     deltap = psa*dhs[:,jnp.newaxis,jnp.newaxis]
-    tau2 = jnp.exp(-deltap[:,:,:,jnp.newaxis] * absorptivity)
-        
+    optical_depth = deltap[:,:,:,jnp.newaxis] * absorptivity
+    tau2 = jnp.exp(-optical_depth)
+    emis2 = -jnp.expm1(-optical_depth)
+
     # 5.2  Stratospheric correction terms
     # eps1 spreads the longwave stratospheric-cooling correction over the mass
     # of the stratosphere. SPEEDY used dhs[0]+dhs[1] (the top two layers); we use
@@ -305,7 +378,8 @@ def shortwave_rad_fluxes(operand):
     flux = physics_data.mod_radcon.flux
     flux = (flux.at[:,:,0].set(flux_1[0].astype(flux.dtype))
             .at[:,:,1].set(flux_2[kx-1].astype(flux.dtype)))
-    mod_radcon_out = physics_data.mod_radcon.copy(tau2=tau2, stratc=stratc, flux=flux)
+    mod_radcon_out = physics_data.mod_radcon.copy(
+        tau2=tau2, emis2=emis2, stratc=stratc, flux=flux)
     shortwave_rad_out = physics_data.shortwave_rad.copy(rsns=rsns, ftop=ftop, dfabs=dfabs, rsds=rsds)
     physics_data = physics_data.copy(shortwave_rad=shortwave_rad_out, mod_radcon=mod_radcon_out)
 
@@ -366,8 +440,7 @@ def get_zonal_average_fields(
     fs0 = 6.0
 
     # Solar radiation at the top
-    topsr = jnp.zeros(il)
-    topsr = solar(tyear, physics_data.speedy_coords, 4*solc)
+    topsr = solar(tyear, physics_data.speedy_coords)
 
     def compute_fields(sia_j, coa_j, topsr_j):
         flat2 = 1.5 * sia_j ** 2 - 0.5
@@ -586,8 +659,15 @@ def clouds(operand):
     return (state, physics_data, parameters, forcing, terrain, physics_tendencies)
 
 @jit
-def solar(tyear, speedy_coords: SpeedyCoords, csol=4.*solc):
+def solar(tyear, speedy_coords: SpeedyCoords, csol=None):
     """Calculate the daily-average insolation at the top of the atmosphere as a function of latitude.
+
+    ``csol`` is the solar constant S0 [W/m2]; ``None`` reads the shared
+    ``jcm.constants.solc`` (1361 W/m2, the TSI the CERES-EBAF record is
+    referenced to; Kopp & Lean 2011), so SPEEDY's insolation follows the one
+    solar constant every host uses and any ``set_constants`` override.
+    SPEEDY's Fortran hard-codes 4 x 342 = 1368 W/m2, the older TSI estimate,
+    which puts the global insolation 1.6 W/m2 above CERES at T31.
     
     Parameters
     ----------
@@ -600,6 +680,8 @@ def solar(tyear, speedy_coords: SpeedyCoords, csol=4.*solc):
         Daily-average insolation at the top of the atmosphere for each latitude band.
 
     """
+    if csol is None:
+        csol = c.solc
     # Constants and precomputed values
     pigr = 2.0 * jnp.arcsin(1.0)
     alpha = 2.0 * pigr * tyear

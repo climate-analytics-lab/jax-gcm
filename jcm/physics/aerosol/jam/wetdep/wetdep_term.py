@@ -6,7 +6,7 @@ integrate (``CloudData.precip_formation_rate`` / ``precip_evaporation_rate``,
 #499; the carrier flux is their own cumulative ledger, which deliberately
 excludes the sedimenting cloud-ice flux — see ``__call__``). With a prognostic
 cloud-borne phase (``spec.cloud_borne``, #602) the stratiform in-cloud
-pathway acts on the cloud-borne tracers at the full condensate→precip
+pathway acts on the cloud-borne tracers at the condensate→precip
 conversion rate and the interstitial tracers keep in-cloud and below-cloud
 impaction and convective processing; without one, the in-cloud pathway acts
 on interstitial aerosol weighted by its per-mode activated fractions plus
@@ -16,7 +16,14 @@ the impaction fractions (the implicit M7/TOMAS-style treatment):
   removed at the fraction cloud condensate converted to precipitation this
   step, read from the cloud scheme's process-time scavenging ledger
   (``incloud_scavenged_fractions`` — HAMMOZ's ``peffwat``/``peffice``, #708),
-  which stays alive in cells the microphysics emptied.
+  which stays alive in cells the microphysics emptied, additionally weighted
+  by HAM's mode-wise, temperature-regime stratiform fraction by default under
+  ``scheme="jcm"`` (``stratiform_nucleation="ham"``, #1080,
+  ``wetdep.stratiform_fractions``) — the explicit cloud-borne reservoir's
+  removal is not assumed complete just because the mass is in-droplet.
+  ``stratiform_nucleation="activated_fraction"`` keeps the previous, uncapped
+  weighting; ``scheme="ham"`` is unaffected (it runs HAM's own size-dependent
+  ``ic_scav_nuc`` instead).
 * **In-cloud impaction scavenging** — cloud droplets and ice crystals
   collect interstitial aerosol (ECHAM-HAM's ``ic_scav_imp``,
   ``wetdep.incloud_impaction``): per mode, phase and moment, a fraction from
@@ -74,6 +81,7 @@ Mirrors ``mo_hammoz_wetdep``.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import ClassVar
 
@@ -94,6 +102,19 @@ from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+from jcm.physics.aerosol.jam.wetdep.ham_below_cloud import (
+    VARIANTS as BELOW_CLOUD_VARIANTS,
+    bc_rain_rate,
+    bc_snow_rate,
+    cmedr2mmedr,
+    load_croft_tables,
+)
+from jcm.physics.aerosol.jam.wetdep.ham_nucleation import (
+    ice_phase_xie,
+    lin_leaitch_available_number,
+    nucleation_scavenged_fraction,
+    water_phase_xie,
+)
 from jcm.physics.aerosol.jam.wetdep.incloud_impaction import (
     VARIANTS as INCLOUD_IMPACTION_VARIANTS,
     crystal_impaction_fraction,
@@ -106,6 +127,12 @@ from jcm.physics.aerosol.jam.wetdep.impaction import (
     bcscavcoef,
     build_impaction_table,
     table_log_coefficients,
+)
+from jcm.physics.aerosol.jam.wetdep.stratiform_fractions import (
+    regime_fractions,
+    strat_ice,
+    strat_mix,
+    strat_wat,
 )
 from jcm.physics.convection.tracer_transport import release_scavenged
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
@@ -130,9 +157,26 @@ class WetDepParameters:
     impact_scale: jnp.ndarray      # multiplies below-cloud inertial-impaction efficiency
     conv_scav_ratio: jnp.ndarray   # convective in-cloud scavenging ratio [-]
     conv_updraft_velocity: jnp.ndarray  # sets the convective precip footprint [m/s]
+    # Per-mode (shape (n_modes,)) HAMMOZ mode-wise stratiform nucleation
+    # fractions (#1080, ``wetdep.stratiform_fractions``), read by
+    # ``WetScavenging(stratiform_nucleation="ham")`` (the default). Kept as
+    # differentiable leaves, not the static lookup table's plain floats, so a
+    # gradient can reach them. Empty by default — exactly
+    # ``ConvTransportParameters.csr_conv``'s pattern: "the term's own
+    # fractions", filled in by ``WetScavenging.__init__`` from whichever
+    # population (``spec``) it is actually composed with (MAM4 or M7 alike),
+    # which is what lets a field-override mapping apply to this default
+    # before the population is known, and keeps every pre-#1080 direct
+    # ``WetDepParameters(...)`` call site working unchanged.
+    csr_strat_wat: jnp.ndarray = dataclasses.field(
+        default_factory=lambda: jnp.asarray(()))
+    csr_strat_mix: jnp.ndarray = dataclasses.field(
+        default_factory=lambda: jnp.asarray(()))
+    csr_strat_ice: jnp.ndarray = dataclasses.field(
+        default_factory=lambda: jnp.asarray(()))
 
     @classmethod
-    def default(cls) -> "WetDepParameters":
+    def default(cls, spec: ModalAerosolSpec | None = None) -> "WetDepParameters":
         # sol_factb: CAM's ``sol_factb_interstitial`` namelist default —
         # only the soluble part of interstitial aerosol is collected by
         # falling precip. CAM's un-set fallback is the mass-weighted
@@ -148,6 +192,9 @@ class WetDepParameters:
         # the updraft mass flux divided by ρ·w_u is the updraft area, the
         # fraction of the box the convective precipitation falls through
         # (``conv_precip_cover``).
+        # csr_strat_*: HAMMOZ's mode-wise stratiform fractions (#1080),
+        # built from ``spec.modes`` if given, else left empty for
+        # ``WetScavenging.__init__`` to fill in from its own ``spec``.
         return cls(
             incloud_scale=jnp.asarray(1.0),
             sol_factb=jnp.asarray(0.1),
@@ -155,6 +202,15 @@ class WetDepParameters:
             impact_scale=jnp.asarray(IMPACT_SCALE_DEFAULT),
             conv_scav_ratio=jnp.asarray(0.99),
             conv_updraft_velocity=jnp.asarray(CONV_UPDRAFT_VELOCITY_DEFAULT),
+            csr_strat_wat=jnp.asarray(
+                [strat_wat(m.short) for m in spec.modes]
+                if spec is not None else ()),
+            csr_strat_mix=jnp.asarray(
+                [strat_mix(m.short) for m in spec.modes]
+                if spec is not None else ()),
+            csr_strat_ice=jnp.asarray(
+                [strat_ice(m.short) for m in spec.modes]
+                if spec is not None else ()),
         )
 
 
@@ -588,6 +644,26 @@ class WetScavenging(PhysicsTerm):
         "air_density", "layer_thickness",
     )
     provides: ClassVar[tuple[str, ...]] = ()
+    # All three are same-step (this term runs in the post-cloud block,
+    # downstream of their producers in the default ``echam_physics``
+    # order) but composition-OPTIONAL, each with a documented fallback:
+    # ``"convection"`` degrades to zero convective precip (module
+    # docstring) so the term still composes without a convection scheme;
+    # ``"_jam_activation"`` (``ArgActivation``) and ``"_conv_scav_flux"``
+    # (``ConvectiveTracerTransport``, published unconditionally when that
+    # term IS composed) are read defensively for configurations that
+    # compose JAM without one of those two. ``LIQUID_SHARE_KEY`` is written
+    # by ``CloudBorneExchange`` immediately before this term in the
+    # post-cloud block, only when the population prognoses a cloud-borne
+    # phase (jax-gcm#673). The HAM schemes' stratiform inputs
+    # (``precip_cover``/``pfrain``/``pfsnow``, and ``activated_cdnc`` for
+    # ``nucleation_activation="ham_arg"``) are read only by the
+    # configurations that need them; ``__init__`` adds each to the
+    # instance's ``requires``, so ``_validate_ordering`` enforces them there.
+    optional_requires: ClassVar[tuple[str, ...]] = (
+        "convection", "_jam_activation", "_conv_scav_flux", LIQUID_SHARE_KEY,
+        "precip_cover", "pfrain", "pfsnow", "activated_cdnc",
+    )
 
     def __init__(
         self,
@@ -596,6 +672,10 @@ class WetScavenging(PhysicsTerm):
         spec: ModalAerosolSpec | None = None,
         in_plume_convective: bool = False,
         incloud_impaction: str = "ham",
+        scheme: str = "jcm",
+        nucleation_activation: str = "ham_arg",
+        below_cloud_lookup: str = "ham",
+        stratiform_nucleation: str = "ham",
     ):
         """Hold params and the population.
 
@@ -622,16 +702,188 @@ class WetScavenging(PhysicsTerm):
         in CAM, whose interstitial in-cloud solubility factor is zero). Any
         but ``"none"`` reads the 2M scheme's effective radii, so the term
         then requires ``reffl``/``reffi``.
+
+        ``scheme`` selects the stratiform below-cloud and in-cloud nucleation
+        pathways (#1017); in-cloud impaction is ``incloud_impaction``'s under
+        every scheme, and the convective pathways are the same under all:
+
+        - ``"jcm"`` (default): CAM's Slinn below-cloud impaction
+          (``impaction.py``), and nucleation scavenging by ARG's activated
+          fractions in the liquid part of the cloud and HAM's
+          one-particle-per-crystal share in the ice part.
+        - ``"ham_below_cloud"``: ECHAM-HAM's Croft below-cloud tables
+          (``wetdep.ham_below_cloud``) in place of the Slinn pathway, with
+          the ``"jcm"`` in-cloud treatment: a below-cloud ablation.
+        - ``"ham"``: the Croft below-cloud tables plus HAM's own nucleation
+          scavenging ``ic_scav_nuc`` (``wetdep.ham_nucleation``), which
+          inverts each activating mode's lognormal tail at the radius that
+          reproduces the step's droplet (water) or crystal (ice) number.
+          Per phase the in-cloud fraction is ``get_icscavfrac``'s
+          ``min(nucleation + impaction, 1)``, so with the default
+          ``incloud_impaction="ham"`` this is HAM's full ``nwetdep = 3``.
+
+        HAM's below-cloud removal acts only inside the precipitating fraction
+        of the box, so both HAM schemes need the cloud scheme to publish
+        ``"precip_cover"``, ``"pfrain"`` and ``"pfsnow"``
+        (``Lohmann2MMicrophysics.configure_wetdep_hydro_diagnostics``, which
+        ``echam_physics`` turns on with them). CAM's form needs no cover: its
+        swept-volume cancellation makes the cloud weighting a no-op (see
+        ``below_cloud_rate``). ``below_cloud_lookup`` selects the Croft rain
+        lookup: ``"ham"`` (default) corrects r7492's swapped interpolation
+        corners and its zero rate below the first rain-rate node,
+        ``"ham_r7492"`` reproduces the compiled ``bc_rain``
+        (``wetdep.ham_below_cloud``).
+
+        ``"ham"`` also needs an M7-shaped ``spec`` with HAM's activating modes
+        ``ks``/``as``/``cs`` (``ic_scav_nuc``'s mode gate,
+        ``mo_ham_wetdep.f90:707-710``); any other population raises rather
+        than run with nucleation scavenging silently off. For the same reason
+        it refuses an explicit cloud-borne phase: there the in-droplet and
+        in-crystal aerosol is the cloud-borne tracers', filled by
+        ``CloudBorneExchange`` instead of ``ic_scav_nuc``. M7 has no such
+        phase (``echam_physics(jam_cloud_borne=False)``).
+
+        ``nucleation_activation`` is HAM's ``ncd_activ``: the activation
+        scheme ``ic_scav_nuc`` takes its critical radius and per-mode fraction
+        from, ``"ham_arg"`` (dry radius; needs ``activated_cdnc``) or
+        ``"ham_lin_leaitch"`` (wet radius). It is read for ``scheme="ham"``
+        only and must match the composed activation term
+        (``jam_aerosol_physics`` checks that). CAM's ARG is not one of
+        ``ncd_activ``'s options: ``ic_scav_nuc``'s ``na`` and ``frac(kmod)``
+        are the diagnostics HAM's own activation schemes set
+        (``mo_ham_activ.f90:409-416``). ``ic_scav_imp`` reads the wet radius
+        under either.
+
+        ``stratiform_nucleation`` selects the WEIGHT applied to ``f_wat``/
+        ``f_ice`` (the per-step liquid/ice condensate->precip conversion)
+        for stratiform nucleation scavenging of the droplet/crystal-resident
+        aerosol under ``scheme="jcm"`` — both the explicit cloud-borne
+        reservoir (``spec.cloud_borne``) and the implicit activated-fraction
+        treatment used without one (#1080, see ``wetdep.stratiform_fractions``):
+        ``"ham"`` (the default) is ECHAM-HAM's mode-wise, temperature-regime
+        fraction table (``mo_ham_wetdep.f90::get_icscavfrac``
+        ``kscavICtype=2``) read from ``params.csr_strat_{wat,mix,ice}``;
+        ``"activated_fraction"`` is the pre-#1080 behaviour — the explicit
+        reservoir rains out at the bare condensate conversion rate (weight
+        1) and the implicit path weights by ARG's own per-mode activated
+        number/mass fraction instead of a fixed table. The two are
+        bit-for-bit identical on every OTHER pathway (impaction, below-cloud,
+        convective, re-injection). Inert under ``scheme="ham"``, which
+        already runs HAM's own size-dependent ``ic_scav_nuc``
+        (``kscavICtype=3``) in place of both.
         """
         if incloud_impaction not in (*INCLOUD_IMPACTION_VARIANTS, "none"):
             raise ValueError(
                 f"incloud_impaction={incloud_impaction!r}: choose one of "
                 f"{(*INCLOUD_IMPACTION_VARIANTS, 'none')}."
             )
-        self.params = nnx.Param(params or WetDepParameters.default())
+        if scheme not in ("jcm", "ham_below_cloud", "ham"):
+            raise ValueError(
+                "scheme must be 'jcm', 'ham_below_cloud' or 'ham', "
+                f"got {scheme!r}")
+        if nucleation_activation not in ("ham_arg", "ham_lin_leaitch"):
+            raise ValueError(
+                "nucleation_activation must be 'ham_arg' or 'ham_lin_leaitch', "
+                f"got {nucleation_activation!r}")
+        if below_cloud_lookup not in BELOW_CLOUD_VARIANTS:
+            raise ValueError(
+                f"below_cloud_lookup={below_cloud_lookup!r}: choose one of "
+                f"{BELOW_CLOUD_VARIANTS}.")
+        if stratiform_nucleation not in ("ham", "activated_fraction"):
+            raise ValueError(
+                f"stratiform_nucleation={stratiform_nucleation!r}: choose "
+                "one of ('ham', 'activated_fraction')."
+            )
+        self.scheme = scheme
+        self._below_cloud_lookup = below_cloud_lookup
+        self._nucleation_activation = nucleation_activation
+        self._stratiform_nucleation = stratiform_nucleation
+        # Loaded here, outside any trace: a table memoized on first use inside
+        # a traced call would cache tracers and leak them into a later trace.
+        self._croft_tables = (
+            load_croft_tables() if scheme in ("ham_below_cloud", "ham") else None
+        )
         self._in_plume_convective = in_plume_convective
         self._incloud_impaction = incloud_impaction
         self._spec = spec or MAM4_SPEC
+        if params is None:
+            # Build the csr_strat_* table from THIS population only when
+            # the "ham" weighting will actually read it (#1080's default):
+            # ``WetDepParameters.default(spec=...)`` looks up every mode's
+            # short code in ``HAM_CSR_STRAT`` and raises ``KeyError`` for an
+            # unmapped one, which must not stop a custom/out-of-tree
+            # population from constructing under "activated_fraction" — the
+            # pre-#1080 alternative that never reads csr_strat_* at all.
+            # Under "ham" an unmapped mode SHOULD still fail here, with
+            # ``stratiform_fractions._lookup``'s own readable message
+            # naming the offending short code. The M7 ``scheme="ham"``
+            # path never reads csr_strat_* either (it carries HAM's own
+            # ``ic_scav_nuc``), so it gets the bare defaults too, as the
+            # explicit-``params`` branch below already assumes.
+            reads_table = stratiform_nucleation == "ham" and scheme != "ham"
+            params = WetDepParameters.default(
+                spec=self._spec if reads_table else None)
+        elif stratiform_nucleation == "ham" and scheme != "ham":
+            # The mode-wise table is indexed by ``self._spec.modes``.
+            # ``jnp.shape(...) == (0,)`` is ``ConvTransportParameters.
+            # csr_conv``'s exact pattern: an explicit ``params`` whose
+            # csr_strat_* were left empty (a field-override mapping applied
+            # to ``WetDepParameters.default()`` before the population was
+            # known, e.g. through ``echam_physics(wetdep={...})``) is filled
+            # in from THIS population now; any other length must already
+            # match it, or fail here — at construction time, where the
+            # mismatch is obvious — rather than silently index past the
+            # array under jit. Each of the three fields is checked and
+            # filled INDEPENDENTLY (not as a set): a partial field-override
+            # mapping such as ``echam_physics(wetdep={"csr_strat_wat":
+            # [...]})`` legitimately leaves the other two empty, and that
+            # must fill them rather than raise. ``scheme="ham"`` never
+            # reads this weight (see the docstring above), so a mismatch
+            # there is harmless and not checked.
+            n_modes = len(self._spec.modes)
+            lookups = {
+                "csr_strat_wat": strat_wat,
+                "csr_strat_mix": strat_mix,
+                "csr_strat_ice": strat_ice,
+            }
+            fills = {}
+            for field_name, lookup in lookups.items():
+                shape = jnp.shape(getattr(params, field_name))
+                if shape == (0,):
+                    fills[field_name] = jnp.asarray(
+                        [lookup(m.short) for m in self._spec.modes])
+                elif shape != (n_modes,):
+                    raise ValueError(
+                        f"stratiform_nucleation='ham' needs params.{field_name}"
+                        f" sized to this {n_modes}-mode population (or left"
+                        f" empty, to be filled from it): got shape {shape}."
+                        " Pass params=WetDepParameters.default(spec=spec)"
+                        f" (or your own matching-length {field_name}), or use"
+                        " stratiform_nucleation='activated_fraction'."
+                    )
+            if fills:
+                params = dataclasses.replace(params, **fills)
+        self.params = nnx.Param(params)
+        if scheme == "ham":
+            missing = {"ks", "as", "cs"} - {m.short for m in self._spec.modes}
+            if missing:
+                raise ValueError(
+                    "scheme='ham' requires an M7-shaped population with "
+                    "HAM's own activating modes 'ks', 'as', 'cs' "
+                    f"(mo_ham_wetdep.f90:707-710); this population is "
+                    f"missing {sorted(missing)}. Pass an M7 population "
+                    "(e.g. microphysics.m7_data.M7_SPEC) as ``spec``, or "
+                    "use scheme='ham_below_cloud' (below-cloud only; no "
+                    "mode-identity requirement) or the default "
+                    "scheme='jcm' instead."
+                )
+            if self._spec.cloud_borne:
+                raise ValueError(
+                    "scheme='ham' scavenges by HAM's ic_scav_nuc, which acts on "
+                    "an implicit population; this spec carries an explicit "
+                    "cloud-borne phase, whose in-cloud aerosol "
+                    "CloudBorneExchange fills instead. Compose without it "
+                    "(echam_physics(jam_cloud_borne=False), M7's own setting).")
         # Per-mode Slinn impaction tables, built once here exactly as CAM
         # builds them in ``modal_aero_bcscavcoef_init`` (the 50x51 double
         # integral is far too costly to evaluate per cell per step). CAM
@@ -651,6 +903,15 @@ class WetScavenging(PhysicsTerm):
             self.requires = (*self.requires, CARRY_KEY)
         if incloud_impaction != "none":
             self.requires = (*self.requires, "reffl", "reffi")
+        if scheme in ("ham_below_cloud", "ham"):
+            self.requires = (*self.requires, "precip_cover", "pfrain", "pfsnow")
+        if scheme == "ham" and nucleation_activation == "ham_arg":
+            self.requires = (*self.requires, "activated_cdnc")
+        # The keys above depend on the configuration, so __call__ reads them
+        # with ``diagnostics.get``: the class-level ``requires`` lists only
+        # what every configuration reads, the class-level
+        # ``optional_requires`` declares these for the static requires
+        # audit, and ``_validate_ordering`` enforces these instance entries.
 
     def __call__(self, state, diagnostics, forcing, terrain):
         params = self.params.get_value()
@@ -766,10 +1027,28 @@ class WetScavenging(PhysicsTerm):
         jam_act = diagnostics.get("_jam_activation")
         liquid_share = diagnostics.get(LIQUID_SHARE_KEY) or {}
 
-        def phase_rate(share):
-            """Return the removal rate of a reservoir with droplet-held ``share``."""
+        def phase_rate(share, f_liq_mode=1.0, f_ice_mode=1.0):
+            """Return the removal rate of a reservoir with droplet-held ``share``.
+
+            ``f_liq_mode``/``f_ice_mode`` additionally cap the water/ice
+            conversion at HAMMOZ's mode-wise fraction (#1080,
+            ``stratiform_nucleation="ham"``); left at their default of 1
+            for the ``"activated_fraction"`` alternative, where the whole
+            explicit cloud-borne reservoir rains out at the bare
+            conversion rate.
+            """
             return params.incloud_scale * fraction_to_rate(
-                share * f_wat + (1.0 - share) * f_ice, dt)
+                share * f_liq_mode * f_wat
+                + (1.0 - share) * f_ice_mode * f_ice, dt)
+
+        if self.scheme in ("ham_below_cloud", "ham"):
+            # HAM's below-cloud tables read the 2M scheme's in-cloud,
+            # cover-normalised rain/snow flux before evaporation (ECHAM's
+            # ``zfrain``/``zfsnow``, mo_cloud_micro_2m.f90:1813) and act inside
+            # its precipitating fraction ``pclc`` (mo_ham_wetdep.f90:434-437).
+            pfrain_in = diagnostics.get("pfrain")
+            pfsnow_in = diagnostics.get("pfsnow")
+            precip_cover = jnp.clip(diagnostics.get("precip_cover"), 0.0, 1.0)
 
         # Build per-tracer scavenging rates and stack with the matching
         # tracers, so the elementwise removal runs as one batched op (rather
@@ -810,10 +1089,46 @@ class WetScavenging(PhysicsTerm):
         # out). Without it, the implicit treatment stands — the interstitial
         # tracers are scavenged by their per-mode activated fractions.
         explicit_cb = self._spec.cloud_borne
-        implicit_split = not explicit_cb and jam_act is not None
+        # HAM's own nucleation scavenging replaces the implicit ARG split
+        # (``__init__`` refuses it with an explicit phase).
+        ham_nucleation = self.scheme == "ham"
+        implicit_split = (not explicit_cb and jam_act is not None
+                          and not ham_nucleation)
         impaction = self._incloud_impaction != "none"
-        if implicit_split or impaction:
+        if implicit_split or impaction or ham_nucleation:
             icnc = post_microphysics_icnc(state, diagnostics, dt)
+        if ham_nucleation:
+            # ``ic_scav_nuc`` reads ``pxtp1c_sav``: the post-microphysics
+            # in-cloud CDNC, ICNC and KS/AS/CS number, weighted by the cover
+            # (mo_ham_wetdep.f90:518, 560-562).
+            cloud_fraction = clouds.cloud_fraction
+            cdnc_incloud = jnp.maximum(view.get("qnc", zeros), 0.0) * cloud_fraction
+            icnc_incloud = icnc * cloud_fraction
+            n_incloud = {
+                short: jnp.maximum(view.get(number_name(short), zeros), 0.0)
+                * cloud_fraction
+                for short in ("ks", "as", "cs")
+            }
+            if self._nucleation_activation == "ham_arg":
+                # ``na`` and ``frac(kmod)`` as ham_activ_diag_abdulrazzak_ghan_
+                # strat sets them (mo_ham_activ.f90:409-416).
+                if jam_act is None:
+                    raise ValueError(
+                        "scheme='ham' with nucleation_activation="
+                        "'ham_arg' requires an activation term that "
+                        "publishes '_jam_activation' (e.g. HamActivation "
+                        "with scheme='arg' or ArgActivation).")
+                nuc_na = diagnostics.get("activated_cdnc")
+                nuc_radius = aer.r_dry
+                nuc_frac = jam_act.number_frac
+            else:
+                nuc_na, nuc_frac = lin_leaitch_available_number(
+                    aer.number * air_density[jnp.newaxis, ...],
+                    jnp.asarray([m.can_activate for m in self._spec.modes]),
+                    aer.r_wet,
+                    jnp.asarray([m.geom_std_dev for m in self._spec.modes]),
+                )
+                nuc_radius = aer.r_wet
         if implicit_split:
             ice_number, ice_mass = ice_phase_fractions(
                 self._spec,
@@ -854,6 +1169,22 @@ class WetScavenging(PhysicsTerm):
                 cf_proc * ((1.0 - pice) * imp_w * f_wat
                            + pice * imp_i * f_ice), dt)
 
+        def form_rate(f_liq, f_in_ice, imp):
+            """Return the in-cloud removal rate of interstitial aerosol, HAM's implicit split.
+
+            The cloudy part of the box, times each phase's in-cloud share times
+            that phase's conversion, removed this step: the mass the explicit
+            phase removes at exchange equilibrium. With impaction the
+            in-cloud share is HAM's ``get_icscavfrac`` sum, nucleation plus
+            impaction capped at one.
+            """
+            if imp is not None:
+                f_liq = jnp.minimum(f_liq + imp[0], 1.0)
+                f_in_ice = jnp.minimum(f_in_ice + imp[1], 1.0)
+            return params.incloud_scale * fraction_to_rate(
+                cf_proc * ((1.0 - pice) * f_liq * f_wat
+                           + pice * f_in_ice * f_ice), dt)
+
         for i, mode in enumerate(self._spec.modes):
             # Number and mass ride different moments of the same lognormal,
             # so CAM tabulates and applies a separate impaction coefficient
@@ -863,8 +1194,37 @@ class WetScavenging(PhysicsTerm):
                 table, params.mu_water_air, params.impact_scale)
             coef_num, coef_mass = bcscavcoef(
                 aer.r_wet[i], table.dgnum, ln_num, ln_vol)
-            below_strat_num = below_cloud_rate(flux_in, coef_num, params)
-            below_strat_mass = below_cloud_rate(flux_in, coef_mass, params)
+            if self.scheme in ("ham_below_cloud", "ham"):
+                # HAM's Croft tables replace the Slinn coefficient for the
+                # stratiform carrier, at the wet count-median radius (number)
+                # and mass-median radius (mass, ``cmedr2mmedr``,
+                # mo_ham_wetdep.f90:218).
+                mr_num = aer.r_wet[i]
+                mr_mass = aer.r_wet[i] * cmedr2mmedr(mode.geom_std_dev)
+                sfrain_num = bc_rain_rate(pfrain_in, mr_num, phase="number",
+                                          tables=self._croft_tables,
+                                          variant=self._below_cloud_lookup)
+                sfrain_mass = bc_rain_rate(pfrain_in, mr_mass, phase="mass",
+                                           tables=self._croft_tables,
+                                           variant=self._below_cloud_lookup)
+                sfsnow_num = bc_snow_rate(pfsnow_in, mr_num,
+                                          tables=self._croft_tables,
+                                          variant=self._below_cloud_lookup)
+                sfsnow_mass = bc_snow_rate(pfsnow_in, mr_mass,
+                                           tables=self._croft_tables,
+                                           variant=self._below_cloud_lookup)
+                # HAM removes ``pxtp10·pclc·(1 − exp(−dt·(sfrain + sfsnow)))``
+                # (mo_ham_wetdep.f90:434-437); as the equivalent uncovered
+                # rate it composes with the other rate families, as in
+                # ``conv_below_cloud_rate``.
+                removed_num = -jnp.expm1(-(sfrain_num + sfsnow_num) * dt)
+                removed_mass = -jnp.expm1(-(sfrain_mass + sfsnow_mass) * dt)
+                below_strat_num = fraction_to_rate(precip_cover * removed_num, dt)
+                below_strat_mass = fraction_to_rate(
+                    precip_cover * removed_mass, dt)
+            else:
+                below_strat_num = below_cloud_rate(flux_in, coef_num, params)
+                below_strat_mass = below_cloud_rate(flux_in, coef_mass, params)
             below_conv_num = conv_below_cloud_rate(
                 conv_flux_in, conv_cover, coef_num, params, dt,
             )
@@ -877,48 +1237,120 @@ class WetScavenging(PhysicsTerm):
             if impaction:
                 imp_num = impaction_fractions(mode, aer.r_wet[i], "number")
                 imp_mass = impaction_fractions(mode, aer.r_wet[i], "mass")
-            # In-cloud nucleation only removes from activatable (soluble)
-            # modes — and only implicitly (via the activated fraction) when
-            # there is no explicit cloud-borne phase to carry it. Convective
-            # processing always acts on interstitial (updrafts ingest
-            # environment air).
+            # In-cloud nucleation acts on an activatable (soluble) mode's
+            # interstitial aerosol only implicitly (via the activated
+            # fraction) when there is no explicit cloud-borne phase to carry
+            # it. Convective processing always acts on interstitial
+            # (updrafts ingest environment air).
             if mode.can_activate and not explicit_cb:
-                if jam_act is not None:
-                    # HAM's implicit form of the same split: the cloudy part
-                    # of the box, times each phase's in-cloud share times
-                    # that phase's conversion, removed this step — the mass
-                    # the explicit phase removes at exchange equilibrium.
-                    # The in-cloud share is HAM's ``get_icscavfrac`` sum,
-                    # nucleation plus impaction capped at one.
-                    def form_rate(f_liq, f_in_ice, imp):
-                        if imp is not None:
-                            f_liq = jnp.minimum(f_liq + imp[0], 1.0)
-                            f_in_ice = jnp.minimum(f_in_ice + imp[1], 1.0)
-                        return params.incloud_scale * fraction_to_rate(
-                            cf_proc * ((1.0 - pice) * f_liq * f_wat
-                                       + pice * f_in_ice * f_ice), dt)
+                if ham_nucleation:
+                    # ``ic_scav_nuc`` (mo_ham_wetdep.f90:684-795) per phase;
+                    # it zeroes every mode but KS/AS/CS (:707-710).
+                    if mode.short in ("ks", "as", "cs"):
+                        ln_sigma = jnp.log(mode.geom_std_dev)
+                        mass_factor = cmedr2mmedr(mode.geom_std_dev)
+                        xie_water = water_phase_xie(
+                            cdnc_incloud, air_density, nuc_na, nuc_frac[i])
+                        xie_ice = ice_phase_xie(
+                            icnc_incloud, n_incloud["ks"], n_incloud["as"],
+                            n_incloud["cs"], mode.short)
+                        fn_water, fm_water = nucleation_scavenged_fraction(
+                            xie_water, nuc_radius[i], ln_sigma, mass_factor)
+                        fn_ice, fm_ice = nucleation_scavenged_fraction(
+                            xie_ice, nuc_radius[i], ln_sigma, mass_factor)
+                    else:
+                        fn_water = fm_water = fn_ice = fm_ice = zeros
                     form_num = form_rate(
-                        jam_act.number_frac[i], ice_number[i],
+                        fn_water, fn_ice, imp_num if impaction else None)
+                    form_mass = form_rate(
+                        fm_water, fm_ice, imp_mass if impaction else None)
+                elif self._stratiform_nucleation == "ham":
+                    # HAMMOZ's fixed mode-wise fraction (#1080 default) is
+                    # the stratiform nucleation weight for EVERY
+                    # can_activate mode here, whether or not an upstream
+                    # activation diagnostic (``jam_act``) is published: it
+                    # is read straight from ``params.csr_strat_*``, never
+                    # from ``jam_act``, so it must be checked BEFORE the
+                    # ``jam_act is not None`` gate below — that gate
+                    # belongs only to the "activated_fraction" alternative,
+                    # which names the ARG fractions it needs. Requiring
+                    # ``jam_act`` here left a standalone composition (no
+                    # upstream ``_jam_activation``, e.g. the documented
+                    # fallback) falling through to the
+                    # ``activated_fraction``-flavoured branch below even
+                    # under the "ham" default. Impaction (if on) still adds
+                    # on top, capped at one, as HAM's implicit construct
+                    # does (``form_rate`` docstring).
+                    f_liq_mode, f_ice_mode = regime_fractions(
+                        params.csr_strat_wat[i], params.csr_strat_mix[i],
+                        params.csr_strat_ice[i], state.temperature,
+                    )
+                    form_num = form_rate(
+                        f_liq_mode, f_ice_mode,
                         imp_num if impaction else None)
                     form_mass = form_rate(
-                        jam_act.mass_frac[i], ice_mass[i],
+                        f_liq_mode, f_ice_mode,
+                        imp_mass if impaction else None)
+                elif jam_act is not None:
+                    # "activated_fraction" (the pre-#1080 alternative) WITH
+                    # an upstream activation diagnostic: ARG's own per-mode
+                    # activated number/mass fraction.
+                    nuc_liq_num, nuc_liq_mass = (
+                        jam_act.number_frac[i], jam_act.mass_frac[i])
+                    nuc_ice_num, nuc_ice_mass = ice_number[i], ice_mass[i]
+                    form_num = form_rate(
+                        nuc_liq_num, nuc_ice_num,
+                        imp_num if impaction else None)
+                    form_mass = form_rate(
+                        nuc_liq_mass, nuc_ice_mass,
                         imp_mass if impaction else None)
                 else:
-                    # Standalone composition without ARG upstream: the
-                    # aggregate activated fraction, with the impaction rate
-                    # added rather than HAM's capped sum (the batched
-                    # exponential still bounds the removal by the tracer).
+                    # Standalone composition without ARG upstream AND
+                    # "activated_fraction": the aggregate activated
+                    # fraction, with the impaction rate added rather than
+                    # HAM's capped sum (the batched exponential still
+                    # bounds the removal by the tracer).
                     form_num = form_mass = activated_fraction * rate_ic_unit
                     if impaction:
                         form_num = form_num + impaction_rate(imp_num)
                         form_mass = form_mass + impaction_rate(imp_mass)
                 conv_num = below_conv_num + rate_conv_incloud
                 conv_mass = below_conv_mass + rate_conv_incloud
+            elif not mode.can_activate and not ham_nucleation and (
+                    self._stratiform_nucleation == "ham"):
+                # HAM's fixed mode-wise table (``get_icscavfrac`` CASE(2),
+                # mo_ham_wetdep.f90:602-630) carries no solubility gate: it
+                # is read straight from the tracer's own mode, insoluble
+                # modes included (``csr_strat_wat(KI)=0.20``,
+                # ``mo_ham_m7ctl.f90:515-518``). A non-activating mode is
+                # never credited into the explicit cloud-borne reservoir
+                # either (ARG activation only draws from ``can_activate``
+                # modes, so its carry entry — see ``mirror_names`` — stays
+                # at zero), so its interstitial aerosol is the only aerosol
+                # there is to scavenge, under ``explicit_cb`` or not: it
+                # gets the table weight unconditionally. The
+                # "activated_fraction" alternative has no such universal
+                # per-mode table — it IS the ARG activated fraction, which
+                # is undefined for an insoluble mode — so that variant
+                # falls through to the impaction-only branch below exactly
+                # as it did before #1080.
+                f_liq_mode, f_ice_mode = regime_fractions(
+                    params.csr_strat_wat[i], params.csr_strat_mix[i],
+                    params.csr_strat_ice[i], state.temperature,
+                )
+                form_num = form_rate(
+                    f_liq_mode, f_ice_mode, imp_num if impaction else None)
+                form_mass = form_rate(
+                    f_liq_mode, f_ice_mode, imp_mass if impaction else None)
+                conv_num = below_conv_num
+                conv_mass = below_conv_mass
             else:
                 # The explicit phase holds the in-droplet and in-crystal
                 # aerosol and removes it itself (the cloud-borne entries
-                # below), and a non-activating mode has none; what is left
-                # in the cloud is interstitial, which impaction collects.
+                # below), and a non-activating mode under the
+                # "activated_fraction" weighting has no implicit nucleation
+                # fallback; what is left in the cloud is interstitial,
+                # which impaction collects.
                 if impaction:
                     form_num = impaction_rate(imp_num)
                     form_mass = impaction_rate(imp_mass)
@@ -948,7 +1380,15 @@ class WetScavenging(PhysicsTerm):
             if explicit_cb:
                 # Cloud-borne aerosol is entirely in-droplet: no below-cloud
                 # impaction, no activated-fraction weighting, and its
-                # re-injected share returns to the interstitial partner.
+                # re-injected share returns to the interstitial partner. By
+                # default (#1080) its removal is additionally capped at
+                # HAMMOZ's mode-wise fraction rather than the bare
+                # conversion rate — see ``phase_rate``.
+                if self._stratiform_nucleation == "ham":
+                    f_liq_mode, f_ice_mode = regime_fractions(
+                        params.csr_strat_wat[i], params.csr_strat_mix[i],
+                        params.csr_strat_ice[i], state.temperature,
+                    )
                 pairs = [(number_name(mode.short, cloud_borne=True),
                           number_name(mode.short))] + [
                     (mass_name(sp, mode.short, cloud_borne=True),
@@ -960,8 +1400,12 @@ class WetScavenging(PhysicsTerm):
                     reinject_to.append(partner)
                     q_list.append(jnp.maximum(view.get(nm, zeros), 0.0))
                     rate_below_strat.append(zeros)
-                    rate_form_strat.append(
-                        phase_rate(liquid_share.get(nm, 1.0 - pice)))
+                    share = liquid_share.get(nm, 1.0 - pice)
+                    if self._stratiform_nucleation == "ham":
+                        rate_form_strat.append(
+                            phase_rate(share, f_liq_mode, f_ice_mode))
+                    else:
+                        rate_form_strat.append(phase_rate(share))
                     rate_conv.append(zeros)
 
         # Implicit (exponential) scavenging over the step: q(t+dt) = q·exp(-rate·dt).

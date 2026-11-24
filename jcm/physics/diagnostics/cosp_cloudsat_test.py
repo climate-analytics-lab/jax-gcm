@@ -257,6 +257,60 @@ class CalipsoModisTest(unittest.TestCase):
             self.assertTrue(np.isfinite(arr).all(), key)
             self.assertGreaterEqual(arr.min(), -1e-9, key)
 
+    def test_cloud_cci_water_paths(self):
+        """``lwpcci``/``iwpcci``: all-sky paths under Cloud_cci's rules.
+
+        Cloud_cci's liquid conversion equals MODIS's and its two-phase rule
+        calls liquid every subcolumn MODIS does (cloud-top liquid share above
+        0.5 against at least 0.7), so the all-sky liquid path can only gain
+        on ``lwpmodis`` (itself stored cloud-fraction-weighted, i.e.
+        all-sky). With no radiation diagnostic every point counts as day.
+        """
+        diag = self._run(enable_modis=True)
+        lwp, iwp = np.asarray(diag["lwpcci"]), np.asarray(diag["iwpcci"])
+        for key, arr in (("lwpcci", lwp), ("iwpcci", iwp)):
+            self.assertEqual(arr.shape, (NCOLS,), key)
+            self.assertTrue(np.isfinite(arr).all(), key)
+            self.assertGreaterEqual(arr.min(), 0.0, key)
+        np.testing.assert_array_equal(np.asarray(diag["cosp_sunlit_cci"]), 1.0)
+        self.assertTrue(
+            (lwp >= np.asarray(diag["lwpmodis"]) * (1 - 1e-5)).all())
+        # The fixture's liquid cloud sits in the even columns and its only
+        # ice in column 0.
+        self.assertGreater(lwp[2::2].min(), 0.0)
+        np.testing.assert_array_equal(lwp[1::2], 0.0)
+        np.testing.assert_array_equal(iwp[1:], 0.0)
+        self.assertNotIn("lwpcci", self._run())
+
+    def test_cloud_cci_daylight_is_narrower_than_sunlit(self):
+        """CC4CL retrieves below a solar zenith angle of 80 degrees only.
+
+        A sun 5 degrees above the horizon is day for MODIS/ISCCP
+        (``cosp_sunlit``) and not for Cloud_cci: its paths are zero there and
+        its own companion says so, while a high sun leaves them untouched.
+        """
+        from types import SimpleNamespace
+        from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
+        state, diagnostics, forcing, terrain = self.setup
+        cos_zenith = np.full((NCOLS,), 0.6)
+        cos_zenith[0:4] = np.cos(np.deg2rad(85.0))
+        cos_zenith[4:6] = -0.2
+        term = CloudsatCosp(ncolumns=20, seed=1, enable_modis=True)
+        lit = term(state, diagnostics, forcing, terrain)[1]
+        diag = term(state, {**diagnostics, "radiation": SimpleNamespace(
+            cos_zenith=jnp.asarray(cos_zenith))}, forcing, terrain)[1]
+        np.testing.assert_array_equal(
+            np.asarray(diag["cosp_sunlit"]), (cos_zenith > 0).astype(float))
+        day = np.asarray(diag["cosp_sunlit_cci"])
+        np.testing.assert_array_equal(
+            day, (cos_zenith > np.cos(np.deg2rad(80.0))).astype(float))
+        for key in ("lwpcci", "iwpcci"):
+            np.testing.assert_array_equal(
+                np.asarray(diag[key]), np.asarray(lit[key]) * day, err_msg=key)
+        # Low sun, but still a MODIS retrieval in the same column.
+        self.assertGreater(float(diag["lwpmodis"][2]), 0.0)
+        self.assertEqual(float(diag["lwpcci"][2]), 0.0)
+
     def test_radar_diagnostics_unchanged_by_the_extra_simulators(self):
         """Adding MODIS/CALIPSO must not perturb the CloudSat results.
 

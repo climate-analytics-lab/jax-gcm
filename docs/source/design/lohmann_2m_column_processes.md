@@ -37,12 +37,16 @@ jcm counterparts, vectorized over the levels before the scan:
   (lines 958-983), from the whole detrained condensate of the step at
   `zrid`.
 
-Inside the scan, in ECHAM section numbering: 4 sedimentation of the ice
-present before detrainment (`pxim1 + ztmst·pxite`, lines 1227-1248), then
-`ICNC = min(ICNC + znidetr, icemax)` (lines 1251-1252) → 3.1 melting →
-3.2/3.3 sublimation/rain-evaporation → the section-4 `lo2` and the phase
-split of the detrained condensate with its fusion-heat correction (lines
-1276-1317) → in-cloud prep with clear-sky evaporation
+Inside the scan, in ECHAM section numbering: 3.1 melting of BOTH the falling
+snow/ice-crystal FLUX entering the level and the in-cloud ice already present
+(where `T_m1 > tmelt`) → 3.2/3.3 sublimation/rain-evaporation on that same,
+now-melted flux (ECHAM runs all three before its own sedimentation, lines
+1170-1190 < 1200-1219 < 1221 — see "What changed" below) → 4 sedimentation of
+the melt-adjusted ice present before detrainment (`pxim1 + ztmst·pxite`,
+lines 1227-1248, with the melt-updated `pxite`), then
+`ICNC = min(ICNC + znidetr, icemax)` (lines 1251-1252) → the section-4 `lo2`
+and the phase split of the detrained condensate with its fusion-heat
+correction (lines 1276-1317) → in-cloud prep with clear-sky evaporation
 (`zxlevap`/`zxievap`) → 5 the `zqcdif` condensation closure → 5.4
 supersaturation corrections → 5.5 in-cloud update + activation / ICNC
 diagnosis at `zrid` → 6.1 homogeneous freezing → 6.2 heterogeneous
@@ -63,15 +67,25 @@ the section-5 closure all see the re-split state.
 
 Each was reviewed and kept.
 
-- **Sedimentation runs before melting** (the MG/PUMAS order,
-  `micro_pumas_v1.F90`), with the running ice tendency threaded through the
-  melt routine so the two sinks cannot claim the same mass. ECHAM melts
-  first; both orderings are internally consistent ledgers. Melting receives
-  the crystal number after `znidetr` for both its `zicncq` and `picnc`
-  arguments. ECHAM's `zicncq` already includes `znidetr` (line 982), and
-  `znidetr` is zero wherever melting acts, since `ll_cv` needs a step-start
-  temperature below `tmelt` and melting one above it, so the two orders
-  give the same number.
+This section lists what is left once #972/#1110/#1116 are fixed; none of
+melt, sublimation or sedimentation's relative order is a deviation any
+more — "What changed" below is history, not a standing deviation.
+
+- **ECHAM's one `melting_snow_and_ice` routine is two calls here**
+  (`melt_falling_flux` / `melt_in_cloud_ice`), back to back, both BEFORE
+  sublimation and sedimentation — matching ECHAM's own order for both
+  halves (lines 1170-1190, before 1200-1219 and 1221): `picnc`/`pxite` are
+  melt's INOUT arguments (lines 1176-1182), and section 4's own
+  `zxip1 = pxim1 + ztmst·pxite` (lines 1227-1232) reads them post-melt, so
+  a warm level's (`T_m1 > tmelt`) in-cloud ice is melted before any of it
+  can sediment out as a still-frozen flux. The split itself is pure
+  code organisation (the two pieces act on numerically independent pools —
+  the falling flux vs. the in-cloud mass — so nothing stops them running
+  back to back as separate calls); `melting_snow_and_ice` remains as a
+  thin wrapper for the one existing unit test built around the combined
+  call. In-cloud melt receives the crystal number BEFORE `znidetr`/cirrus-
+  nucleation join it (ECHAM's `picnc` at line 1176 is still the section-1
+  exit value; the join is lines 1251-1258, after section 4).
 - **The fusion-heat correction of the detrainment re-split uses the moist
   `cp` and is signed.** ECHAM subtracts `(als − alv)·zxtec/cpd` from `ptte`
   where `ztconv <= tmelt .AND. .NOT. lo2` (lines 1300-1308): dry `cpd`, and
@@ -130,6 +144,56 @@ Formulation choices inside the sweep, for provenance:
 - The section-5.4 supersaturation corrections receive the ice part of the
   re-split detrained condensate as their detrainment input, as ECHAM passes
   `zxite` there (line 1490).
+
+## What changed (#972, #1110, #1116)
+
+Three rounds on one root cause, in the order they were found:
+
+1. **#972/#1110**: an earlier version of this sweep ran sublimation AFTER
+   this level's own sedimentation (sediment → melt → sublimate: the only
+   order change made at first, to fix #1110's specific finding), so a
+   level with no incoming ice — the ordinary case for the first level
+   that sediments any — spuriously sublimated part of the ice it had
+   itself just produced, before that ice ever reached the level below.
+2. A first fix moved only the sublimation call ahead of sedimentation,
+   leaving `melting_snow_and_ice` (both halves) positioned after it, as
+   jcm had run it since before this PR (that position traces to #662
+   finding 2, which found the melt tendency was being DISCARDED across
+   routines — not that ECHAM's own melt-before-sediment order was wrong
+   or that jcm needed a different one; #662 itself calls the order "fine"
+   only because MG/PUMAS, `micro_pumas_v1.F90`, happens to use the same
+   one, not because ECHAM requires it). That position was safe only
+   incidentally, while sublimation's own order was still wrong: once
+   sublimation correctly reads the flux ENTERING the level, melt (still
+   after sedimentation) and sublimation both read the SAME pre-melt
+   `snow_flux`, so what sublimation removed was never actually subtracted
+   from what melt also claimed — reproduced in local review as a negative
+   outgoing snow flux in a subsaturated level above freezing with
+   incoming snow.
+3. Moving the WHOLE of `melting_snow_and_ice` (both the flux and in-cloud
+   halves) ahead of sublimation and sedimentation — matching ECHAM's
+   literal order exactly, as above — fixed the snow double-spend AND a
+   second, independent defect a local Codex review caught on that fix:
+   with in-cloud melt still after sedimentation, a warm level holding
+   in-cloud ice sedimented that ice (as a real outgoing flux, now that the
+   self-sublimation damping was gone) before ever getting a chance to
+   melt it — a physical impossibility in ECHAM, where a warm level cannot
+   emit ice it never had the chance to keep frozen. This is the #1116
+   gap's actual content: it was filed, in the PR before this history was
+   understood, as a "narrower, dormant" leftover order difference; it
+   turned out to be live, and is closed by this reorder rather than left
+   open.
+
+Confirmed exact (to float64 round-off) against the `cloud2m_T63L47.npz`
+fixture's `sediment_then_detrain` and `detrainment_mixed_lo2_true` columns
+at every stage: `icnc_add` (ECHAM's end of section 4) matches every level
+of every fixture column, where before step 1 a level that only *received*
+sedimented ice from above (no detrainment of its own) ran ~1.8% low on
+both ICNC and in-cloud ice mass, compounding to ICNC residuals up to
+3.6e-3 across three stacked detraining+sedimenting levels. A fixture-free
+test (`lohmann_2m_test.py`) pins step 3's own fix directly: a warm level
+holding in-cloud ice with an incoming frozen flux emits no ice flux of its
+own, and the melt heating lands in that level.
 
 ## The state-splitting convention
 
@@ -225,28 +289,136 @@ kilogram, or zero where the negative-mass repair removed the condensate
 step to step. `clouds.qnc_prev`/`qni_prev` record the raw number tracers of
 the state the term receives.
 
+## The two section-1 droplet-number sources (#955)
+
+ECHAM's section 1 runs two droplet-number sources before the main level
+loop, vectorized over the whole column — `cloud_microphysics_2m` runs them
+in the same place, right after `znidetr`, on the pre-scan `cdnc0` that used
+to go straight from the entry floor to the `minimum_CDNC` floor with
+nothing in between.
+
+**Stratiform activation at cloud base, copied to the cloud above it**
+(`mo_cloud_micro_2m.f90` 742-782,
+`cloud_utils.stratiform_activation_at_cloud_base`) needs a cloud-base
+search: ECHAM's `get_cloud_bounds` (`mo_cloud_utils.f90` 136-220) flags,
+for a contiguous run of cloudy levels, the run's base (the level nearest
+the surface; the surface level is always its own base, since there is no
+level below it to be clear) and tags every level strictly above the base
+with the base's own index. `cloud_utils.cloud_base_search` ports the BASE
+side only (cloud tops are not needed here) as a single `lax.scan` over the
+level axis with `reverse=True`: the carry is the nearest base found so
+far, reset to the current level at a base, to -1 outside any cloud, and
+inherited while climbing a run above its base. Four triggers decide
+whether the base activates — CDNC at or below `cdnc_min`, the liquid still
+growing, the cloud cover having just grown, or water supersaturation —
+matched to ECHAM's own inputs: `cdnc_min` is the SAME per-level floor
+`minimum_CDNC` already computes from the pre-detrainment in-cloud liquid
+(previously applied as a floor immediately, now deferred past both
+sources so the trigger can tell a cell that has not yet been reactivated
+this step apart from one that has); "the cover just grew" needs the
+*previous* step's cloud cover, which `SundqvistCloudFraction` now
+publishes as the plain diagnostics key `"cloud_fraction_prev"` (captured
+from the carry it receives, before overwriting it with this step's
+RH-diagnosed cover) since `diagnostics["clouds"].cloud_fraction` has
+already been replaced with this step's value by the time the microphysics
+term runs.
+
+**Droplet number of detrained convective liquid, `zqlnuccv`**
+(lines 889-941, `cloud_utils.convective_detrainment_droplet_number`) needs
+ECHAM-HAM's `cdncact_cv`: a second, convective-updraft activation call
+(`mo_ham_activ.f90`/`mo_activ.f90`) fills a per-level profile of "the
+number ARG would activate if cloud base were here", read both at the
+current level and gathered at the convective cloud base
+(`iclbas = NINT(zcvcbot)`, a column-constant index). jcm has no second
+activation path — only one aerosol-activation diagnostic,
+`activated_cdnc`, reaches the cloud scheme. The deliberate simplification
+this issue's "build it once ... and consume it in both" calls for is to
+let that SAME field stand in for `cdncact_cv`: it already serves as the
+stratiform number above, and is read a second time here at the
+convective base instead of the stratiform one. The convective base itself
+comes from `TiedtkeConvection`'s existing `ConvectionData.cloud_base` /
+`.ktype` diagnostics (`cloud_base` is valid only where `ktype > 0`); the
+`Lohmann2MMicrophysics` term gathers the activation potential at that
+level (a plain `take_along_axis`, done once in `__call__` before the
+per-column `vmap`, not inside `cloud_microphysics_2m` itself) and passes
+the result down as a column scalar, `convective_base_activated_cdnc`,
+alongside the `has_convective_cloud_base` flag. Both default to "no
+convective base" (0 / `False`) in any composition without a convection
+term, where the source is correctly a no-op.
+
+**`activation_potential`, not `activated_cdnc`.** Gathering the
+`activated_cdnc` *diagnostic* at a cell other than the one its masking was
+computed for reads a spurious zero whenever that cell has little or no
+STRATIFORM cover: under the default MACv2-SP configuration, `activated_cdnc`
+is `jcm.physics.aerosol.spa.spa_activated_cdnc`, a GRID-MEAN floor that bakes
+in a `cloud_fraction` factor by design (its own docstring explains why — a
+deliberate SPA choice, not a port of anything in the Fortran). ECHAM's own
+`zcdncact`/`cdncact_cv` is never cloud-fraction-weighted at any of the THREE
+Fortran sites that read it (742-782 above, 889-941/905-917 here, and
+`update_in_cloud_water`'s own 2594-2608) — it is a per-cell activation
+*potential*, and each site's own boolean gate (a cloud-base search, a
+convective-detrainment flag, or the `cdnc <= cdnc_min` re-trigger) decides
+where it applies, not a continuous masking of the value itself. All THREE
+sites — the two section-1 sources above and the scan's own section-5.5
+re-activation (`cloud_utils.lohmann_2m.assembly.update_in_cloud_water`) —
+therefore read `activation_potential`: JAM's `ArgActivation`/
+`HamActivation` publish it as a plain alias of `activated_cdnc` (their own
+ARG/HAM output is never cloud-fraction-weighted, so the alias is exact);
+MACv2-SP computes it via the unmasked
+`jcm.physics.aerosol.spa.spa_activation_potential` — the same Lin (2025)
+power law, on the full-column `Nccn`, with no `cloud_fraction` factor,
+broadcast to the full `(nlev, ncols)` grid so every per-level gather (the
+convective-base one above, and the cloud-base one `cloud_utils.
+stratiform_activation_at_cloud_base` runs internally) sees a real level
+axis rather than the column-mean's native singleton one.
+`cloud_microphysics_2m`'s `activated_cdnc` parameter now serves only as
+the fallback value `activation_potential` resolves to when a caller does
+not publish the latter separately (every in-tree caller does).
+
+Both sources are soft, composition-optional reads
+(`optional_requires = (..., "cloud_fraction_prev", "convection",
+"activation_potential")`): a stack without `SundqvistCloudFraction` or a
+convection term still composes and runs, just without the trigger or the
+detrained-liquid source that needs it, matching how every other JAM-only
+optional read on this term (`activated_cdnc`, `freezing_aerosol`, ...)
+already degrades.
+
+The deferred `minimum_CDNC` floor is applied once, after both sources, so
+a column that never satisfies either source's gates reaches the scan with
+exactly the value it always did.
+
 ## Deliberate omissions (tracked)
 
-- **Large-scale vertical velocity is not plumbed** (`zvervx` is TKE-only; the
-  `knvb`/`lonacc` inversion gate on `zauloc` is omitted; section 6.2 passes
-  `pvervel = 0` to `het_mxphase_freezing`, so its immersion cooling is the TKE
-  updraft's) (#705).
-- **`nic_cirrus = 2`** still expects the Kärcher–Lohmann `pnicex`/`zqinucl`
-  source jcm does not compute (#552); its section-5 deposition branch returns
-  zero, as in the reference with a missing external source.
-- **Three section-1 number sources are absent**: the cirrus nucleation
+- **One section-1 number source is still absent**: the cirrus nucleation
   `zninucl` (lines 986-999), whose cap is the soluble-aerosol number `zascs`
-  the scheme does not receive; the droplet number of detrained liquid
-  `zqlnuccv` (lines 889-941), which needs the activated number at convective
-  cloud base; and stratiform activation at cloud base (lines 742-782)
-  (#955).
-- **Mixed-phase heterogeneous freezing without a prognostic aerosol** is a
-  jcm closure (freezing up to the DeMott (2010) INP number), not ECHAM's
-  aerosol-free `lccnclim` mode, which needs `pvervel` (#705). With JAM, section
-  6.2 is ECHAM-HAM's `het_mxphase_freezing` on the `ham_IN_setup` inputs the
-  aerosol publishes (`freezing_aerosol`). The choice is a static switch on the
-  presence of those inputs, so the aerosol-free composition traces the closure
-  exactly as before. {doc}`../science/clouds_microphysics` gives the details.
+  the scheme does not receive — tracked under #1159 (split from #955 once
+  this item was the only one left). The other two items #955 originally
+  tracked — stratiform activation at cloud base copied to the cloud above
+  it (lines 742-782) and the droplet number of detrained convective
+  liquid `zqlnuccv` (lines 889-941) — are implemented; see "The two
+  section-1 droplet-number sources" above.
+- **Mixed-phase heterogeneous freezing without a prognostic aerosol** defaults
+  to ECHAM's own aerosol-free mode, `lccnclim`
+  (`jcm/physics/clouds/lohmann_2m/ccnclim.py::ccnclim_freezing_aerosol`, porting
+  `mo_ccnclim.f90::ccnclim_IN_setup`, #1149): the SAME constant dust/BC
+  fractions and insoluble-mode wet radii a prognostic aerosol's `ham_IN_setup`
+  would supply, broadcast uniformly over every column and level (that
+  Fortran block has no spatial or temporal dependence at all, despite the
+  module's "CCN climatology" name — see `ccnclim.py`'s module docstring).
+  With JAM, section 6.2 is ECHAM-HAM's `het_mxphase_freezing` on the
+  `ham_IN_setup` inputs the aerosol publishes (`freezing_aerosol`) instead; a
+  prognostic aerosol always wins when it publishes those inputs, and
+  `AerosolFreeFreezing` (`CloudParams2M.aerosol_free_freezing`) otherwise
+  picks between `lccnclim` (the default) and jcm's older, non-ECHAM DeMott
+  (2010) closure, a static switch resolved at trace time.
+  {doc}`../science/clouds_microphysics` gives the details.
+  `demott2010_inp`'s background coarse-aerosol number (`n_aer_coarse`,
+  default 0.5 cm⁻³) is itself a differentiable tunable, not a fixed property
+  of that closure: at `n_aer_coarse = 0` the INP number — and therefore every
+  freezing increment downstream of it — is exactly 0, which is why the
+  `AerosolFreeFreezing.DEMOTT` opt-in, not `lccnclim`'s own nonzero
+  constants, is what `lohmann_2m_fortran_reference_test.py`'s comparisons
+  against a genuinely aerosol-free compiled ECHAM build select.
 
 ## The gates
 
@@ -260,7 +432,10 @@ fusion heat, the raw-tracer tendencies, the closure's INP maximum), and
 `lohmann_2m_fortran_reference_test.py` compares them block by block and end
 to end, on designed columns, with the unmodified ECHAM routine run by a
 standalone harness (fixtures under
-`jcm/data/test/echam_cloud_reference/cloud2m_*`).
+`jcm/data/test/echam_cloud_reference/cloud2m_*`), including section 7's
+`precip_formation_warm`/`_cold` (the rain/riming/snow formation mass that
+feeds `update_precip_fluxes`) fed ECHAM's own section-6-exit per-level state
+and chained exactly as the scan sequences them.
 `lohmann_2m_freezing_reference_test.py` does the same for section 6.2 with the
 HAM freezing inputs set (`cloud2m_frz_*`), and `lohmann_2m_freezing_test.py`
 pins the aerosol-free path to its output before the switch existed.
@@ -276,6 +451,28 @@ alone.
 2M schemes (documented on `CloudData`), and the 2M negative-mass repair is
 exported as `clouds.negative_mass_repair` [W/m²] so its sign-definite heating
 is measurable in any run.
+
+The two section-1 droplet-number sources (#955) have their own gates.
+`cloud_utils_test.py`'s `TestCloudBaseSearch` pins `cloud_base_search`
+against hand-built single- and multi-run columns, including the
+surface-is-always-a-base boundary case; `TestStratiformActivationAtCloudBase`
+pins each of the four triggers individually, the copy-above-base rule, a
+triggered base that gains no droplets not copying anything, and gradients
+through the activated branch; `TestConvectiveDetrainmentDropletNumber`
+pins the LWC-weighted blend against a hand computation, the
+never-decreasing floor, the no-convective-base and no-detrainment no-ops,
+and the cold mixed-phase ice branch. All three also check a `(nlev,)`
+column and its `(nlev, ncols)` broadcast agree. `lohmann_2m_test.py`'s
+`TestConvectiveCloudBaseWiring955` spies on `cloud_microphysics_2m`'s
+`jax.vmap` call (the same technique `TestLargeScaleVerticalVelocityWiring`
+uses for #705) to pin that `"cloud_fraction_prev"` and `"convection"`
+actually reach the function with the right values and the right
+fallback when their producer is absent — not just that the pure functions
+work in isolation. `TestCloudBaseActivationSensitivity955` is the
+motivating case itself: in a column whose CDNC already exceeds
+`cdnc_min` (closing the pre-#955 reactivation path), doubling the
+activated number now raises the in-cloud CDNC one level above a freshly
+formed cloud base, and has no effect at all without that growing base.
 
 ## The wet-scavenging interface
 

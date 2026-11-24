@@ -207,6 +207,41 @@ class StaleCitationsTest(unittest.TestCase):
             tg.stale_citations()
 
 
+class ClosedCitationFixtureTest(unittest.TestCase):
+    """A real on-disk page citing a closed issue is caught — even when the
+    surrounding prose already narrates the fix.
+
+    Regression fixture for the exact shape of #1047/#1050/#1051: each of
+    those register entries already read as "fixed" in prose ("...now fixed
+    here...", "...fixed here...") while still carrying the literal ``#NNN``
+    token in the same sentence. :func:`parse_refs` has no notion of tense —
+    it matches the token regardless of what the words around it say — so the
+    fix for that class of bug is always "delete the citation", never "the
+    prose already says it's fixed". This exercises the full on-disk path
+    (:func:`science_pages` / :func:`all_citations` / :func:`stale_citations`)
+    rather than a citations dict handed in directly, so it would catch a
+    future change that made the parser tense-aware in a way that let a
+    fix-narrated citation through.
+    """
+
+    def test_fix_narrated_citation_is_still_reported_stale(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "fixture.md"
+            page.write_text(
+                "**Why we differ.** `science` (defect, #777, fixed here) — "
+                "the routine now matches the reference exactly.\n"
+            )
+            with mock.patch.object(tg, "SCIENCE", Path(tmp)), \
+                 mock.patch.object(tg, "issue_state", return_value="closed"):
+                stale = tg.stale_citations()
+            self.assertEqual(
+                stale, ["#777 is closed (cited in ['fixture.md'])"],
+                "a citation inside fixed-sounding prose must still be "
+                "reported — the guard does not parse tense")
+
+
 class CliTest(unittest.TestCase):
     """The two entry points the workflows call, and their exit codes."""
 

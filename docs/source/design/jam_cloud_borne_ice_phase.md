@@ -44,6 +44,20 @@ the reservoir drains to the interstitial phase on the resuspension timescale.
 Once the whole cover has gone, the microphysics' evaporation and formation
 ledger decides the release.
 
+**Accepted limitation: the release is keyed on the summed ledger.** The
+evaporation the exchange reads is `zxlevap + zxievap`, so in a mixed-phase
+cell that loses one phase the release is a fraction of the whole reservoir
+rather than of that phase's share, and the published droplet-held share is
+not corrected for what left. The faithful form (each phase released on its own
+evaporation, with the share carried across steps) was built and measured in a
+30-day T63L47 January A/B from the `echam-jam-t63-l47_jan_fixed_49c0724c`
+state against a 1-ppm noise twin: it moves the global aerosol burdens by
++0.3–0.6 % and AOD by +0.6 % in the days before weather divergence (noise
+twin 0.05–0.2 %), with TOA fluxes unchanged to < 0.4 W m⁻². The reservoir is
+3–6 % of the column burden (16 % for sea salt) and only ~40 % of it sits in
+mixed-phase cells, which bounds the effect at that level. That size does not
+pay for the ~1.6k lines the faithful form needs, so the summed ledger stays.
+
 **Removal by phase.** HAM scavenges each part at its own conversion: the water
 part by the liquid conversion `peffwat`, the ice part by `peffice`. The
 exchange records each reservoir's droplet-held share, `(1 − p_ice)·f_ARG / f`,
@@ -140,12 +154,13 @@ should start from such states.
 
 ## Related
 
-- **The transport half of the interaction** is #1062: a local (Bermejo–Conde,
-  IFS) fixer in place of the global proportional one. It changes the transport
-  of every nodal tracer including cloud ice. With the crystal-number rule the
-  upper-level aerosol does not build up without it. Added to the rule, it
-  reduced the spin-up transient above by only 15-25 %, so the transient's
-  source is the uptake, not the amplifier.
+- **The transport half of the interaction** is the local (Bermejo–Conde, IFS)
+  fixer of {doc}`tracer_mass_conservation`, which now runs ahead of the
+  global proportional one for every nodal tracer including cloud ice. A
+  prototype of it, added to the crystal-number rule above, reduced the
+  spin-up transient above by only 15-25 %, so for that transient the
+  source is the uptake, not the amplifier; the crystal-number rule alone
+  already keeps the upper-level aerosol from building up in steady state.
 - **HAM's in-cloud impaction** (`ic_scav_imp`: collision of interstitial
   aerosol with cloud droplets and ice plates) is the other half of HAM's
   in-cloud fraction. jcm applies it to the interstitial aerosol of every

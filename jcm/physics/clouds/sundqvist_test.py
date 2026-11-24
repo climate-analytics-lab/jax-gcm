@@ -34,6 +34,7 @@ from jcm.physics.clouds.sundqvist import (
     cover_from_b0,
     cover_saturation_specific_humidity,
     critical_relative_humidity,
+    inversion_level_index,
     saturation_specific_humidity,
     stratocumulus_saturation_factor,
 )
@@ -383,6 +384,59 @@ class TestInversion:
         cf, cf_plain, knvb = self._case(t, ph, pf, geo)
         assert knvb == -1
         np.testing.assert_array_equal(cf, cf_plain)
+        # #705: inversion_level_index must agree with the same reference
+        # knvb, including its -1 "no level found" sentinel -- the one case
+        # zsat itself cannot distinguish from a real index (its own ``found``
+        # factor already zeroes the enhancement either way), but which
+        # matters to the mixed-phase ``lonacc`` exception that reads knvb
+        # directly with no such gate of its own.
+        level = inversion_level_index(
+            jnp.asarray(t), jnp.asarray(geo), _echam_t63(), L47_RANGE)
+        assert int(level) == -1
+
+    def test_inversion_level_index_matches_reference_knvb(self):
+        """#705: ``inversion_level_index`` agrees with the Fortran-exact knvb.
+
+        Two cases from the tests above: a clean inversion inside the range,
+        and a tie broken toward the lowest (surface-closest) level. The
+        no-inversion sentinel is covered separately above.
+        """
+        t, ph, pf, geo = _l47_column(inversion_level=42)
+        _, _, knvb = self._case(t, ph, pf, geo)
+        level = inversion_level_index(
+            jnp.asarray(t), jnp.asarray(geo), _echam_t63(), L47_RANGE)
+        assert int(level) == knvb == 42
+
+        # The surface-tie case (test_most_stable_level_below_jbmax_blocks_
+        # enhancement): a stronger ground inversion wins over a weaker one
+        # inside the range.
+        t, ph, pf, geo = _l47_column(inversion_level=41, inversion_jump=1.0)
+        t[46] = t[45] - 4.0
+        geo = _geopotential(t, ph, pf)
+        _, _, knvb = self._case(t, ph, pf, geo)
+        level = inversion_level_index(
+            jnp.asarray(t), jnp.asarray(geo), _echam_t63(), L47_RANGE)
+        assert int(level) == knvb == 46
+
+    def test_inversion_level_index_gated_by_enhance_allowed(self):
+        """#1153: ``enhance_allowed=False`` publishes the sentinel.
+
+        A clean, well within range inversion (level 42, matched against the
+        Fortran-exact ``knvb`` by ``test_inversion_level_index_matches_
+        reference_knvb`` above) must still come back ``-1`` when the column
+        is excluded from ECHAM's ``loidx`` scan, exactly as
+        ``_echam_cover_reference``'s own ``enhance=False`` leaves its
+        ``knvb`` at the uninitialized sentinel.
+        """
+        t, ph, pf, geo = _l47_column(inversion_level=42)
+        allowed = inversion_level_index(
+            jnp.asarray(t), jnp.asarray(geo), _echam_t63(), L47_RANGE,
+            jnp.asarray(True))
+        disallowed = inversion_level_index(
+            jnp.asarray(t), jnp.asarray(geo), _echam_t63(), L47_RANGE,
+            jnp.asarray(False))
+        assert int(allowed) == 42
+        assert int(disallowed) == -1
 
     def test_weakly_stable_level_uses_zgam(self):
         """A stable but non-inverted layer gets ``csatsc + zgam``."""
@@ -479,6 +533,67 @@ class TestTerm:
         enhanced = cf[42] > cf[42, 1]
         assert list(enhanced) == [True, False, False, False, True]
         assert np.all(cf[:42] == cf[:42, :1]) and np.all(cf[43:] == cf[43:, :1])
+        # #1153: the published "inversion_level" (knvb) must follow the SAME
+        # enhance_allowed gate as the cloud-fraction enhancement above, not
+        # just the "found" existence test -- ECHAM never runs the zknvb scan
+        # over a loidx-excluded column (land, sea-ice, prior convection), so
+        # those columns publish the sentinel even though the temperature
+        # profile has a real inversion at level 42.
+        level = np.asarray(out["inversion_level"])
+        assert list(level) == [42, -1, -1, -1, 42]
+
+    def test_cloud_fraction_prev_is_the_carrys_cover_not_this_steps(self):
+        """#955: ``"cloud_fraction_prev"`` is ECHAM's ``zaclc_tm1``.
+
+        The 2M scheme's cloud-base activation needs the PREVIOUS step's
+        cover, which this term is about to overwrite with the RH-diagnosed
+        value in the SAME call -- so the published field must be the carry
+        it received, not the value it is about to write to ``"clouds"``.
+        """
+        from jcm.physics.clouds.cloud_data import CloudData
+        state, diags = _term_inputs(2)
+        nlev = state.temperature.shape[0]
+        prior_cover = jnp.full((nlev, 2), 0.37)   # distinctive, != the RH-diagnosed cover
+        diags = {**diags, "clouds": CloudData.zeros((2,), nlev).copy(
+            cloud_fraction=prior_cover)}
+        _, out = _cached_term()(state, diags, _Forcing(jnp.zeros(2)),
+                                _Terrain(jnp.zeros(2)))
+        np.testing.assert_array_equal(
+            np.asarray(out["cloud_fraction_prev"]), np.asarray(prior_cover))
+        assert not np.allclose(
+            np.asarray(out["clouds"].cloud_fraction), np.asarray(prior_cover))
+
+    def test_inversion_level_gate_blanks_the_lonacc_mask(self):
+        """A gated column's sentinel keeps ``lonacc_levels`` all-False there.
+
+        The downstream 1M/2M consumers (``jcm.physics.clouds.echam_1m.
+        resolve_lonacc_mask``) read the published ``"inversion_level"``
+        with no ``enhance_allowed`` test of their own, just ``lonacc_
+        levels``'s ``jbmin <= knvb <= jbmax`` range check -- so the gate has
+        to be applied before publication (here) or a land/sea-ice/
+        prior-convection column's valid-looking temperature inversion would
+        zero ``zauloc`` on two subsiding levels it should never touch.
+        """
+        from jcm.physics.clouds.echam_1m import lonacc_levels
+
+        state, diags = _term_inputs(3)
+        #          ocean (allowed)  land (excluded)  ocean+ktype1 (excluded)
+        fmask = jnp.array([0.0, 1.0, 0.0])
+        sice = jnp.array([0.0, 0.0, 0.0])
+        conv = type("Convection", (), {"ktype": jnp.array([0, 0, 1])})()
+        diags = {**diags, "convection": conv}
+        term = _cached_term()
+        _, out = term(state, diags, _Forcing(sice), _Terrain(fmask))
+        level = out["inversion_level"]
+        assert list(np.asarray(level)) == [42, -1, -1]
+
+        nlev = state.temperature.shape[0]
+        subsiding = jnp.ones((nlev, 3))  # pvervel > 0 everywhere: subsidence
+        mask = lonacc_levels(level, subsiding, *term._inversion_range, nlev)
+        mask = np.asarray(mask)
+        assert np.all(~mask[:, 1]) and np.all(~mask[:, 2])
+        assert mask[42, 0] and mask[43, 0]
+        assert not np.any(np.delete(mask[:, 0], [42, 43]))
 
     def test_column_and_block_agree(self):
         """Broadcasting-native: (nlev,) and (nlev, ncols) give the same cover."""

@@ -101,6 +101,20 @@ def test_warm_liquid_detrainment_is_part_of_the_condensate_increment():
     above ``tmelt``). Liquid detrained above ``tmelt`` therefore enters
     exactly as ``pxlte + pxtecl``, and moving it into the increment changes
     nothing.
+
+    The equivalence is real-arithmetic, not bit-for-bit: the cloud-base
+    activation trigger (#955) reads ``qc_increment`` directly (ECHAM's own
+    ``pxlte > 0`` condition, lines 744-745), which the split/lumped calls
+    give a genuinely different VALUE at the detraining levels (the lumped
+    call's increment already includes the detrainment) — the two calls'
+    trigger booleans can differ even though both land on the same cloud
+    base here (``activated_cdnc`` equals the entry CDNC in this fixture,
+    so the activation increment is 0 either way). A tiny float32
+    ULP-level residual from that genuinely different code path is
+    therefore expected, not a regression; ``assert_allclose`` with a
+    tolerance far below any physical signal keeps the test checking the
+    real-arithmetic identity rather than bit-reproducibility it no longer
+    has.
     """
     column = _column()
     warm = column["temperature_m1"] > c.tmelt
@@ -109,7 +123,8 @@ def test_warm_liquid_detrainment_is_part_of_the_condensate_increment():
     detrained_qc = jnp.where(warm & cloudy_liquid, 3e-5, 0.0)
     split, lumped = _split_and_lumped({"detrained_qc": detrained_qc})
     for a, b in zip(jax.tree.leaves(split), jax.tree.leaves(lumped)):
-        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        np.testing.assert_allclose(
+            np.asarray(a), np.asarray(b), rtol=1e-6, atol=1e-12)
 
 
 def test_cold_ice_detrainment_is_not_an_increment():

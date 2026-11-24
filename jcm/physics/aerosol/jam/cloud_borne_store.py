@@ -40,8 +40,11 @@ keeps the scan-carry pytree stable), and applies the turbulent vertical
 mixing of the carry with the same TTE-TKE exchange coefficients and
 implicit solve ``TracerVerticalDiffusion`` gives the interstitial
 tracers — without it, carry storage would be exactly the column-local
-frozen reservoir #602 warned about. Carry-resident state is not threaded
-by ``PrescribedStateModel`` (#623).
+frozen reservoir #602 warned about. ``PrescribedStateModel`` threads this
+carry sequentially (``lax.scan``) across a re-diagnosed trajectory, cold-
+seeded at the first time unless a donor carry is supplied (#623) — the
+reservoir starts empty there and fills over the diagnosed times, rather
+than being severed entirely as it was before #623.
 """
 
 from __future__ import annotations
@@ -143,6 +146,15 @@ class CloudBorneCarryStore(PhysicsTerm):
     # destroy aerosol mass. See
     # docs/source/design/checkpoint_compatibility.md.
     prognostic_carry_slots: ClassVar[tuple[str, ...]] = (CARRY_KEY,)
+    # ``"vertical_diffusion"`` (the TKE closure's ``kh``) is read cross-step:
+    # this term runs in the pre-cloud aerosol block, upstream of
+    # ``TteTkeVerticalDiffusion`` in the default ``echam_physics`` order, so
+    # the exchange coefficient mixing the carry uses is last step's (same
+    # deliberate lag as ``TracerVerticalDiffusion``, which mixes the
+    # interstitial tracers with the same carry — see its module docstring).
+    # ``.get()`` with a None-guarded no-op also lets this term compose
+    # without any vdiff term (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = ("vertical_diffusion",)
 
     def __init__(
         self,

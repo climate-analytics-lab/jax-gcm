@@ -1,0 +1,10 @@
+# The optional extras' dependencies that are not on PyPI. pyproject.toml names
+# them without a URL (PyPI refuses a distribution whose metadata carries a
+# direct-URL dependency), so install these first, then the extras:
+#   pip install -r tools/ci/extras_preinstall.txt
+#   pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
+# The extras-tests job does the same.
+jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git
+# The M7-JAX#1 commit jcm's M7 adapter is validated against; every build of
+# that branch reports 0.2.0.dev0, so the commit, not the version, selects it.
+m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e

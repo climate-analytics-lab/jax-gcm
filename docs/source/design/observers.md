@@ -102,6 +102,44 @@ uses), so a track spanning several chunks is sliced consistently and
 tests). Note the per-step tables scale as `n_steps × npts × k`; for very long
 single windows with many points, prefer the chunked driver pattern anyway.
 
+## Hydra configuration
+
+`python -m jcm.main` attaches observers through the top-level `observers`
+key: a mapping from observer name to spec, built by
+`jcm.observers.observers_from_config` before anything else in the model, so a
+malformed spec (an unknown kind or key, a missing or scalar position list, a
+station or track file without the required columns) fails before anything is
+built. A variable the model does not produce fails when the observer is first
+traced, before the first step runs. Every spec has `kind`,
+`variables` and, optionally, `vertical` and `k_neighbors`; each kind adds its
+own keys, and unknown keys are refused.
+
+| `kind` | positions |
+|---|---|
+| `stations` | `file`, or inline `latitudes`, `longitudes` and optional `altitudes` / `pressures` / `names` |
+| `track` | `file`: CSV or netCDF with `time`, `latitude`, `longitude` and optionally `altitude` or `pressure` |
+| `local_solar_time` | optional `latitudes`, `local_solar_hour`, `altitude` / `pressure` |
+
+A station file is a CSV with the columns `name, latitude, longitude` and
+optionally one of `altitude` (m above the geoid) or `pressure` (Pa); the
+vertical target sets the vertical mode as in the Python API. Names must be
+unique and are written as the `station` coordinate on the `point` axis.
+Files resolve like every other input path, `hf://` included.
+
+```bash
+python -m jcm.main +configuration=t63-echam-jam-mam4 \
+    +observers.arm.kind=stations +observers.arm.file=/path/stations.csv \
+    '+observers.arm.variables=[m_so4_acc,m_so4_ait,air_density]'
+```
+
+Each observer is written to its own file because its per-`dt` time axis is
+not the gridded output's: `<prefix>_day<N>_obs_<name>.nc` beside each chunk
+file of a chunked run (written whether or not `run.save_chunks` is set, and
+never converted by `run.pressure_levels`), and `<output stem>_obs_<name>.nc`
+beside the output of a single-window run. A chunk the run discards after an
+unhealthy bail writes neither file. The diagnostic run modes (`prescribed`,
+`scm`) have no integration scan to sample and refuse a non-empty `observers`.
+
 ## Caveats / follow-ups
 
 - Times use the same real Gregorian clock as the primary output. Monthly
@@ -111,5 +149,5 @@ single windows with many points, prefer the chunked driver pattern anyway.
 - Fields with extra trailing axes (per-band optics) are not sampleable.
 - Under SPMD sharding the neighbour gather is a cross-device gather; cheap
   at realistic point counts but not free.
-- Possible extensions: SE basis-function weights on pySES grids, along-track
-  averaging kernels (satellite footprints), and a Hydra config hook.
+- Possible extensions: SE basis-function weights on pySES grids and
+  along-track averaging kernels (satellite footprints).

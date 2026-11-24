@@ -41,9 +41,15 @@ from .cloud_utils import (
 )
 from .lohmann_2m import cloud_microphysics_2m, demott2010_inp
 from .lohmann_2m import scheme as scheme_mod
-from .lohmann_2m_params import CloudParams2M
+from .lohmann_2m.deposition_freezing import _demott_n_aer_power_surrogate
+from .lohmann_2m_params import AerosolFreeFreezing, CloudParams2M
 
 _P = CloudParams2M.default()
+# ECHAM's own aerosol-free mode (``lccnclim``) is ``_P``'s default since
+# #1149; the DeMott (2010) floor this module's ``TestInpFloor`` and
+# ``TestDeMottAmbientDensity`` exercise is now reached only through the
+# explicit ``AerosolFreeFreezing.DEMOTT`` opt-in.
+_DEMOTT_P = _P.replace(aerosol_free_freezing=AerosolFreeFreezing.DEMOTT)
 DT = 900.0
 
 
@@ -242,9 +248,17 @@ class TestDetrainedIceCrystalNumber:
             self, monkeypatch):
         """``picnc = min(picnc_sedimented + znidetr, icemax)`` (F 1251-1252).
 
-        Records the ICNC sedimentation returns and the number melting then
-        receives, per level: the difference is exactly ``znidetr``, until
-        the sum reaches ``icemax``.
+        Records the ICNC sedimentation returns and the number the NEXT
+        consumer downstream receives, per level: the difference is exactly
+        ``znidetr``, until the sum reaches ``icemax``.
+
+        #972/#1110/#1116 moved ``melt_in_cloud_ice`` (split out of the old
+        ``melting_snow_and_ice``) to run BEFORE sedimentation, matching
+        ECHAM's own order (F 1176 precedes F 1227-1232) — it now receives
+        the PRE-sedimentation, PRE-znidetr ICNC (``icnc0``), not the value
+        this test pins. ``update_in_cloud_water`` (section 5.5, F 1511) is
+        the first call after sedimentation that still takes the joined and
+        capped number, so it is the one to spy on now.
         """
         n = 6
         T = jnp.full(n, 228.0)                       # below cthomi
@@ -257,21 +271,24 @@ class TestDetrainedIceCrystalNumber:
                    det_qi=det, det_qc=jnp.zeros(n))
         sedi = _spy(monkeypatch, scheme_mod, "sedimentation_ice",
                     lambda a, k, out: (a[3], out[1]))
-        melt = _spy(monkeypatch, scheme_mod, "melting_snow_and_ice",
-                    lambda a, k, out: (a[4],))
+        # icnc_sedi (post-sedimentation + znidetr + zninucl, capped at
+        # icemax) is update_in_cloud_water's 14th positional argument
+        # (index 13: ...t_m1_k, ll_cc, icnc_sedi, ...).
+        uicw = _spy(monkeypatch, scheme_mod, "update_in_cloud_water",
+                    lambda a, k, out: (a[13],))
         _run(col)
         zrid = ice_volume_mean_radius_from_temperature(T, _P)
         lo2_2d = jnp.zeros(n, dtype=bool)            # irrelevant below cthomi
         znidetr = np.asarray(detrained_ice_crystal_number(
             det, T, lo2_2d, col["cf"], rho, zrid, _P))
-        assert len(sedi) == n and len(melt) == n
+        assert len(sedi) == n and len(uicw) == n
         seen = []
-        for (rho_k, icnc_sed), (icnc_melt_in,) in zip(sedi, melt):
+        for (rho_k, icnc_sed), (icnc_joined,) in zip(sedi, uicw):
             k = _level_of(rho, float(rho_k))
             expected = min(float(icnc_sed) + znidetr[k], float(_P.icemax))
-            np.testing.assert_allclose(float(icnc_melt_in), expected,
+            np.testing.assert_allclose(float(icnc_joined), expected,
                                        rtol=1e-5)
-            seen.append(float(icnc_melt_in))
+            seen.append(float(icnc_joined))
         assert max(seen) == pytest.approx(float(_P.icemax))  # the cap binds
         assert min(seen) < 1e3                                # and not always
 
@@ -471,7 +488,7 @@ class TestIcncDiagnosisRadius:
         one = lambda v: jnp.array([v], dtype=jnp.float32)  # noqa: E731
         T = one(200.0)
         _, icnc, *_ = update_in_cloud_water(
-            pressure=one(1.6e4), activated_cdnc=one(0.0),
+            aerosol_number_available=one(1.6e4), activated_cdnc=one(0.0),
             condensation_rate=one(0.0), deposition_rate=one(0.0),
             tompkins_genti=one(0.0), tompkins_gentl=one(0.0),
             newly_formed_ice=one(0.0), specific_humidity_tmp=one(1e-6),
@@ -823,43 +840,51 @@ def _outputs_equal(out_a, out_b):
 
 
 class TestInpFloor:
-    """``n_inp = max(ice_nuclei, DeMott)`` of the aerosol-free closure.
+    """``n_inp = max(ice_nuclei, DeMott)`` of the ``AerosolFreeFreezing.DEMOTT`` closure.
 
-    ``ice_nuclei`` is the closure's optional external INP (no in-tree term
-    publishes it since JAM moved to ECHAM-HAM's rates); DeMott stays the floor.
+    ``ice_nuclei`` is that closure's optional external INP (no in-tree term
+    publishes it since JAM moved to ECHAM-HAM's rates); DeMott stays the
+    floor. Since #1149 made ``lccnclim`` the aerosol-free DEFAULT, every
+    call here uses ``_DEMOTT_P`` (an explicit ``AerosolFreeFreezing.DEMOTT``
+    override) to keep exercising this closure at all -- ``ice_nuclei`` and
+    ``n_aer_coarse`` are read only inside it (``lccnclim`` ignores both).
     """
 
     def test_tiny_online_inp_leaves_the_demott_floor(self):
         col = _supercooled_liquid_column()
-        base = _run(col)
-        tiny = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e-3, 0.0)))
+        base = _run(col, params=_DEMOTT_P)
+        tiny = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e-3, 0.0)), params=_DEMOTT_P)
         assert _outputs_equal(base, tiny), (
             "a tiny external INP switched the DeMott floor off")
         # ...and the floor is doing something here: fewer coarse aerosol
         # (a smaller DeMott INP) makes fewer crystals.
-        cleaner = _run(col, params=_P.replace(n_aer_coarse=0.01))
+        cleaner = _run(col, params=_DEMOTT_P.replace(n_aer_coarse=0.01))
         fewer = float(jnp.sum((base[0].dqnidt - cleaner[0].dqnidt)
                               * col["rho"]))
         assert fewer > 0.0, "the DeMott floor is inactive in this fixture"
 
     def test_large_online_inp_wins(self):
         col = _supercooled_liquid_column()
-        base = _run(col)
-        large = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e5, 0.0)))
+        base = _run(col, params=_DEMOTT_P)
+        large = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e5, 0.0)), params=_DEMOTT_P)
         extra = float(jnp.sum((large[0].dqnidt - base[0].dqnidt) * col["rho"]))
         assert extra > 0.0, "a large external INP did not raise the ICNC"
 
     def test_floor_gradient_matches_a_central_difference(self):
         """d/d n_aer_coarse where the DeMott floor sets the new crystals."""
         col = _supercooled_liquid_column()
+        # ECHAM's droplet floor, the fixture's regime: reactivation holds three of
+        # the deck's four cells (33-42 cm^-3) at it. At the JAM default of 10 no
+        # finite-difference step of this column is clean enough to check against.
+        p = _DEMOTT_P.replace(cdnc_min_fixed=40.0)
 
         def f(n_aer_coarse):
             return _tendency_outputs(
-                _run(col, params=_P.replace(n_aer_coarse=n_aer_coarse)))
+                _run(col, params=p.replace(n_aer_coarse=n_aer_coarse)))
 
-        grad = jax.grad(lambda x: jnp.sum(f(x)[5] ** 2))(_P.n_aer_coarse)
+        grad = jax.grad(lambda x: jnp.sum(f(x)[5] ** 2))(p.n_aer_coarse)
         assert bool(jnp.isfinite(grad)) and float(grad) != 0.0
-        check_gradients(f, (_P.n_aer_coarse,), rtol=1e-2, seed=0,
+        check_gradients(f, (p.n_aer_coarse,), rtol=1e-2, seed=0,
                         adjoint_rtol=1e-3)
 
 
@@ -875,6 +900,112 @@ class TestDeMottAmbientDensity:
         np.testing.assert_allclose(at_stp, 1e3 * per_std_litre, rtol=1e-5)
         half = np.asarray(demott2010_inp(T, 0.5, 0.5 * rho_stp))
         np.testing.assert_allclose(half, 0.5 * at_stp, rtol=1e-6)
+
+    def test_zero_aerosol_gives_exactly_zero_inp(self):
+        """``n_aer_coarse_cm3=0`` is "no background aerosol", not 0.01 cm^-3.
+
+        Before jax-gcm#1087's fix this used ``jnp.maximum(n_aer_coarse_cm3,
+        0.01)``, so an explicit "no aerosol" call still produced a nonzero
+        INP number (the mechanism behind the issue's `detrainment_mixed_lo2_
+        false` discrepancy: a CDNC-exactly-at-the-activation-floor cell got
+        nudged a few hundred m^-3 below the floor by this spurious freezing,
+        flipping the downstream warm-rain gate).
+        """
+        T = jnp.array([260.0, 250.0, 240.0, 230.0], dtype=jnp.float32)
+        rho_stp = 101350.0 / (c.rd * 273.15)
+        zero = np.asarray(demott2010_inp(T, 0.0, rho_stp))
+        np.testing.assert_array_equal(zero, 0.0)
+
+        grad = jax.grad(
+            lambda n: jnp.sum(demott2010_inp(T, n, rho_stp) ** 2))(0.0)
+        assert bool(jnp.isfinite(grad))
+
+    def test_demott_gradient_is_one_consistent_surrogates(self):
+        """#1087's gradient fix, settled (PR #1114, threads 4273269231,
+        4273566890, 4273897189). Two Codex rounds tried bounding the
+        singular ``n_aer_coarse`` slope while keeping ``exponent``'s (hence
+        temperature's) exact, first with a double-where (round 1: fixed
+        n=0 but not the open neighbourhood above it) then with a DIFFERENT
+        surrogate per argument (round 2: exact ``exponent`` + bounded ``n``
+        is provably not the gradient of any single function -- pinning
+        ``d/d(exponent) = n**exponent*log(n)`` forces the surrogate to be
+        ``n**exponent`` itself wherever that holds, whose ``d/dn`` is then
+        the very unbounded slope being bounded away from). The actual fix
+        is ONE surrogate, split by region instead of by argument:
+
+        (i)   n <= 0: the primal is identically 0 for every temperature
+              (0**exponent == 0), so BOTH partials are exactly 0 there --
+              not an approximation, the function genuinely does not vary;
+        (ii)  0 < n: ``max(n, floor)**exponent``, one function, so both
+              its ``n`` and ``exponent`` partials come from the SAME
+              surrogate and the result is honestly integrable (symmetric
+              Hessian, order-independent repeated ``jax.grad``) rather
+              than merely finite.
+
+        Checked at x64 (the n-neighbourhood divergence this guards against
+        is a float64-magnitude story; float32 saturates and hides it).
+        """
+        with jax.enable_x64():
+            T = jnp.array(255.0, dtype=jnp.float64)   # mixed-phase, active range
+            rho = jnp.array(0.8, dtype=jnp.float64)
+            rho_stp = 101350.0 / (c.rd * 273.15)
+            delta_T = 273.16 - float(T)
+            exponent = 0.0264 * delta_T + 0.0033
+            prefactor = 5.94e-5 * delta_T ** 3.33 * 1e3 * float(rho) / rho_stp
+            n_floor = 0.01
+            dn_bound = abs(exponent * n_floor ** (exponent - 1.0) * prefactor)
+
+            def f(temperature, n):
+                return demott2010_inp(temperature, n, rho)
+
+            # (iv) primal exact everywhere: n**exponent above 0 (via the
+            # same prefactor demott2010_inp itself assembles), identically
+            # 0 at and below 0.
+            for n_val in (0.0, 1e-30, 1e-12, 1e-6, n_floor, 1.0):
+                n = jnp.array(n_val, dtype=jnp.float64)
+                val = f(T, n)
+                expected = prefactor * n_val ** exponent if n_val > 0.0 else 0.0
+                assert float(val) == pytest.approx(expected, rel=1e-9), n_val
+
+            # (i) n = 0: BOTH partials exactly 0 (the single surrogate's
+            # own n>0 mask makes this exact, not merely small).
+            grad_T0, grad_n0 = jax.grad(f, argnums=(0, 1))(T, jnp.array(0.0))
+            assert float(grad_T0) == 0.0
+            assert float(grad_n0) == 0.0
+
+            # (ii) 0 < n < floor: both partials are the ONE surrogate's --
+            # not the exact formula's own (which would be unbounded in n,
+            # or correct-but-inconsistent in exponent: the thing round 2
+            # proved impossible to have both of at once). d/dn stays
+            # within the same bound as before. The surrogate's own
+            # d/d(exponent) at any sub-floor n is ``floor**exponent *
+            # log(floor)`` (NOT the exact formula's ``n**exponent *
+            # log(n)``) -- checked directly on the surrogate, since
+            # demott2010_inp's own full d/dT also carries the OUTER
+            # prefactor's ordinary (n-dependent-through-the-VALUE, not
+            # the slope) chain-rule term and so is not this quantity by
+            # itself; the surrogate is what jax-gcm#1087's third round is
+            # actually about.
+            for n_val in (1e-30, 1e-12, 1e-6):
+                n = jnp.array(n_val, dtype=jnp.float64)
+                grad_T, grad_n = jax.grad(f, argnums=(0, 1))(T, n)
+                assert bool(jnp.isfinite(grad_T)) and bool(jnp.isfinite(grad_n))
+                assert abs(float(grad_n)) <= dn_bound * (1.0 + 1e-9), n_val
+
+                d_surrogate_d_exponent = jax.grad(
+                    lambda e: _demott_n_aer_power_surrogate(n, e))(exponent)
+                expected = n_floor ** exponent * float(jnp.log(n_floor))
+                np.testing.assert_allclose(
+                    d_surrogate_d_exponent, expected, rtol=1e-9, err_msg=n_val)
+
+            # (iii) Hessian symmetry (sub-floor and above-floor): genuine
+            # proof this is one function's gradient, not two glued together.
+            for n_val in (1e-6, 1.0):
+                n = jnp.array(n_val, dtype=jnp.float64)
+                hess = jax.hessian(f, argnums=(0, 1))(T, n)
+                d2_Tn, d2_nT = float(hess[0][1]), float(hess[1][0])
+                np.testing.assert_allclose(d2_Tn, d2_nT, rtol=1e-10, atol=1e-30,
+                                            err_msg=n_val)
 
 
 class TestFreezingSubstituteNumberCap:

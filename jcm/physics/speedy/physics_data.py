@@ -177,25 +177,30 @@ class ModRadConData:
         albsfc: Combined surface albedo (land + sea)
         snowc: Effective snow cover (fraction)
         tau2: Transmissivity of atmospheric layers
+        emis2: Layer emissivity ``1 - tau2``, carried alongside ``tau2`` (not
+            derived from it) so speedy_longwave's ``emis = 1 - tau2`` reads a
+            non-cancelling ``-expm1(-optical_depth)`` instead of subtracting
+            from an already-rounded transmissivity near 1 (#571).
         st4a: Blackbody emission from full and half atmospheric levels
         stratc: Stratospheric correction term
         flux: Radiative flux in different spectral bands
 
     """
 
-    ablco2: float 
-    alb_l: jnp.ndarray  
-    alb_s: jnp.ndarray  
-    albsfc: jnp.ndarray 
-    snowc: jnp.ndarray  
+    ablco2: float
+    alb_l: jnp.ndarray
+    alb_s: jnp.ndarray
+    albsfc: jnp.ndarray
+    snowc: jnp.ndarray
     # Transmissivity and blackbody radiation (updated in radsw/radlw)
-    tau2: jnp.ndarray  
-    st4a: jnp.ndarray  
-    stratc: jnp.ndarray     
-    flux: jnp.ndarray         
+    tau2: jnp.ndarray
+    emis2: jnp.ndarray
+    st4a: jnp.ndarray
+    stratc: jnp.ndarray
+    flux: jnp.ndarray
 
     @classmethod
-    def zeros(cls, nodal_shape, num_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def zeros(cls, nodal_shape, num_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,emis2=None,st4a=None,stratc=None,flux=None):
         return cls(
             ablco2 = ablco2 if ablco2 is not None else ablco2_ref,
             alb_l = alb_l if alb_l is not None else jnp.zeros(nodal_shape),
@@ -203,13 +208,26 @@ class ModRadConData:
             albsfc = albsfc if albsfc is not None else jnp.zeros(nodal_shape),
             snowc = snowc if snowc is not None else jnp.zeros(nodal_shape),
             tau2 = tau2 if tau2 is not None else jnp.zeros(((num_levels,)+nodal_shape+(4,))),
+            # emis2 defaults to 1 - tau2 (the complement relation it exists
+            # to carry), from whichever tau2 this call actually used -- the
+            # explicit argument when given, else the "zeros" reference
+            # tau2 = 0, whose complement is 1, not 0 (the opposite asymmetry
+            # from ones() below, since emis2 is tau2's complement rather
+            # than its twin). A caller supplying tau2 without emis2 would
+            # otherwise get the unconditional class default regardless of
+            # the tau2 it passed (Codex review, PR #1124 thread on this
+            # file): no current caller does, but the factory contract
+            # should not depend on that staying true.
+            emis2 = (emis2 if emis2 is not None else
+                    1.0 - tau2 if tau2 is not None else
+                    jnp.ones(((num_levels,)+nodal_shape+(4,)))),
             st4a = st4a if st4a is not None else jnp.zeros(((num_levels,)+nodal_shape+(2,))),
             stratc = stratc if stratc is not None else jnp.zeros((nodal_shape+(2,))),
             flux = flux if flux is not None else jnp.zeros((nodal_shape+(4,)))
         )
-    
+
     @classmethod
-    def ones(cls, nodal_shape, num_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def ones(cls, nodal_shape, num_levels, ablco2=None, alb_l=None,alb_s=None,albsfc=None,snowc=None,tau2=None,emis2=None,st4a=None,stratc=None,flux=None):
         return cls(
             ablco2 = ablco2 if ablco2 is not None else ablco2_ref,
             alb_l = alb_l if alb_l is not None else jnp.ones(nodal_shape),
@@ -217,12 +235,20 @@ class ModRadConData:
             albsfc = albsfc if albsfc is not None else jnp.ones(nodal_shape),
             snowc = snowc if snowc is not None else jnp.ones(nodal_shape),
             tau2 = tau2 if tau2 is not None else jnp.ones(((num_levels,)+nodal_shape+(4,))),
+            # emis2 defaults to 1 - tau2, from whichever tau2 this call
+            # actually used -- see zeros() above. At the "ones" reference
+            # tau2 = 1 (zero optical depth) the complement is 0, not 1 --
+            # unlike every other field here, ones() is not 1 - zeros() for
+            # this one.
+            emis2 = (emis2 if emis2 is not None else
+                    1.0 - tau2 if tau2 is not None else
+                    jnp.zeros(((num_levels,)+nodal_shape+(4,)))),
             st4a = st4a if st4a is not None else jnp.ones(((num_levels,)+nodal_shape+(2,))),
             stratc = stratc if stratc is not None else jnp.ones((nodal_shape+(2,))),
             flux = flux if flux is not None else jnp.ones((nodal_shape+(4,)))
         )
 
-    def copy(self, alb_l=None,alb_s=None,ablco2=None,albsfc=None,snowc=None,tau2=None,st4a=None,stratc=None,flux=None):
+    def copy(self, alb_l=None,alb_s=None,ablco2=None,albsfc=None,snowc=None,tau2=None,emis2=None,st4a=None,stratc=None,flux=None):
         return ModRadConData(
             ablco2=ablco2 if ablco2 is not None else self.ablco2,
             alb_l=alb_l if alb_l is not None else self.alb_l,
@@ -230,6 +256,7 @@ class ModRadConData:
             albsfc=albsfc if albsfc is not None else self.albsfc,
             snowc=snowc if snowc is not None else self.snowc,
             tau2=tau2 if tau2 is not None else self.tau2,
+            emis2=emis2 if emis2 is not None else self.emis2,
             st4a=st4a if st4a is not None else self.st4a,
             stratc=stratc if stratc is not None else self.stratc,
             flux=flux if flux is not None else self.flux
@@ -379,6 +406,7 @@ class SurfaceFluxData:
     u0: Near-surface u-wind
     v0: Near-surface v-wind
     t0: Near-surface temperature
+    q0: Near-surface specific humidity [g/kg], at the same reference as t0
     """
 
     ustr: jnp.ndarray
@@ -394,6 +422,7 @@ class SurfaceFluxData:
     u0: jnp.ndarray
     v0: jnp.ndarray
     t0: jnp.ndarray
+    q0: jnp.ndarray
 
     @classmethod
     def zeros(cls, nodal_shape, **overrides):
@@ -429,28 +458,165 @@ class SurfaceFluxData:
         return tree_util.tree_map(jnp.isnan, self)
 
 @tree_math.struct
-class LandModelData:
-    """Parameters:
-    stl_lm: Land surface temperature calculated by the land model
+class ClearSkyRadiationData:
+    """SPEEDY's radiation with the clouds removed (a diagnostic call).
+
+    SPEEDY's Fortran computes no clear-sky fluxes. jcm repeats the shortwave
+    pass of each radiation step with zero total and stratiform cloud cover
+    (:func:`jcm.physics.radiation.speedy_shortwave.get_shortwave_rad_fluxes`),
+    which also yields the cloud-free longwave layer transmissivities, and the
+    upward longwave pass of every step with those transmissivities, so that
+    the cloud radiative effects are ``clear - all-sky`` at the same cadence
+    and from the same state as the all-sky fluxes. Nothing here feeds back on
+    the model.
+
+    Parameters
+    ----------
+    ftop_sw: Net downward shortwave flux at the top of the atmosphere [W/m2]
+    rsds: Downward shortwave flux at the surface [W/m2]
+    tau2: Cloud-free longwave layer transmissivities (as ``mod_radcon.tau2``)
+    emis2: Their complements ``-expm1(-optical depth)`` (as ``mod_radcon.emis2``)
+    olr: Outgoing longwave flux at the top of the atmosphere [W/m2]
+
     """
 
-    stl_lm: jnp.ndarray
-    
+    ftop_sw: jnp.ndarray
+    rsds: jnp.ndarray
+    tau2: jnp.ndarray
+    emis2: jnp.ndarray
+    olr: jnp.ndarray
+
     @classmethod
-    def zeros(cls, nodal_shape, stl_lm=None):
+    def zeros(cls, nodal_shape, num_levels):
         return cls(
-            stl_lm = stl_lm if stl_lm is not None else jnp.full((nodal_shape), 288.0)
-        )
-    
-    @classmethod
-    def ones(cls, nodal_shape, stl_lm=None):
-        return cls(
-            stl_lm = stl_lm if stl_lm is not None else jnp.ones(nodal_shape)
+            ftop_sw=jnp.zeros(nodal_shape),
+            rsds=jnp.zeros(nodal_shape),
+            tau2=jnp.zeros((num_levels,) + nodal_shape + (4,)),
+            emis2=jnp.ones((num_levels,) + nodal_shape + (4,)),
+            olr=jnp.zeros(nodal_shape),
         )
 
-    def copy(self, stl_lm=None):
+    @classmethod
+    def ones(cls, nodal_shape, num_levels):
+        return cls(
+            ftop_sw=jnp.ones(nodal_shape),
+            rsds=jnp.ones(nodal_shape),
+            tau2=jnp.ones((num_levels,) + nodal_shape + (4,)),
+            emis2=jnp.zeros((num_levels,) + nodal_shape + (4,)),
+            olr=jnp.ones(nodal_shape),
+        )
+
+    def copy(self, **overrides):
+        return dataclasses.replace(self, **overrides)
+
+    def isnan(self):
+        return tree_util.tree_map(jnp.isnan, self)
+
+@tree_math.struct
+class SpeedyRadiationFluxes:
+    """SPEEDY's radiative fluxes under the package-independent names.
+
+    Published each step as ``diagnostics["radiation"]`` by the last SPEEDY
+    radiation term, so the output carries ``radiation.toa_sw_up`` etc. -- the
+    names the ECHAM radiation schemes publish and that coupling code, the
+    calibration targets and the dev monitor read -- without either reading
+    SPEEDY's internal ``shortwave_rad``/``longwave_rad`` carry. Shortwave
+    fields are the held fluxes of the last radiation step, as applied.
+    Fluxes in W/m2, positive in the direction the name says.
+
+    The surface longwave fluxes are the fluxes in the air, as ECHAM's
+    radiation publishes them: ``surface_lw_down`` is the incident downward
+    flux, and ``surface_lw_up`` the surface's emission plus the part of the
+    incident flux it reflects, ``1 - emisfc``. SPEEDY's own
+    ``surface_flux.rlds`` is the absorbed part, ``emisfc`` times the
+    incident flux, and its ``rlus`` the emission alone. The difference
+    ``surface_lw_down - surface_lw_up`` is the surface's net longwave,
+    ``rlds - rlus``, exactly.
+    """
+
+    toa_sw_down: jnp.ndarray
+    toa_sw_up: jnp.ndarray
+    toa_lw_up: jnp.ndarray
+    toa_sw_up_clear: jnp.ndarray
+    toa_lw_up_clear: jnp.ndarray
+    surface_sw_down: jnp.ndarray
+    surface_sw_up: jnp.ndarray
+    surface_sw_down_clear: jnp.ndarray
+    surface_lw_down: jnp.ndarray
+    surface_lw_up: jnp.ndarray
+    # The cloud cover the shortwave pass sees: the total (free-troposphere)
+    # cover ``cloudc`` reflecting at the cloud top and the stratocumulus
+    # cover ``cloudstr`` at the lowest layer, two reflectors in series, i.e.
+    # randomly overlapped: cloudc + (1 - cloudc) * cloudstr.
+    total_cloud_cover: jnp.ndarray
+
+    @classmethod
+    def from_physics_data(cls, data: "PhysicsData", emisfc):
+        """Read the fluxes off SPEEDY's carry.
+
+        Parameters
+        ----------
+        data : PhysicsData
+            The carry after the upward longwave pass.
+        emisfc : float or jnp.ndarray
+            The surface longwave emissivity the radiation ran with
+            (``ModRadConParameters.emisfc``), which turns SPEEDY's absorbed
+            downward longwave back into the incident flux.
+
+        """
+        sw, cs, sf = data.shortwave_rad, data.clear_sky, data.surface_flux
+        # Reflecting (1 - emisfc) of the incident flux is what keeps
+        # down - up equal to the net longwave the surface energy balance
+        # used, rlds - rlus.
+        lw_down = sf.rlds / emisfc
+        return cls(
+            toa_sw_down=sw.fsol,
+            toa_sw_up=sw.fsol - sw.ftop,
+            toa_lw_up=data.longwave_rad.ftop,
+            toa_sw_up_clear=sw.fsol - cs.ftop_sw,
+            toa_lw_up_clear=cs.olr,
+            surface_sw_down=sw.rsds,
+            surface_sw_up=sw.rsds - sw.rsns,
+            surface_sw_down_clear=cs.rsds,
+            surface_lw_down=lw_down,
+            surface_lw_up=sf.rlus + (1.0 - emisfc) * lw_down,
+            total_cloud_cover=sw.cloudc + (1.0 - sw.cloudc) * sw.cloudstr,
+        )
+
+@tree_math.struct
+class LandModelData:
+    """Prognostic state of SPEEDY's slab land (``land_model.f90``).
+
+    Parameters
+    ----------
+    stl_anom: Land-surface (soil or land-ice slab) temperature anomaly [K]
+        with respect to the prescribed climatology ``forcing.stl_am`` of the
+        same instant -- the reference's ``tanom = stl_lm - stlcl_ob``. The
+        land temperature the surface fluxes see is ``stl_am + stl_anom``.
+        Zero is SPEEDY's own initial land (``couple_land_atm(0)`` starts the
+        land at the climatology), and it stays zero under the prescribed
+        land (``land_model="prescribed"``) and wherever the land fraction is
+        below ``LandModelParameters.flandmin``.
+
+    """
+
+    stl_anom: jnp.ndarray
+
+    @classmethod
+    def zeros(cls, nodal_shape, stl_anom=None):
+        return cls(
+            stl_anom=stl_anom if stl_anom is not None else jnp.zeros(nodal_shape)
+        )
+
+    @classmethod
+    def ones(cls, nodal_shape, stl_anom=None):
+        return cls(
+            stl_anom=stl_anom if stl_anom is not None else jnp.ones(nodal_shape)
+        )
+
+    def copy(self, stl_anom=None):
         return LandModelData(
-            stl_lm = stl_lm if stl_lm is not None else self.stl_lm
+            stl_anom=stl_anom if stl_anom is not None else self.stl_anom
         )
 
     def isnan(self):
@@ -476,9 +642,10 @@ class PhysicsData:
     dt_seconds: float
     land_model: LandModelData
     speedy_coords: SpeedyCoords
+    clear_sky: ClearSkyRadiationData
 
     @classmethod
-    def zeros(cls, nodal_shape, num_levels, shortwave_rad=None,longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, dt_seconds=None, land_model=None, speedy_coords=None):
+    def zeros(cls, nodal_shape, num_levels, shortwave_rad=None,longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, dt_seconds=None, land_model=None, speedy_coords=None, clear_sky=None):
         return cls(
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.zeros(nodal_shape, num_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.zeros(nodal_shape, num_levels),
@@ -490,10 +657,11 @@ class PhysicsData:
             dt_seconds = dt_seconds if dt_seconds is not None else 1800.0,
             land_model = land_model if land_model is not None else LandModelData.zeros(nodal_shape),
             speedy_coords = speedy_coords,
+            clear_sky = clear_sky if clear_sky is not None else ClearSkyRadiationData.zeros(nodal_shape, num_levels),
         )
 
     @classmethod
-    def ones(cls, nodal_shape, num_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, dt_seconds=None, land_model=None, speedy_coords=None):
+    def ones(cls, nodal_shape, num_levels, shortwave_rad=None, longwave_rad=None, convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, dt_seconds=None, land_model=None, speedy_coords=None, clear_sky=None):
         return cls(
             longwave_rad = longwave_rad if longwave_rad is not None else LWRadiationData.ones(nodal_shape, num_levels),
             shortwave_rad = shortwave_rad if shortwave_rad is not None else SWRadiationData.ones(nodal_shape, num_levels),
@@ -505,9 +673,10 @@ class PhysicsData:
             dt_seconds = dt_seconds if dt_seconds is not None else 1800.0,
             land_model = land_model if land_model is not None else LandModelData.ones(nodal_shape),
             speedy_coords = speedy_coords,
+            clear_sky = clear_sky if clear_sky is not None else ClearSkyRadiationData.ones(nodal_shape, num_levels),
         )
 
-    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, dt_seconds=None, land_model=None, speedy_coords=None):
+    def copy(self, shortwave_rad=None,longwave_rad=None,convection=None, mod_radcon=None, humidity=None, condensation=None, surface_flux=None, dt_seconds=None, land_model=None, speedy_coords=None, clear_sky=None):
         return PhysicsData(
             shortwave_rad=shortwave_rad if shortwave_rad is not None else self.shortwave_rad,
             longwave_rad=longwave_rad if longwave_rad is not None else self.longwave_rad,
@@ -518,7 +687,8 @@ class PhysicsData:
             surface_flux=surface_flux if surface_flux is not None else self.surface_flux,
             dt_seconds=dt_seconds if dt_seconds is not None else self.dt_seconds,
             land_model=land_model if land_model is not None else self.land_model,
-            speedy_coords=speedy_coords if speedy_coords is not None else self.speedy_coords
+            speedy_coords=speedy_coords if speedy_coords is not None else self.speedy_coords,
+            clear_sky=clear_sky if clear_sky is not None else self.clear_sky,
         )
 
     # Isnan function to check if any elements of PhysicsData are NaN. This function is used after getting the gradient of something with respect to
@@ -537,7 +707,8 @@ class PhysicsData:
             surface_flux=self.surface_flux.isnan(),
             dt_seconds=0,
             land_model=self.land_model.isnan(),
-            speedy_coords=0
+            speedy_coords=0,
+            clear_sky=self.clear_sky.isnan(),
         )
     
     def any_true(self):

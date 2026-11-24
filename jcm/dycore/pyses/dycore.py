@@ -178,6 +178,15 @@ class PysesCamSEDycore(DynamicalCore):
             package's declarations.
         physics_dtype: Working dtype of the physics-facing state
             (default float32 — the precision-split contract).
+        compute_frontogenesis: Opt-in frontogenesis diagnostic field (see
+            :meth:`physics_fields`); off by default.
+        compute_omega: Opt-in pressure vertical velocity (``omega = Dp/Dt``,
+            Pa/s) diagnostic field (see :meth:`_omega_from_gll`); off by
+            default. ``Model`` switches it on automatically for any
+            composed physics that declares ``requires_dycore_fields =
+            ("omega",)`` — ECHAM's ``cubasmc`` mid-level convection trigger
+            when ``cu_lmfmid`` is on (the default) — so callers normally
+            never set this directly.
 
     """
 
@@ -201,6 +210,7 @@ class PysesCamSEDycore(DynamicalCore):
         hypervis: str = "tensor",
         nu_div_factor: float = 2.5,
         compute_frontogenesis: bool = False,
+        compute_omega: bool = False,
     ):
         """Build the SE grid, vertical grid, configs and boundary data."""
         self._be = require_pyses()
@@ -250,12 +260,15 @@ class PysesCamSEDycore(DynamicalCore):
         # truth shared with the physics), not pyses's own defaults — the
         # same bridge DinosaurDycore makes via physics_specs_from_constants.
         # epsilon = Rd/Rv is the molecular-weight ratio pyses expects.
-        # Frontogenesis provider (CAM pbuf pattern; see DynamicalCore
-        # .physics_fields). Off by default — it costs per-level GLL
-        # gradients + a DSS each step, which only the frontal GW term
-        # consumes. kappa/radius are frozen here from the same live
-        # constants snapshot the dynamics uses.
+        # Frontogenesis / omega providers (CAM pbuf pattern; see
+        # DynamicalCore.physics_fields). Both off by default — each costs
+        # per-level GLL gradient/divergence operators + a DSS each step,
+        # and only the terms that declare the field (the frontal GW term;
+        # ECHAM's cubasmc mid-level convection trigger, #698) consume it.
+        # kappa/radius are frozen here from the same live constants
+        # snapshot the dynamics uses.
         self.compute_frontogenesis = bool(compute_frontogenesis)
+        self.compute_omega = bool(compute_omega)
         self._akap = float(constants.akap)
         self._rearth = float(constants.rearth)
 
@@ -375,48 +388,134 @@ class PysesCamSEDycore(DynamicalCore):
         return table[coupling]
 
     def physics_field_names(self) -> tuple[str, ...]:
-        """Declare the frontogenesis field when the provider is enabled."""
-        return ("frontogenesis",) if self.compute_frontogenesis else ()
+        """Declare the frontogenesis / omega fields when their providers are enabled."""
+        names = []
+        if self.compute_frontogenesis:
+            names.append("frontogenesis")
+        if self.compute_omega:
+            names.append("omega")
+        return tuple(names)
 
     def physics_fields(self, state, physics_state) -> dict:
-        """CAM-SE-faithful frontogenesis on the GLL grid, averaged to pg2.
+        """CAM-SE-faithful dycore diagnostics on the GLL grid, averaged to pg2.
 
-        Mirrors CAM's ``gravity_waves_sources.F90::compute_frontogenesis``:
-        per-level spherical gradients of (theta, u, v) with pySES's own
-        element-local ``horizontal_gradient``, the quadratic form
-        ``F = -grad(theta) . (grad(u_vec) grad(theta))``, a DSS to restore
-        C0 continuity (CAM applies its mass-matrix boundary exchange, which
-        doubles as the smoothing the ``frontgfc`` threshold was tuned
-        against), then the same GLL -> pg2 cell average the state takes.
-        Native float64 in, ``physics_dtype`` out (the physics seam
-        contract).
+        Frontogenesis (when ``compute_frontogenesis``): mirrors CAM's
+        ``gravity_waves_sources.F90::compute_frontogenesis`` — per-level
+        spherical gradients of (theta, u, v) with pySES's own element-local
+        ``horizontal_gradient``, the quadratic form ``F = -grad(theta) .
+        (grad(u_vec) grad(theta))``, a DSS to restore C0 continuity (CAM
+        applies its mass-matrix boundary exchange, which doubles as the
+        smoothing the ``frontgfc`` threshold was tuned against), then the
+        same GLL -> pg2 cell average the state takes.
+
+        Omega (when ``compute_omega``): see :meth:`_omega_from_gll` for the
+        formula; also DSS'd before the pg2 average, for the same reason as
+        frontogenesis — it is built from raw per-element SE
+        divergence/gradient operators, which are not C0 by construction
+        (only the *fully assembled* dynamics RHS gets DSS-projected inside
+        pySES's own time step, ``time_stepping.project_dynamics``; a
+        standalone diagnostic exposed straight to physics needs its own).
+
+        Both share the moist layer pressure thickness ``d_pressure`` (one
+        ``eval_sum_species`` per step covers either or both). Native
+        float64 in, ``physics_dtype`` out (the physics seam contract).
         """
-        if not self.compute_frontogenesis:
+        if not (self.compute_frontogenesis or self.compute_omega):
             return {}
         from pyses.dynamical_cores.cam_se.thermodynamics import (
             eval_sum_species,
         )
-        from pyses.dynamical_cores.mass_coordinate import (
-            d_mass_to_surface_mass,
-        )
 
         ms = state["model_state"]
         dyn = ms["dynamics"]
-        u = dyn["horizontal_wind"][..., 0]          # (E, npt, npt, nlev)
-        v = dyn["horizontal_wind"][..., 1]
-
-        # theta at GLL from the dynamics' own moist column mass (same
-        # construction as ``to_physics_state``, pre-gather).
         d_pressure = (eval_sum_species(ms["tracers"]["moisture_species"])
                       * dyn["d_mass"])
-        ps = d_mass_to_surface_mass(d_pressure, self.v_grid)  # (E, npt, npt)
-        a_full = 0.5 * (self._a_boundaries_pa[:-1] + self._a_boundaries_pa[1:])
-        b_full = 0.5 * (self._b_boundaries[:-1] + self._b_boundaries[1:])
-        p_mid = a_full + b_full * ps[..., None]
-        theta = dyn["T"] * (self.p0 / p_mid) ** self._akap
 
-        frontgf = self._frontogenesis_from_gll(u, v, theta)
-        return {"frontogenesis": frontgf.astype(self._physics_dtype)}
+        out: dict = {}
+        if self.compute_frontogenesis:
+            from pyses.dynamical_cores.mass_coordinate import (
+                d_mass_to_surface_mass,
+            )
+
+            u = dyn["horizontal_wind"][..., 0]      # (E, npt, npt, nlev)
+            v = dyn["horizontal_wind"][..., 1]
+
+            # theta at GLL from the dynamics' own moist column mass (same
+            # construction as ``to_physics_state``, pre-gather).
+            ps = d_mass_to_surface_mass(d_pressure, self.v_grid)  # (E, npt, npt)
+            a_full = 0.5 * (self._a_boundaries_pa[:-1] + self._a_boundaries_pa[1:])
+            b_full = 0.5 * (self._b_boundaries[:-1] + self._b_boundaries[1:])
+            p_mid = a_full + b_full * ps[..., None]
+            theta = dyn["T"] * (self.p0 / p_mid) ** self._akap
+
+            frontgf = self._frontogenesis_from_gll(u, v, theta)
+            out["frontogenesis"] = frontgf.astype(self._physics_dtype)
+        if self.compute_omega:
+            omega_gll = self._omega_from_gll(d_pressure, dyn["horizontal_wind"])
+            omega_gll = self.colmap.dss(omega_gll)
+            out["omega"] = self.colmap.gather_3d(omega_gll).astype(
+                self._physics_dtype)
+        return out
+
+    def _omega_from_gll(self, d_pressure, wind):
+        """Moist vertical pressure velocity ``omega = Dp/Dt`` [Pa/s] at GLL mid-levels.
+
+        pySES's own T-prognostic CAM-SE dynamics (``models.cam_se``)
+        evaluates exactly this quantity every adiabatic step, as an
+        intermediate of
+        ``cam_se.explicit_terms.eval_temperature_vertical_advection_term``
+        (which then divides it by ``rho * cp`` to form the adiabatic-heating
+        tendency). This is not a re-derivation — it is that same hydrostatic
+        continuity integral, replicated here (rather than imported) so it
+        can be returned *before* the heating conversion:
+
+            omega = -cumsum_k(div(dp_k . u_k)) + 0.5 . div(dp_k . u_k)
+                    + u . grad(p_k)
+
+        the discretised form of ``omega = omega_top - integral_0^p
+        div(v) dp'`` (``omega_top = 0``: no mass flux through the finite
+        ~1 Pa model top) plus the horizontal pressure-advection term that
+        completes the pressure-coordinate material derivative — see
+        ``cam_se.explicit_terms.init_common_variables``'s docstring for the
+        ``-cumsum + 0.5*div`` half-level-average derivation. ``d_pressure``
+        is the **moist** layer pressure thickness (``sum_species *
+        d_mass``), matching CAM-SE's ``omega`` (not the dry ``omega_d`` it
+        also diagnoses) — the ECHAM ``pverv`` analogue #698 asks for.
+
+        Same sign convention (positive = descent) and the same vertical
+        staggering (level centres / full levels) as
+        ``DinosaurDycore._compute_omega``.
+
+        Args:
+            d_pressure: Moist layer pressure thickness, GLL-shaped
+                ``(E, npt, npt, nlev)``.
+            wind: Horizontal wind, GLL-shaped ``(E, npt, npt, nlev, 2)``.
+
+        Returns:
+            GLL-shaped ``(E, npt, npt, nlev)``, native float64 (element-
+            discontinuous — callers DSS before gathering to pg2).
+
+        """
+        from pyses.dynamical_cores.cam_se.thermodynamics import (
+            eval_interface_pressure,
+            eval_midlevel_pressure,
+        )
+        from pyses.dynamical_cores.operators_3d import (
+            horizontal_divergence_3d,
+            horizontal_gradient_3d,
+        )
+        from pyses.dynamical_cores.utils_3d import physical_dot_product
+
+        p_top = self.v_grid["hybrid_a_i"][0] * self.v_grid["reference_surface_mass"]
+        p_mid = eval_midlevel_pressure(eval_interface_pressure(d_pressure, p_top))
+        grad_p = horizontal_gradient_3d(p_mid, self.h_grid, self.physics_config)
+        d_pressure_u = d_pressure[..., jnp.newaxis] * wind
+        div_d_pressure_u = horizontal_divergence_3d(
+            d_pressure_u, self.h_grid, self.physics_config)
+        u_dot_grad_p = physical_dot_product(wind, grad_p)
+        d_pressure_tend = (-jnp.cumsum(div_d_pressure_u, axis=3)
+                           + 0.5 * div_d_pressure_u)
+        return d_pressure_tend + u_dot_grad_p
 
     def _frontogenesis_from_gll(self, u, v, theta):
         """F = -grad(theta) . (grad(u_vec) grad(theta)) on GLL, to pg2.

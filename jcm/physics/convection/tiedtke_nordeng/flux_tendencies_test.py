@@ -156,7 +156,8 @@ class TestSubCloudEvaporationCover(unittest.TestCase):
         self.mfu = jnp.array([0.0, 0.05, 0.05, 0.0, 0.0])
         self.tu = jnp.array([0.0, 282.0, 286.0, 0.0, 0.0])
 
-    def _run(self, use_updraft_cover, mfu=None, tu=None):
+    def _run(self, use_updraft_cover, mfu=None, tu=None,
+             conservative_downdraft=False):
         return convective_precip_fluxes(
             self.temperature, self.humidity, self.pressure, self.dp_lev,
             self.kbase, self.pdmfup, self.pdmfdp, self.dt,
@@ -170,12 +171,18 @@ class TestSubCloudEvaporationCover(unittest.TestCase):
             # the weight choice (which only matters on stretched grids —
             # see TestUpdraftAreaCover.test_taper_on_the_real_l47_grid).
             updraft_layer_mass=self.dp_lev / 9.80665,
+            # This class exercises the sub-cloud evaporation (pdmfdp is
+            # zero in every scenario here), so the downdraft conservation
+            # switch is inert; pinned to ECHAM's own behaviour (``False``)
+            # so these cases stay independent of #912's default.
+            conservative_downdraft=conservative_downdraft,
         )
 
     def test_evaporation_depletes_surface_rain_and_stays_finite(self):
         total_gen = float(jnp.sum(self.pdmfup))
         for flag in (False, True):
-            rain_sfc, snow_sfc, _, _, pdmfup_adj, precip_flux, _, _ = self._run(flag)
+            rain_sfc, snow_sfc, _, _, pdmfup_adj, precip_flux, _, _, _ = (
+                self._run(flag))
             self.assertTrue(np.all(np.isfinite(np.asarray(rain_sfc))))
             self.assertTrue(np.all(np.isfinite(np.asarray(pdmfup_adj))))
             self.assertTrue(np.all(np.isfinite(np.asarray(precip_flux))))
@@ -267,6 +274,133 @@ class TestSubCloudEvaporationCover(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(np.asarray(leaf))))
         # No plume ⇒ no rain shaft ⇒ the assumed updraft speed is inert.
         self.assertEqual(float(g0[0]), 0.0)
+
+
+class TestConservativeDowndraftUptake(unittest.TestCase):
+    """#912: the downdraft must not create water via ``cuflx``'s floor.
+
+    ``cumastr`` scales the FIRST ascent's downdraft to the closed cloud-base
+    flux and re-runs ``cuasc`` rather than re-running the downdraft
+    (mo_cumastr.f90:944-986). When the final (re-run) ascent rains less than
+    that stale, scaled downdraft takes up, ECHAM's unconditional floor on
+    the surface rain/snow flux (mo_cufluxdts.f90:324-325) creates the
+    shortfall as water while ``cudtdq`` still charges the unfloored amount
+    to the heat/moisture ledger.
+    ``ConvectionParameters.conservative_downdraft_uptake`` (default
+    ``True``) is the deviation that bounds the uptake instead, through
+    ``calculate_tendencies``/``convective_precip_fluxes``.
+    """
+
+    def _run(self, downdraft_uptake, conservative):
+        from jcm.physics.convection.tiedtke_nordeng.downdraft import (
+            DowndraftState,
+        )
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters,
+        )
+        from jcm.physics.convection.tiedtke_nordeng.updraft import (
+            UpdatedraftState,
+        )
+
+        # Warm throughout (no snow/melting) so the water ledger is a pure
+        # rain-phase check. Plume (and downdraft) occupy levels 1-2;
+        # cloud base is level 2; levels 3-4 are sub-cloud.
+        temperature = jnp.array([278.0, 282.0, 286.0, 290.0, 294.0])
+        humidity = jnp.full((5,), 1.0e-3)
+        pressure = jnp.array([2.0e4, 4.0e4, 6.0e4, 8.0e4, 1.0e5])
+        pressure_half = jnp.array(
+            [1.0e4, 3.0e4, 5.0e4, 7.0e4, 9.0e4, 1.1e5])
+        rho = pressure / (c.rd * temperature)
+        zeros = jnp.zeros((5,))
+        # The FINAL ascent's rain generation: 1e-3 kg/m2/s at each of the
+        # two plume layers — the amount a demoted/re-run (thinner) plume
+        # might realistically produce after the Nordeng rescale.
+        pdmfup = jnp.array([0.0, 1.0e-3, 1.0e-3, 0.0, 0.0])
+        updraft = UpdatedraftState(
+            tu=jnp.array([0.0, 282.0, 286.0, 0.0, 0.0]),
+            qu=zeros, lu=zeros,
+            mfu=jnp.array([0.0, 0.05, 0.05, 0.0, 0.0]),
+            entr=zeros, detr=zeros, buoy=zeros,
+            pdmfup=pdmfup, plude=zeros, uu=zeros, vu=zeros,
+        )
+        # The (scaled, not re-run) downdraft's rain uptake at level 2, as if
+        # ``cuddraf``'s first-ascent-based ``pdmfdp`` were sized for a plume
+        # that rained more than this re-run one actually does.
+        downdraft = DowndraftState(
+            td=temperature, qd=zeros,
+            mfd=jnp.zeros((5,)).at[2].set(-0.01),
+            pdmfdp=jnp.zeros((5,)).at[2].set(downdraft_uptake),
+            ud=zeros, vd=zeros, lfs=0, active=True,
+        )
+        config = ConvectionParameters.default(
+            conservative_downdraft_uptake=conservative)
+        tend = calculate_tendencies(
+            temperature, humidity, zeros, zeros, pressure, rho, zeros,
+            updraft, downdraft, kbase=2, ktop=0, dt=1800.0, config=config,
+            ktype=jnp.array(1), pressure_half=pressure_half,
+        )
+        mass = jnp.diff(pressure_half) / c.grav
+        return tend, mass
+
+    def _water_leak(self, tend, mass):
+        """Column water tendency integral + surface precip.
+
+        Zero iff the column's water is exactly conserved; equals
+        ``precip_floor_source`` otherwise, by construction of ``cuflx``'s
+        floor (see ``convective_precip_fluxes``).
+        """
+        return (
+            float(jnp.sum(tend.dqdt * mass))
+            + float(jnp.sum(tend.dqc_dt * mass))
+            + float(jnp.sum(tend.dqi_dt * mass))
+            + float(tend.precip_conv)
+        )
+
+    def test_default_parameter_is_conservative(self):
+        self.assertTrue(
+            ConvectionParameters.default().conservative_downdraft_uptake)
+
+    def test_echam_faithful_floor_creates_water_when_disabled(self):
+        """The ECHAM-faithful (opt-out) path reproduces the #912 bug."""
+        excess = 2.0e-3
+        uptake = -(2.0e-3 + excess)   # exceeds the plume's 1e-3 + 1e-3 rain
+        tend, mass = self._run(uptake, conservative=False)
+        self.assertAlmostEqual(
+            float(tend.precip_floor_source), excess, places=9)
+        self.assertAlmostEqual(float(tend.precip_conv), 0.0, places=9)
+        # The floor creates exactly the water the ledger then leaks.
+        self.assertAlmostEqual(
+            self._water_leak(tend, mass), float(tend.precip_floor_source),
+            places=9)
+
+    def test_conservative_default_closes_the_water_ledger(self):
+        """The default bounds the uptake: no floor, exact conservation."""
+        excess = 2.0e-3
+        uptake = -(2.0e-3 + excess)
+        tend, mass = self._run(uptake, conservative=True)
+        self.assertAlmostEqual(
+            float(tend.precip_floor_source), 0.0, places=9)
+        self.assertAlmostEqual(self._water_leak(tend, mass), 0.0, places=9)
+
+    def test_conservative_treatment_is_a_noop_when_the_floor_never_binds(self):
+        """A downdraft the rain comfortably covers is untouched either way."""
+        modest_uptake = -1.0e-3   # well inside the plume's 2e-3 total
+        off, _ = self._run(modest_uptake, conservative=False)
+        on, _ = self._run(modest_uptake, conservative=True)
+        for field in ("precip_conv", "precip_floor_source", "dtedt", "dqdt"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(off, field)),
+                np.asarray(getattr(on, field)), rtol=1e-12, atol=1e-18)
+
+    def test_bounded_uptake_releases_less_latent_heat(self):
+        """Clipping the uptake is physical: less evaporative cooling."""
+        excess = 2.0e-3
+        uptake = -(2.0e-3 + excess)
+        off, _ = self._run(uptake, conservative=False)
+        on, _ = self._run(uptake, conservative=True)
+        # The downdraft layer cools less once it cannot evaporate rain that
+        # was never really there to evaporate.
+        self.assertGreater(float(on.dtedt[2]), float(off.dtedt[2]))
 
 
 class TestTaperWeightPlumbing(unittest.TestCase):

@@ -15,13 +15,35 @@ import pytest
 
 @pytest.mark.slow
 class JamIntegrationTest(unittest.TestCase):
+    # Two tests below (``test_runs_finite_with_ham_aerosol`` and
+    # ``test_carry_stored_cloud_borne_runs_and_cycles``) build and run the
+    # IDENTICAL default-kwargs model and only differ in what they assert
+    # about the result -- each a ~70 s JIT compile dominated by the full
+    # ECHAM+JAM term graph, not by grid size or step count. Caching
+    # ``_run()`` by its kwargs (class-level, so it survives across the
+    # per-test ``unittest.TestCase`` instances pytest creates) means the
+    # second test reuses the first's already-computed ``predictions``
+    # instead of repeating the same integration, with no change to what
+    # either test asserts.
+    _run_cache: dict = {}
+
     def _run(self, **physics_kwargs):
+        key = tuple(sorted(physics_kwargs.items()))
+        if key in type(self)._run_cache:
+            return type(self)._run_cache[key]
+
         from jcm.model import Model
         from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
-        sigma_boundaries = np.linspace(0, 1, 21)  # 20 layers
+        # T21 is the lowest spectral truncation get_coords accepts; 3 sigma
+        # levels (vs. the original 20) is unrelated to this file's
+        # assertions (finiteness, tracer bounds, ARG activation feeding the
+        # 2M scheme, carry-store cycling, cloud-borne mirror presence) and
+        # shrinks the compile every test here pays for building the full
+        # ECHAM+JAM term graph.
+        sigma_boundaries = np.linspace(0, 1, 4)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
         terrain = TerrainData.aquaplanet(coords)
         model = Model(
@@ -35,7 +57,9 @@ class JamIntegrationTest(unittest.TestCase):
         # ~3 h (6 steps): on a cold start with no seeded aerosol the
         # emission -> transport -> core -> activation chain needs that long to
         # produce anything, so 3 steps would assert on the spin-up rate.
-        return model, model.run(save_interval=0.125, total_time=0.125)
+        result = model, model.run(save_interval=0.125, total_time=0.125)
+        type(self)._run_cache[key] = result
+        return result
 
     def test_runs_finite_with_ham_aerosol(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name

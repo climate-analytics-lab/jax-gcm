@@ -14,6 +14,7 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/resolution_defaults
    design/writing_a_physics_scheme
    design/surface_exchange
+   design/tte_tke_closure
    design/land_skin_energy_balance
    design/forcing_time_semantics
    design/parallelization
@@ -28,9 +29,13 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/jam
    design/jam_carbon_aging
    design/jam_aerosol_removal
+   design/jam_m7_configuration
    design/jam_cloud_borne_ice_phase
    design/jam_soa_dust
+   design/jam_volcanic_so2
    design/speedy_variable_levels
+   design/speedy_retune
+   design/speedy_longwave_fit
    design/frontal_gravity_wave_drag
    design/lohmann_2m_column_processes
    design/convective_trigger_soundings
@@ -48,6 +53,8 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/test_suite_memory
    design/observers
    design/pyses_performance_review
+   design/rrtmgp_gpu_performance
+   design/rrtmgp_cpu_performance
 
 Core Architecture
 -----------------
@@ -88,7 +95,9 @@ and xarray output. The shipped
 :py:class:`jcm.dycore.dinosaur.dycore.DinosaurDycore` backend wraps Dinosaur's
 spectral primitive-equation state, its two-time-level semi-Lagrangian
 semi-implicit Crank–Nicolson RK2 step, and its spectral filters. Tracer
-transport on that backend is semi-Lagrangian only — see
+transport on that backend is semi-Lagrangian by default and for any
+tracer-carrying physics; ``advection="eulerian"`` remains available and SPEEDY
+declares it (:doc:`design/dinosaur_transport_selection`) — see
 :doc:`science/dynamical_core` for the integrator and transport contract. The
 optional :py:class:`jcm.dycore.pyses.PysesCamSEDycore` backend
 (``pip install jcm[pyses]``, registry name ``"pyses_cam_se"``) wraps the
@@ -131,23 +140,31 @@ therefore a single command:
 
    $ python -m jcm.main +configuration=ma-ne30-l47
 
-That packaged preset (see ``jcm/config/configuration/``) pins the backend, the
-matching forcing bundles and the one physics switch pySES needs. Composing the
-groups by hand works too, but the switch is not optional — the backend exposes
-no ``omega``, so ECHAM's mid-level convection trigger has to be turned off or
-``Model`` construction refuses to build (#698):
+That packaged preset (see ``jcm/config/configuration/``) pins the backend and
+the matching forcing bundles. pySES publishes ``omega`` (pressure vertical
+velocity) as an opt-in diagnostic field, so ECHAM's mid-level convection
+trigger (``cubasmc``) composes and runs on this backend like any other
+(jax-gcm#698) — composing the groups by hand needs no extra switch:
 
 .. code-block:: console
 
    $ python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year \
-       +physics.terms.tiedtke_convection.params.cu_lmfmid=false
+       physics.land_model=prescribed
 
-The spelling of that override follows the physics group's own shape: the
-term-list presets take ``+physics.terms.tiedtke_convection.params.cu_lmfmid=false``
-as above, while the factory-built ones (``physics=echam-jam*``, which set
-``builder: echam_physics``) take the scalar ``+physics.cu_lmfmid=false`` (or,
+(``physics.land_model=prescribed`` because the SLIM land's surface dataset is
+published for the Gaussian grids only, T63, T106, T127 and T255; the
+``ma-ne30-*`` configurations set it themselves.)
+
+A composition can still turn ``cubasmc`` off with ECHAM's own namelist
+switch, whose spelling follows the physics group's own shape: the term-list
+presets take ``+physics.terms.tiedtke_convection.params.cu_lmfmid=false``,
+while the factory-built ones (``physics=echam-jam*``, which set ``builder:
+echam_physics``) take the scalar ``+physics.cu_lmfmid=false`` (or,
 equivalently, ``+physics.convection.cu_lmfmid=false``; setting both is an
-error) and reject a ``terms`` node outright.
+error) and reject a ``terms`` node outright. The packaged
+``ma-ne30-l{47,95}`` presets set it this way deliberately, pending the ne30
+production campaign's own stability validation of the trigger at that
+resolution (jax-gcm#1174).
 
 The ``dycore`` group owns what is backend-specific: on ``pyses_*`` the
 resolution comes from ``nx``/``npt``/``nlev`` in that group and the ``grid``

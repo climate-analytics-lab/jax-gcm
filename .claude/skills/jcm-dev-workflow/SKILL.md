@@ -9,10 +9,45 @@ The loop, in order. Each step exists because skipping it costs a CI cycle, a
 review round, or a wrong result.
 
 ```
-branch → atomic commits → test + lint locally → adversarial self-review → push
+size the effect (climate-impact fixes only) → branch → atomic commits
+   → test + lint locally → adversarial self-review → push
    → PR (linked to issue) → monitor CI *and* Codex → fix/respond
    → re-review if substantial → ping human
 ```
+
+## 0. Size the effect first — climate-impact fixes only
+
+If the defect's only consequence is a shift in simulated means (not a crash,
+NaN, conservation, gradient or API bug, and not something a Fortran-reference
+unit test pins) and the fix will be more than ~200 lines or touch shared
+numerics, **measure it before writing the PR** (rule in `CLAUDE.md`, "Size the
+effect before building a climate-impact fix"):
+
+```bash
+# control, fix and a 1-ppm noise twin of the control, each on one GPU (~40 min T63L47 JAM)
+python -m jcm.main +configuration=<host preset> init=from_state init.file=<jan warm state> \
+  run.start_time=2000-12-31 run.total_time=30days run.chunk_days=5 run.save_interval=5 \
+  run.output_averages=true run.monthly_means=false run.save_chunks=true \
+  run.output_prefix=<dir>/mon  [+constants.grav=9.81000981]     # the noise twin only
+```
+
+The noise twin perturbs a **physical constant** (`+constants.grav`, 1 ppm above
+the 9.81 default) because `constants` is applied before the model is built and
+is read by every host, so it seeds divergence identically in JAM, 2M, 1M and
+SPEEDY configurations; a `++physics.<term>.<lever>` key is silently unused by a
+term-list preset and would give a bit-identical twin. 1 ppm of gravity is far
+below any threshold here, so the twin measures only the chaotic drift.
+
+`run.monthly_means=false run.save_chunks=true` are required, not optional: the
+T63 presets inherit `run=longrun`, whose monthly streaming rejects a 5-day save
+interval that starts on 31 December and would not write the day 5–10 chunks.
+
+Compare global area-weighted means of burdens, AOD, LWP/IWP, precipitation and
+TOA fluxes for the days 5–10 chunks (before the trajectories diverge) and the
+30-day mean. Proceed only if something moves ≥ 1 % (TOA ≥ 0.5 W m⁻²) **and**
+≥ 3× the noise twin's drift; otherwise close the issue as an accepted
+limitation with the numbers on the design page. The devbox warm states and the
+A/B launcher are in the `devbox-jcm-runs` skill.
 
 ## 1. Work locally, committing atomically
 
@@ -56,6 +91,37 @@ round-tripping through the device.
   state leaking.
 - Mark tests over ~1 min `@pytest.mark.slow`.
 
+**Slow-test budget.** The slow suite only grows; nothing retires a test once
+added, so an oversized one is permanent cost on every PR forever (#1143: the
+`rest` shard passed 90 minutes). Before adding a test to the slow suite —
+and when touching an existing one — check `pytest --durations=25 <file>`
+(one test per process, so compile is counted the way CI counts it) and size
+it down before it lands, not after:
+
+- Use the smallest grid/level count that still exercises the invariant
+  (T21 or T21L8 for a generic physics path; a bare column where the
+  physics doesn't need a grid at all) and the fewest steps/days — most
+  physics invariants show up in the first step or two, not after a
+  multi-day integration. Compile, not simulated time, dominates wall clock
+  for most of these tests, so cutting steps alone rarely helps; cutting
+  the number of *distinct* jitted configurations does.
+- Build one compiled model per class (a module/class-level fixture, or a
+  shared object reused across assertions) instead of one per test method.
+  `jax.jit` on a bound method with `self` as a static arg (the common
+  pattern in `jcm/model.py`) gives a free dispatch-cache hit on a second
+  call with the same object and the same static args (`save_interval`,
+  `total_time`, ...) — reusing the object, not just the config, is what
+  cashes that in.
+- Never run the same integration twice to assert on it twice. If two test
+  methods both need "a model that ran N steps", run it once (in a shared
+  fixture or by merging the methods) and check both invariants against
+  the one result.
+- A single slow test should stay **well under a minute** locally. If it
+  cannot without weakening an assertion or testing a different invariant
+  than its name claims, that is a legitimate stopping point — document
+  *why* in the test's docstring (what it actually needs the size for) so
+  the next pass doesn't re-measure the same conclusion from scratch.
+
 **CI thresholds**: ruff gates the run, then the fast tests at **90%**
 coverage and the slow tests at **80%** (pull requests only) run in parallel
 behind it — the slow suite as two path shards (`slow-tests-radiation`,
@@ -74,6 +140,14 @@ supersedes the run. Open `fast-tests` before concluding anything. `push` trigger
 `main`/`dev` alone, so a feature branch gets no CI until its PR exists: run
 the full suite locally before opening one, or the PR is the first thing that
 has ever tested it.
+
+A test that reaches an external host at test time gets
+`@pytest.mark.requires_network` (registered in `pyproject.toml`) instead of
+letting a remote outage fail the run: `jcm/data/mirror/conftest.py` probes
+the host once per session and skips every marked test with a reason naming
+it when unreachable (#1152's stopgap for the six `svn-ccsm-inputdata`
+CAM6-SOA tests; the real fix there — a packaged fixture that never touches
+the network — is still open).
 
 **Lint before every push, always.** `ruff check .` takes seconds; a lint
 failure in CI burns a full cycle on something reported instantly locally.
@@ -232,6 +306,11 @@ Ping the user for review once **all** of:
 - `ruff check .` is clean and the full suite passes locally
 - docs updated in the same PR if user-facing behaviour changed (`CLAUDE.md`:
   documentation lives with the change)
+- every issue in the PR's `Closes` list has its science-register citations
+  cleared (`python docs/tracked_gaps.py cites NNN` lists the citing pages via
+  the register parser; rewrite each entry in the present tense, drop the
+  token) — the close-hook files a follow-up issue otherwise (`CLAUDE.md`:
+  closing an issue clears its register citations)
 
 Then summarise: what landed, what was measured, what you decided and why, and
 anything you are still unsure about. Flag open questions explicitly rather

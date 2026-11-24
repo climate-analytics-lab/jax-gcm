@@ -1,3 +1,4 @@
+import calendar
 import xarray as xr
 import numpy as np
 import pandas as pd
@@ -7,7 +8,16 @@ from pathlib import Path
 from jcm.utils import VALID_TRUNCATIONS
 from dinosaur.coordinate_systems import HorizontalGridTypes
 
-def interpolate_to_daily(ds_monthly: xr.Dataset) -> xr.Dataset:
+#: ``interpolate_to_daily``'s declared monthly-climatology reconstruction
+#: (#902) — see its docstring. Shared with ``forcing.anchors_code``'s
+#: vocabulary (``jcm.forcing.MONTH_START``/``MID_MONTH``) but kept as a
+#: plain string set here so this module stays import-free of ``jcm.forcing``
+#: (it is itself imported BY ``forcing.py``).
+_ANCHOR_CHOICES = ("mid_month", "month_start")
+
+
+def interpolate_to_daily(ds_monthly: xr.Dataset,
+                         anchors: str = "mid_month") -> xr.Dataset:
     """Interpolate monthly forcing data to daily resolution using linear interpolation.
 
     Pads the monthly data with December/January from adjacent years to enable smooth
@@ -16,14 +26,35 @@ def interpolate_to_daily(ds_monthly: xr.Dataset) -> xr.Dataset:
     Args:
         ds_monthly: Dataset with monthly time resolution (12 time steps).
                    Must have a 'time' dimension with monthly frequency.
+        anchors: What instant each monthly record represents (#902):
+            ``"mid_month"`` (default) — ECHAM's reconstruction
+            (``mo_time_control.f90::time_weights``; see
+            ``jcm.forcing._echam_time_weights``): record ``m`` is the
+            INSTANT at the middle of month ``m``, so the padded knots sit at
+            each month's true mid-point (its 1st plus half its own actual
+            length — leap February included), not at a fixed day. Because
+            those knots are not whole days, they are reconstructed with
+            exact elapsed-time interpolation (``xr.Dataset.interp``, which
+            converts the datetime axis to numeric nanoseconds and does true
+            linear interpolation), not the day-binning
+            ``resample().interpolate()`` below. ``"month_start"`` — the
+            pre-#902 behaviour: record ``m`` is held from the 1st of month
+            ``m``, so the knots ARE whole days and a plain resample to daily
+            frequency already reconstructs the right piecewise-linear curve.
 
     Returns:
-        Dataset interpolated to daily resolution (365 time steps).
+        Dataset interpolated to daily resolution (365 or 366 time steps,
+        depending on whether the source year — the first monthly
+        timestamp's calendar year — is itself a leap year).
 
     Raises:
-        ValueError: If the dataset doesn't have exactly 12 monthly timestamps.
+        ValueError: If the dataset doesn't have exactly 12 monthly timestamps,
+            or if ``anchors`` is not a recognised choice.
 
     """
+    if anchors not in _ANCHOR_CHOICES:
+        raise ValueError(
+            f"anchors={anchors!r}; expected one of {_ANCHOR_CHOICES}.")
     # validate that time coordinate is monthly
     time = pd.DatetimeIndex(ds_monthly["time"].values)
     if len(time) != 12:
@@ -42,15 +73,42 @@ def interpolate_to_daily(ds_monthly: xr.Dataset) -> xr.Dataset:
     # Keep the source year. The labels are part of the forcing semantics and
     # must not be silently rewritten to the historical implementation's 1981.
     source_year = int(time[0].year)
-    extended_time = pd.date_range(
-        start=f'{source_year - 1}-{13-pad_n:02}-01',
-        end=f'{source_year + 1}-{pad_n:02}-01', freq='MS')
-    extended_monthly_time_vars['time'] = extended_time
 
-    daily_time_vars = extended_monthly_time_vars.resample(time='1D').interpolate('linear')
-    daily_time_vars = daily_time_vars.sel(
-        time=slice(f'{source_year}-01-01', f'{source_year}-12-31'))
-    return xr.merge([daily_time_vars, ds_monthly[non_time_vars]])
+    if anchors == "month_start":
+        extended_time = pd.date_range(
+            start=f'{source_year - 1}-{13-pad_n:02}-01',
+            end=f'{source_year + 1}-{pad_n:02}-01', freq='MS')
+        extended_monthly_time_vars['time'] = extended_time
+        daily_time_vars = extended_monthly_time_vars.resample(time='1D').interpolate('linear')
+        daily_time_vars = daily_time_vars.sel(
+            time=slice(f'{source_year}-01-01', f'{source_year}-12-31'))
+    else:
+        # Each padded month's label is its own mid-point (1st + half its
+        # actual length), a fractional-day instant for an odd-length month
+        # (e.g. 31 days -> 15.5 days past the 1st). `resample().interpolate()`
+        # would first bin each knot into whichever WHOLE day it falls in,
+        # losing that half-day offset; `.interp()` instead converts the
+        # irregular datetime axis to numeric time and interpolates against
+        # the true elapsed time, reproducing ECHAM's continuous formula
+        # exactly at daily resolution.
+        months = ([(source_year - 1, 12)]
+                  + [(source_year, m) for m in range(1, 13)]
+                  + [(source_year + 1, 1)])
+        extended_time = pd.DatetimeIndex([
+            pd.Timestamp(year=y, month=m, day=1)
+            + pd.Timedelta(seconds=calendar.monthrange(y, m)[1] * 86400 / 2)
+            for y, m in months
+        ])
+        extended_monthly_time_vars['time'] = extended_time
+        daily_index = pd.date_range(
+            f'{source_year}-01-01', f'{source_year}-12-31', freq='D')
+        # `Dataset.interp` has no `keep_attrs` kwarg of its own (unlike
+        # `resample().interpolate()` above) — the global option is the
+        # supported way to ask it to preserve variable attrs.
+        with xr.set_options(keep_attrs=True):
+            daily_time_vars = extended_monthly_time_vars.interp(
+                time=daily_index, method='linear')
+    return xr.merge([daily_time_vars, ds_monthly[non_time_vars]], compat="override")
 
 def _upsample_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:
     f"""Upsample a dataset to a target spectral resolution using linear interpolation.
@@ -102,7 +160,7 @@ def _upsample_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:
         method="linear"
     )
 
-    return xr.merge([ds_interp, passthrough])
+    return xr.merge([ds_interp, passthrough], compat="override")
 
 def upsample_forcings_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:
     f"""Upsample forcing data to target resolution with physical constraints.

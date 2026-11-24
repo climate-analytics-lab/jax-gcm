@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
                        "dust_preferential_file", "dust_soil_types_file",
                        "dust_regions_file", "dust_roughness_file",
-                       "oxidants_file")
+                       "dust_msg_file", "oxidants_file", "volcanic_file")
 
 #: The Tegen dust inputs that must arrive together: ``mo_ham_dust.f90`` aborts
 #: without any of them, and running with the soil textures, preferential sources
@@ -52,8 +52,20 @@ _DUST_REQUIRED_KEYS = ("dust_preferential_file", "dust_soil_types_file",
 
 #: Every key that only supports ``dust_file``. They follow it: resolving them
 #: when dust is off would fetch maps the run never opens, and counting them as
-#: sources would hide the zero-emission warning.
-DUST_COMPANION_KEYS = (*_DUST_REQUIRED_KEYS, "dust_roughness_file")
+#: sources would hide the zero-emission warning. ``dust_msg_file`` (ndust=5's
+#: MSG-SEVIRI map, jax-gcm#1017) is here for the same "follows dust_file"
+#: reason, but — unlike the roughness map — its own forcing-group default is
+#: ``null``, not ``auto`` (see ``jcm/config/forcing/default.yaml``): only
+#: ndust = 5 reads it.
+DUST_COMPANION_KEYS = (*_DUST_REQUIRED_KEYS, "dust_roughness_file",
+                       "dust_msg_file")
+
+
+#: Forcing key of the MACv2 natural-aerosol background bundle, and the class
+#: name of the one term that reads it. ``auto`` resolves the key only when the
+#: composed physics includes that term (see :func:`_composes_natural_aerosol`).
+NATURAL_AEROSOL_KEY = "natural_aerosol_file"
+_NATURAL_AEROSOL_TERM = "Macv2NaturalAerosol"
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +259,25 @@ def _persist(forcing_cfg, key: str):
     return ir.check_persist(value, f"forcing.{knob}")
 
 
+def _monthly_anchors(forcing_cfg):
+    """Return the declared ``forcing.monthly_anchors`` mode (#902).
+
+    ``"mid_month"`` (default — ECHAM's mid-month reconstruction) or
+    ``"month_start"`` (the pre-#902 held-from-the-1st behaviour); shared by
+    every WRAP_YEAR surface/ozone/oxidant attach below so one knob controls
+    all of them. Emissions and the Tegen dust-source/roughness climatology
+    are NOT affected: they pin ``"month_start"`` at their own reader, never
+    reading this knob (interval totals and a Fortran-matched stepped
+    climatology respectively — see ``read_anthropogenic_emissions`` /
+    ``read_dust_source``).
+    """
+    value = (forcing_cfg.get("monthly_anchors", "mid_month")
+             if forcing_cfg is not None else "mid_month")
+    from jcm.forcing import anchors_code
+    anchors_code(value, config_key="forcing.monthly_anchors")
+    return value
+
+
 def _open_forcing_dataset(path):
     """Open one product's file(s) as a single xarray dataset.
 
@@ -352,7 +383,13 @@ def _emission_auto_resolves_to_none(key, coords, jam, is_pyses) -> bool:
     pySES / non-JAM cases return before ``_grid_token`` so pySES native coords
     are never asked for a spectral token.
     """
-    if is_pyses or not jam:
+    if not jam:
+        return True
+    if _auto_product_is_grid_free(key):
+        # A grid-free product (the volcanic point sources, #1190) is mapped
+        # onto the columns when it loads, so it serves every grid, pySES too.
+        return False
+    if is_pyses:
         return True
     # Publication gating is the manifest lookup ``mm.is_published`` over the
     # whole product table — the read-side single source of truth (#751).
@@ -360,6 +397,13 @@ def _emission_auto_resolves_to_none(key, coords, jam, is_pyses) -> bool:
     return not mm.is_published(
         manifest, mm.product_for_key(manifest, key),
         _grid_token(coords), int(coords.nodal_shape[0]), _vertical_kind(coords))
+
+
+def _auto_product_is_grid_free(key) -> bool:
+    """Whether ``forcing.<key>=auto`` picks a grid-free (single-file) product."""
+    manifest = mm.load_manifest()
+    name = mm.product_for_key(manifest, key)
+    return name is not None and mm.product(manifest, name)["grids"] is None
 
 
 def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
@@ -387,14 +431,89 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
             # baseline instead of aborting on a 404. ``warn_on_config_traps``
             # surfaces the silent degrade (same None-decision), not a log here.
             return None
+        # pySES only gets here for a grid-free product, which needs no
+        # spectral grid identity (and its native coords have none).
+        spectral = not is_pyses
         r = ir.resolve_input(
-            key, "auto", grid_token=_grid_token(coords),
-            nlev=int(coords.nodal_shape[0]), vertical=_vertical_kind(coords),
+            key, "auto", grid_token=_grid_token(coords) if spectral else None,
+            nlev=int(coords.nodal_shape[0]) if spectral else None,
+            vertical=_vertical_kind(coords) if spectral else "hybrid",
             fetch=lambda rel: _resolve_data_path("hf://" + rel))
         return r.paths[0] if not r.is_none else None
     if value in (None, "", "null", "none"):
         return None
     return value
+
+
+def _composes_natural_aerosol(cfg) -> bool:
+    """Whether ``cfg.physics`` composes the natural-aerosol background term.
+
+    Read off the config, since the forcing is resolved before the physics is
+    built: a term-list preset names the term's class in a ``_target_``; a
+    factory preset (``builder: echam_physics``) composes it with the simple
+    plumes on RRTMGP unless ``natural_aerosol`` says otherwise — the defaults
+    of :func:`jcm.physics.echam.echam_terms.echam_physics`. Any other physics
+    block (the Python door's) states it with ``natural_aerosol``.
+    """
+    physics = (cfg.get("physics", None) or {}) if cfg is not None else {}
+    for entry in (physics.get("terms", None) or {}).values():
+        target = entry.get("_target_", "") if hasattr(entry, "get") else ""
+        if str(target).rsplit(".", 1)[-1] == _NATURAL_AEROSOL_TERM:
+            return True
+    explicit = physics.get("natural_aerosol", None)
+    if physics.get("builder", None) == "echam_physics":
+        if explicit is not None:
+            return bool(explicit)
+        return (str(physics.get("aerosol_module", "macv2sp")) == "macv2sp"
+                and str(physics.get("radiation_scheme", "rrtmgp")) == "rrtmgp")
+    return bool(explicit)
+
+
+def _resolve_natural_aerosol_input(forcing_cfg, cfg, coords, is_pyses):
+    """Resolve ``forcing.natural_aerosol_file`` (``auto`` / null / a path).
+
+    ``auto`` is the per-grid ``macv2_natural_aerosol`` bundle, fetched now,
+    when all of these hold; otherwise ``None`` (no natural background):
+
+    * the physics composes :class:`~jcm.physics.aerosol.macv2_natural.
+      Macv2NaturalAerosol` — nothing else reads the field;
+    * the surface is a real one (``kind: from_file``). The climatology is
+      geographic (deserts, oceans), so an idealised ``kind: default`` run
+      takes it only from an explicit path;
+    * the spectral path, on a grid the mirror publishes the bundle for. On
+      any other grid a composed term runs without a background, and that is
+      logged, because the run would otherwise look complete.
+    """
+    value = forcing_cfg.get(NATURAL_AEROSOL_KEY, None)
+    if value in (None, "", "null", "none"):
+        return None
+    if value != "auto":
+        if is_pyses:
+            raise ValueError(
+                f"forcing.{NATURAL_AEROSOL_KEY}={value!r}: the natural "
+                "aerosol bundle is on a Gaussian grid and the pySES column "
+                "forcing does not load it. Set the key to null (or leave it "
+                "auto) on this backend.")
+        return value
+    if (is_pyses or forcing_cfg.get("kind", None) != "from_file"
+            or not _composes_natural_aerosol(cfg)):
+        return None
+    manifest = mm.load_manifest()
+    name = mm.product_for_key(manifest, NATURAL_AEROSOL_KEY)
+    token = _grid_token(coords)
+    if name is None or not mm.is_published(manifest, name, token):
+        logger.warning(
+            "forcing.%s=auto: the mirror publishes no natural-aerosol "
+            "background for grid %s, so %s runs without one. Build the "
+            "bundle (jcm.data.mirror.macv2.build_macv2_natural) and pass its "
+            "path, or set the key to null to silence this.",
+            NATURAL_AEROSOL_KEY, token, _NATURAL_AEROSOL_TERM)
+        return None
+    r = ir.resolve_input(
+        NATURAL_AEROSOL_KEY, "auto", grid_token=token,
+        nlev=int(coords.nodal_shape[0]), vertical=_vertical_kind(coords),
+        fetch=lambda rel: _resolve_data_path("hf://" + rel))
+    return r.paths[0] if not r.is_none else None
 
 
 def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
@@ -428,6 +547,10 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
             continue
         updates[key] = (None if key in companions and dust is None
                         else resolve(forcing_cfg.get(key, None), key))
+    # The natural-aerosol background has its own gate (the term that reads
+    # it, not the JAM module), so it is resolved beside the emission keys.
+    updates[NATURAL_AEROSOL_KEY] = _resolve_natural_aerosol_input(
+        forcing_cfg, cfg, coords, is_pyses)
     # ``auto`` became a FETCHED local path, which need not name its product
     # any more; declare the alignment from the product ``auto`` picked, so the
     # path substitution cannot change it (#884). Only a still-``auto`` align
@@ -439,7 +562,36 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
             mode = _auto_product_mode(key)
             if mode is not None:
                 updates[align_key] = mode
+    if "slim_file" in forcing_cfg:
+        updates["slim_file"] = _resolve_slim_input(
+            forcing_cfg.get("slim_file", None), cfg, coords, is_pyses)
     return OmegaConf.merge(forcing_cfg, updates)
+
+
+def _resolve_slim_input(value, cfg, coords, is_pyses):
+    """Resolve ``forcing.slim_file`` (SLIM's surface dataset on the model grid).
+
+    Read only when the physics runs the SLIM land (``physics.land_model:
+    slim``); otherwise ``auto`` supplies nothing. ``auto`` is the mirror's
+    per-grid bundle (``bundles/<grid>/slim.nc``), fetched now; a grid the mirror
+    does not publish it for (or the pySES path) resolves to ``None``, and the
+    SLIM land then refuses to run without a ``forcing.slim_file`` naming one.
+    An explicit path passes through.
+    """
+    land_model = str((cfg.get("physics", {}) or {}).get("land_model", "prescribed"))
+    if value in (None, "", "null", "none"):
+        return None
+    if value != "auto":
+        return value
+    if land_model != "slim" or is_pyses:
+        return None
+    manifest = mm.load_manifest()
+    if not mm.is_published(manifest, mm.product_for_key(manifest, "slim_file"),
+                           _grid_token(coords)):
+        return None
+    r = ir.resolve_input("slim_file", "auto", grid_token=_grid_token(coords),
+                         fetch=lambda rel: _resolve_data_path("hf://" + rel))
+    return r.paths[0] if not r.is_none else None
 
 
 #: The ``auto``-resolvable time-resolved inputs and their alignment keys (dms /
@@ -517,16 +669,21 @@ def assemble_spectral_forcing(forcing_cfg, coords):
                               config_key="forcing.align")
         forcing = ForcingData.from_file(
             _resolve_data_path(files), coords=coords, align_mode=align,
-            persist=persist)
+            persist=persist, monthly_anchors=_monthly_anchors(forcing_cfg))
     else:
         raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
     forcing = _attach_ozone(forcing, forcing_cfg, coords)
     forcing = _attach_emissions(forcing, forcing_cfg, coords)
     forcing = _attach_dms(forcing, forcing_cfg, coords)
     forcing = _attach_dust(forcing, forcing_cfg, coords)
+    forcing = _attach_volcanic(forcing, forcing_cfg, coords)
+    forcing = _attach_natural_aerosol(forcing, forcing_cfg, coords)
     forcing = _attach_oxidants(forcing, forcing_cfg, coords)
     forcing = _attach_macv2_weights(forcing, forcing_cfg, coords)
     forcing = _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords)
+    forcing = _attach_land_skin_temperature(forcing, forcing_cfg, coords)
+    forcing = _attach_ocean_current(forcing, forcing_cfg, coords)
+    forcing = _attach_slim_properties(forcing, forcing_cfg, coords)
     return forcing
 
 
@@ -614,7 +771,7 @@ def _attach_ozone(forcing, forcing_cfg, coords):
         ozone_file,
         nlon=int(nlon), nlat=int(nlat), nlev=int(nlev),
         lat_deg=lat_deg, lon_deg=lon_deg, align_mode=align,
-        persist=ozone_persist,
+        persist=ozone_persist, anchors=_monthly_anchors(forcing_cfg),
     )
     provenance.record_fact("ozone_source", f"prescribed:{ozone_file}")
     provenance.record_input(ozone_file)
@@ -798,23 +955,27 @@ def _reject_year_pattern(value, key):
     """Fail loudly on a ``{year}`` pattern for a climatology-only forcing key.
 
     ``dms_file`` and the ``dust_*`` keys are single-file WRAP_YEAR climatologies
-    or static maps: the
-    data mirror publishes NO transient (yearly) DMS or dust product, and their
+    or static maps, and ``volcanic_file`` is one file holding every year: the
+    data mirror publishes NO yearly DMS, dust or volcanic product, and their
     readers (:func:`jcm.forcing.read_dms_seawater` /
-    :func:`jcm.forcing.read_dust_source`) do not expand ``{year}``. A pattern
+    :func:`jcm.forcing.read_dust_source` /
+    :func:`jcm.forcing.read_volcanic_emissions`) do not expand ``{year}``. A pattern
     here would otherwise reach ``xr.open_dataset`` as a literal-brace path and
     die with a cryptic file-not-found; reject it up front, naming the reason and
     that only ``emissions_file`` / ``oxidants_file`` accept yearly patterns.
     Returns ``value`` unchanged when it is not a pattern.
     """
     if isinstance(value, str) and "{year}" in value:
+        kind = ("one file holding every year" if key == "volcanic_file"
+                else "a climatology-only single file")
         raise ValueError(
             f"forcing.{key}={value!r} contains a {{year}} pattern, but {key} "
-            "is a climatology-only single file: the data mirror publishes no "
-            "transient (yearly) DMS/dust product and its reader does not expand "
+            f"is {kind}: the data mirror publishes no yearly "
+            "DMS/dust/volcanic product and its reader does not expand "
             "{year}. Only forcing.emissions_file and forcing.oxidants_file "
             "accept yearly patterns; give dms_file/dust_*_file a single "
-            "12-month climatology or static map (or 'auto'/'null').")
+            "12-month climatology or static map and volcanic_file the one "
+            "volcanic product (or 'auto'/'null').")
     return value
 
 
@@ -851,6 +1012,70 @@ def _attach_dms(forcing, forcing_cfg, coords):
     return forcing.copy(dms_seawater=ts)
 
 
+def _attach_natural_aerosol(forcing, forcing_cfg, coords):
+    """Attach the MACv2 natural aerosol background from ``natural_aerosol_file``.
+
+    No-op when unset (or still ``auto``: an unresolved key means no caller
+    asked the resolver, so nothing is fetched). Loads a
+    ``macv2_natural_aerosol`` bundle (:func:`jcm.forcing.read_natural_aerosol`)
+    onto ``forcing.natural_aerosol`` as mid-month ``WRAP_YEAR`` leaves, which
+    :class:`~jcm.physics.aerosol.macv2_natural.Macv2NaturalAerosol` adds to
+    the plumes' optics. The file must be on the model horizontal grid; grid
+    handling as in :func:`_attach_dms`.
+    """
+    if forcing_cfg is None:
+        return forcing
+    value = forcing_cfg.get(NATURAL_AEROSOL_KEY, None)
+    if value == "auto":
+        return forcing
+    path = _resolve_data_path(_reject_year_pattern(value, NATURAL_AEROSOL_KEY))
+    if path in (None, "", "null"):
+        return forcing
+    import xarray as xr
+
+    from jcm.forcing import read_natural_aerosol
+    lat_deg, lon_deg = _model_latlon_deg(coords)
+    with xr.open_dataset(str(path)) as ds:
+        climatology = read_natural_aerosol(
+            ds, lat_deg=lat_deg, lon_deg=lon_deg,
+            anchors=_monthly_anchors(forcing_cfg))
+    forcing = _ensure_parent_forcing(forcing, coords)
+    return forcing.copy(natural_aerosol=climatology)
+
+
+def _attach_volcanic(forcing, forcing_cfg, coords):
+    """Attach the volcanic SO₂ point sources from ``cfg.forcing.volcanic_file`` (#1190).
+
+    No-op when unset. The grid-free product is mapped onto the model's Gaussian
+    cells by :func:`jcm.forcing.read_volcanic_emissions`, the cell areas being
+    the grid's own quadrature weights so the model's global integral returns
+    the inventory's mass; ``forcing.volcanic_eruption_year`` replays one year's
+    eruptions every model year (see that reader). Consumed by
+    :class:`~jcm.physics.aerosol.jam.emissions.volcanic.VolcanicEmissions`.
+    """
+    if forcing_cfg is None:
+        return forcing
+    path = _resolve_data_path(_reject_year_pattern(
+        forcing_cfg.get("volcanic_file", None), "volcanic_file"))
+    if path in (None, "", "null"):
+        return forcing
+    import numpy as np
+    import xarray as xr
+
+    from jcm import constants as c
+    from jcm.forcing import gaussian_grid_columns, read_volcanic_emissions
+    lat_deg, lon_deg = _model_latlon_deg(coords)
+    locate, area = gaussian_grid_columns(
+        lat_deg, lon_deg, np.asarray(coords.horizontal.quadrature_weights),
+        c.rearth)
+    with xr.open_dataset(str(path)) as ds:
+        volc = read_volcanic_emissions(
+            ds, locate, area,
+            eruption_year=forcing_cfg.get("volcanic_eruption_year", None))
+    forcing = _ensure_parent_forcing(forcing, coords)
+    return forcing.copy(volcanic_emissions=volc)
+
+
 def _dust_path(forcing_cfg, key):
     """Resolve one dust forcing key, or ``None`` when unset/opted out."""
     path = _resolve_data_path(
@@ -859,7 +1084,7 @@ def _dust_path(forcing_cfg, key):
 
 
 def _attach_dust(forcing, forcing_cfg, coords):
-    """Attach the five Tegen/HAMMOZ dust inputs (#802).
+    """Attach the Tegen/HAMMOZ dust inputs (#802; the MSG map, jax-gcm#1017).
 
     No-op when ``dust_file`` is unset. Otherwise loads the monthly effective-LAI
     potential-source climatology as a ``WRAP_YEAR`` ``TimeSeries`` (the Fortran
@@ -867,8 +1092,11 @@ def _attach_dust(forcing, forcing_cfg, coords):
     sources, nine soil-texture fractions and categorical tuning regions, all of
     which ``mo_ham_dust.f90`` treats as mandatory — a missing one raises rather
     than letting the scheme run on an all-coarse, untuned soil. The monthly
-    satellite roughness map is optional: it is consumed only on the
-    ``ndurough = 0`` sensitivity path. Grid handling as in :func:`_attach_dms`.
+    satellite roughness map and the MSG-SEVIRI Saharan map are both optional:
+    the former is consumed only on the ``ndurough = 0`` sensitivity path, the
+    latter only by ``ndust = 5`` (which raises its own clear error if it is
+    missing — see ``DustEmissions._require_companions``). Grid handling as in
+    :func:`_attach_dms`.
     """
     if forcing_cfg is None:
         return forcing
@@ -877,9 +1105,9 @@ def _attach_dust(forcing, forcing_cfg, coords):
         return forcing
     import xarray as xr
 
-    from jcm.forcing import (read_dust_preferential, read_dust_regions,
-                             read_dust_roughness, read_dust_soil_types,
-                             read_dust_source)
+    from jcm.forcing import (read_dust_msg_source, read_dust_preferential,
+                             read_dust_regions, read_dust_roughness,
+                             read_dust_soil_types, read_dust_source)
     lat_deg, lon_deg = _model_latlon_deg(coords)
     companions = {key: _dust_path(forcing_cfg, key)
                   for key in _DUST_REQUIRED_KEYS}
@@ -906,6 +1134,11 @@ def _attach_dust(forcing, forcing_cfg, coords):
     if roughness is not None:
         with xr.open_dataset(roughness) as ds:
             fields["dust_roughness"] = read_dust_roughness(
+                ds, lat_deg=lat_deg, lon_deg=lon_deg)
+    msg = _dust_path(forcing_cfg, "dust_msg_file")
+    if msg is not None:
+        with xr.open_dataset(msg) as ds:
+            fields["dust_msg"] = read_dust_msg_source(
                 ds, lat_deg=lat_deg, lon_deg=lon_deg)
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(**fields)
@@ -1117,7 +1350,8 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
         mapping = read_oxidant_vmr(
             ds, nlev=nlev, lat_deg=lat_deg, lon_deg=lon_deg,
             align_mode=oxidant_align(forcing_cfg, paths),
-            persist=_persist(forcing_cfg, "oxidants_file"))
+            persist=_persist(forcing_cfg, "oxidants_file"),
+            anchors=_monthly_anchors(forcing_cfg))
         validate_oxidant_levels(ds, coords, ref)
     finally:
         ds.close()
@@ -1185,6 +1419,52 @@ def _attach_macv2_weights(forcing, forcing_cfg, coords):
 # ---------------------------------------------------------------------------
 # prescribed surface fluxes (forced mode, jax-gcm#301)
 # ---------------------------------------------------------------------------
+
+
+def _attach_land_skin_temperature(forcing, forcing_cfg, coords):
+    """Attach an opt-in, strictly date-aligned control-run temperature archive."""
+    if forcing_cfg is None:
+        return forcing
+    spec = forcing_cfg.get("land_skin_temperature_file", None)
+    if spec is None:
+        return forcing
+    import xarray as xr
+    from jcm.forcing import read_land_skin_temperature
+
+    path = str(_resolve_data_path(_reject_year_pattern(
+        spec, "land_skin_temperature_file")))
+    lat, lon = _model_latlon_deg(coords)
+    with xr.open_dataset(path) as ds:
+        temperature = read_land_skin_temperature(ds, lat, lon, source=path)
+    provenance.record_input(path)
+    provenance.record_fact("land_skin_temperature", f"file:{path}")
+    return _ensure_parent_forcing(forcing, coords).copy(
+        land_skin_temperature=temperature)
+
+
+def _attach_slim_properties(forcing, forcing_cfg, coords):
+    """Attach SLIM's surface properties from ``cfg.forcing.slim_file``.
+
+    No-op when unset. The file is SLIM's surface dataset regridded to the
+    model grid (``land_model: slim``; read by
+    :func:`jcm.physics.surface.slim.properties.read_slim_properties`).
+    """
+    if forcing_cfg is None:
+        return forcing
+    spec = forcing_cfg.get("slim_file", None)
+    if spec in (None, "", "null"):
+        return forcing
+    import xarray as xr
+
+    from jcm.physics.surface.slim.properties import read_slim_properties
+
+    path = str(_resolve_data_path(_reject_year_pattern(spec, "slim_file")))
+    lat, lon = _model_latlon_deg(coords)
+    with xr.open_dataset(path) as ds:
+        props = read_slim_properties(ds, lat, lon, source=path)
+    provenance.record_input(path)
+    provenance.record_fact("slim_properties", f"file:{path}")
+    return _ensure_parent_forcing(forcing, coords).copy(slim_properties=props)
 
 
 def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
@@ -1268,6 +1548,97 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
                 source=f"prescribed_surface_flux file {path}",
                 persist=persist)
         provenance.record_fact("prescribed_surface_flux", f"file:{path}")
+        provenance.record_input(path)
+
+    forcing = _ensure_parent_forcing(forcing, coords)
+    return forcing.copy(**fields)
+
+
+# ---------------------------------------------------------------------------
+# ocean surface current (coupled momentum/wind10w, jax-gcm#915)
+# ---------------------------------------------------------------------------
+
+
+def _attach_ocean_current(forcing, forcing_cfg, coords):
+    """Attach a coupled ocean surface current from ``cfg.forcing.ocean_current``.
+
+    No-op when the block is unset (the default: ``ForcingData.ocean_u/v``
+    stay ``None``, read as a zero current — a surface at rest, bit-identical
+    to a run that never sets this block). Mirrors
+    :func:`_attach_prescribed_surface_fluxes` exactly, down to the two
+    mutually exclusive sources:
+
+    - ``constants``: a mapping with both ``ocean_u``/``ocean_v`` names to
+      scalar values, broadcast to uniform ``(nlon, nlat)`` maps — a steady
+      current for an idealised run;
+    - ``file``: a netCDF already on the model grid carrying both as
+      variables dimensioned ``(lat, lon)`` (static) or with a leading
+      ``time`` axis (a ``TimeSeries``) — the archived-coupler-current door,
+      read by :func:`jcm.forcing.read_ocean_current` (the same reader a
+      Python caller uses). A time-resolved file must declare its alignment
+      with the block's ``align`` key (``wrap_year`` | ``by_date`` |
+      ``by_date_interp``): the default ``auto`` resolves only data-mirror
+      products and no mirror product carries an ocean current, so it raises
+      (#884, :func:`jcm.forcing.resolve_align`).
+
+    Both components are required together: a current with only one
+    component is not a defined input (it isn't a current), so a missing
+    variable raises here rather than surfacing as a confusing partial field
+    later. A coupler driving jcm programmatically bypasses this and sets
+    ``ocean_u``/``ocean_v`` on ``ForcingData`` directly.
+    """
+    if forcing_cfg is None:
+        return forcing
+    block = forcing_cfg.get("ocean_current", None)
+    if block in (None, "", "null"):
+        return forcing
+    constants = block.get("constants", None)
+    path = block.get("file", None)
+    if (constants is None) == (path in (None, "", "null")):
+        raise ValueError(
+            "forcing.ocean_current needs exactly one of 'constants' or "
+            "'file'."
+        )
+
+    import jax.numpy as jnp
+    from jcm.forcing import OCEAN_CURRENT_FILE_VARS
+
+    align = str(block.get("align", "auto"))
+    persist = ir.check_persist(block.get("persist", ir.PERSIST_STRICT),
+                               "forcing.ocean_current.persist")
+    if constants is not None:
+        if align != "auto" or persist != ir.PERSIST_STRICT:
+            raise ValueError(
+                "forcing.ocean_current.align/persist apply only to a "
+                f"'file' source; got align={align!r}, persist={persist!r} "
+                "with 'constants'.")
+        missing = [v for v in OCEAN_CURRENT_FILE_VARS if v not in constants]
+        if missing:
+            raise ValueError(
+                f"forcing.ocean_current.constants is missing {missing}; "
+                f"both of {tuple(OCEAN_CURRENT_FILE_VARS)} are required."
+            )
+        nlon, nlat = coords.horizontal.nodal_shape
+        fields = {field: jnp.full((nlon, nlat), float(constants[var]))
+                  for var, field in OCEAN_CURRENT_FILE_VARS.items()}
+        provenance.record_fact("ocean_current", "constants")
+    else:
+        import xarray as xr
+
+        from jcm.forcing import read_ocean_current
+
+        # Validate/reorient against the model's OWN lat/lon — native-grid-
+        # only, like every other gridded forcing loader (see the reader's
+        # docstring for why this is the right choice for a vector field).
+        lat_deg, lon_deg = _model_latlon_deg(coords)
+        path = str(_resolve_data_path(path))
+        with xr.open_dataset(path) as ds:
+            fields = read_ocean_current(
+                ds, lat_deg, lon_deg,
+                align_mode=align,
+                source=f"ocean_current file {path}",
+                persist=persist)
+        provenance.record_fact("ocean_current", f"file:{path}")
         provenance.record_input(path)
 
     forcing = _ensure_parent_forcing(forcing, coords)

@@ -58,6 +58,8 @@ class FVPhysicsGrid:
         latitudes / longitudes: Per-column cell-centre coordinates
             (radians, numpy float64, shape ``(ncol,)``; longitudes in
             ``[0, 2π)``), computed via the seam-safe Cartesian average.
+        cell_areas: Per-column cell area [m²] (numpy float64, ``(ncol,)``),
+            summing to the sphere's area.
 
     """
 
@@ -96,6 +98,14 @@ class FVPhysicsGrid:
         flat = xyz_fv.reshape(self.num_cols, 3)
         self.latitudes = np.arcsin(np.clip(flat[:, 2], -1.0, 1.0))
         self.longitudes = np.mod(np.arctan2(flat[:, 1], flat[:, 0]), 2.0 * np.pi)
+
+        # The nf×nf sub-cells are equal on the reference element, so a cell's
+        # share of the sphere is its FV metric determinant over their sum.
+        from jcm import constants as c
+        metdet_fv = np.asarray(self.fv_grid["metric_determinant_fv"],
+                               dtype=np.float64).reshape(self.num_cols)
+        self.cell_areas = (4.0 * np.pi * c.rearth ** 2
+                           * metdet_fv / metdet_fv.sum())
 
     # ------------------------------------------------------------------
     # Raw cell-layout remaps (element-shaped FV fields)

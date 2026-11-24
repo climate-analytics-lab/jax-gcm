@@ -83,8 +83,8 @@ live values.
 Two boundaries remain, both by design rather than oversight. ``set_constants``
 must be called **before** the model is built: a constant read inside a jitted
 term is baked in when that term is traced, so an override afterwards does not
-propagate until recompilation. And constants internal to ``mam4-jax`` belong to
-that package — JAM's calls into it use its values, which ``set_constants`` does
+propagate until recompilation. And constants internal to ``mam4-jax`` and ``m7-jax``
+belong to those packages — JAM's calls into them use their values, which ``set_constants`` does
 not reach.
 
 **Code pointers.**

@@ -17,7 +17,9 @@ import jcm.constants as c
 # SPEEDY-specific value, not the shared SI constant. Shared constants (cpd, p0,
 # grav) are read as module attributes from jcm.constants.
 from jcm.physics.speedy.physical_constants import alhc
-from jcm.physics.speedy.smoothing import smooth_gate, smooth_pos, surrogate_of, surrogate_pos
+from jcm.physics.speedy.smoothing import (
+    _safe_width, smooth_gate, smooth_pos, surrogate_of, surrogate_pair,
+)
 
 def _humidity_trigger(qa_surface, qthr_surface, qsat_surface, qa_pbl_top, qthr_pbl_top, qsat_pbl_top, width):
     """``qdif`` on the humidity-trigger branch: the gated surface-layer excess.
@@ -38,6 +40,88 @@ def _humidity_trigger(qa_surface, qthr_surface, qsat_surface, qa_pbl_top, qthr_p
 _surrogate_humidity_trigger = surrogate_of(_humidity_trigger)
 
 
+def _mass_flux_pressure_factor(psa, psmin):
+    """``fpsa``, the surface-pressure factor on the cloud-base mass flux.
+
+    The reference switches convection off below ``psmin`` (``qdif`` is
+    masked by ``psa > psmin``) and above it ramps the mass flux in as
+    ``psa * min(1, (psa - psmin) * 2/(1 - psmin))``, reaching the full
+    ``psa`` at ``(1 + psmin)/2``. The switch and the ramp's onset are the
+    same decision -- the ramp is 0 at ``psmin`` -- so the factor carries
+    both: the reference ramp wherever the reference reads it, and 0 at and
+    below ``psmin``, where the reference's ramp (negative, or undefined for
+    ``psmin >= 1``) is masked away. The published ``qdif`` keeps the mask.
+    """
+    rdps = _ramp_slope(psmin)
+    return jnp.where(
+        psa > psmin, psa * jnp.clip((psa - psmin) * rdps, 0.0, 1.0), 0.0)
+
+
+def _ramp_slope(psmin):
+    """``2/(1 - psmin)``, the ramp's slope in surface pressure, floored at ``psmin = 1``.
+
+    The reference slope is infinite at ``psmin = 1`` (no convection anywhere)
+    and negative beyond it. Both are outside the physical range, and the
+    factor is masked to 0 there anyway, but the infinite slope leaves a
+    ``0 * inf`` NaN in the derivative of the masked branch (Codex review,
+    PR #1168). The floor of 1e-6 on ``1 - psmin`` keeps the slope finite
+    there and is exactly ``2/(1 - psmin)`` for every ``psmin`` below
+    ``1 - 1e-6``.
+    """
+    return 2.0 / jnp.maximum(1.0 - psmin, 1e-6)
+
+
+def _smooth_mass_flux_pressure_factor(psa, psmin, width):
+    """Smooth the surface-pressure factor for the switch's derivative.
+
+    The reference derivative with respect to ``psmin`` is a plateau on
+    both sides of the ramp: zero below the switch and zero above the cap,
+    which at the default ``psmin = 0.8`` holds everywhere the surface
+    pressure exceeds 900 hPa. Here the clipped ramp is a softplus pair in
+    surface pressure, ``psa * rdps * (w*softplus((psa - psmin)/w) -
+    w*softplus((psa - psmin - 1/rdps)/w))``, with ``width`` [normalised
+    surface pressure] its half-width: one smooth function of ``psa`` and
+    ``psmin`` (its mixed partials agree), the reference away from the two
+    corners, and exactly the reference at width 0.
+    """
+    on, w = _safe_width(width)
+    rdps = _ramp_slope(psmin)
+    x = psa - psmin
+    soft = psa * rdps * (w * jax.nn.softplus(x / w)
+                         - w * jax.nn.softplus((x - 1.0 / rdps) / w))
+    return jnp.where(on, soft, _mass_flux_pressure_factor(psa, psmin))
+
+
+_surrogate_mass_flux_pressure_factor = surrogate_pair(
+    _mass_flux_pressure_factor, _smooth_mass_flux_pressure_factor)
+
+
+def _precnv(fuq_top, fmass_top, qsatb, cbmf, unit_excess):
+    """Convective precipitation: the plume's moisture flux above saturation at cloud top."""
+    return jnp.maximum(fuq_top - fmass_top * qsatb, 0.0)
+
+
+def _smooth_precnv(fuq_top, fmass_top, qsatb, cbmf, unit_excess, width):
+    """Smooth the precipitation onset, per unit cloud-base mass flux, for its derivative.
+
+    Every plume flux is proportional to the cloud-base mass flux ``cbmf``,
+    so the onset argument is ``cbmf * unit_excess`` with ``unit_excess`` the
+    cloud-top moisture excess per unit cloud-base mass flux [g/kg]. A
+    switched-off plume (``cbmf = 0``: the humidity trigger or the pressure
+    switch failed) sits exactly on the hinge's corner, where AD's tie rule
+    gives the reference hinge half its right-hand slope -- a tangent plume
+    that rains half as much as the plume it switches on, in either sign of
+    ``unit_excess``. ``cbmf * softplus(unit_excess)`` gives the corner the
+    plume's own rain yield instead, ``max(unit_excess, 0)`` per unit mass
+    flux at width 0, and keeps the reference derivative in a running plume.
+    ``width`` is in g/kg per unit cloud-base mass flux.
+    """
+    return cbmf * smooth_pos(unit_excess, width)
+
+
+_surrogate_precnv = surrogate_pair(_precnv, _smooth_precnv)
+
+
 @jit
 def diagnose_convection(
     psa, se, qa, qsat,
@@ -53,7 +137,7 @@ def diagnose_convection(
     qdif: Excess humidity in convective gridboxes
 
     """
-    iptop, _, qdif = _diagnose_convection(
+    iptop, _, qdif, _ = _diagnose_convection(
         psa, se, qa, qsat, parameters, physics_data, forcing, terrain)
     return iptop, qdif
 
@@ -85,13 +169,19 @@ def _diagnose_convection(
     Returns:
     iptop: Top of convection (layer index)
     flux_top: The cloud top the mass-flux computation uses: ``iptop``,
-        and also ``ktop1`` in the columns on the humidity-trigger branch
-        whose RH test fails. Those columns have ``qdif`` exactly 0, so every
-        flux they get is exactly 0; what they get from it is the
-        trigger's surrogate derivative carried through a whole plume --
+        and also ``ktop1`` in every other conditionally unstable column --
+        those on the humidity-trigger branch whose RH test fails, and
+        those below the ``psmin`` surface-pressure switch. Those columns
+        have a mass flux of exactly 0 (``excess`` is 0 on the failed
+        trigger, ``fpsa`` is 0 below the switch), so every flux they get
+        is exactly 0; what they get from it is the trigger's or the
+        switch's surrogate derivative carried through a whole plume --
         cloud base, entrainment, detrainment and precipitation -- so the
         column's moisture tangent balances its precipitation tangent.
-    qdif: Excess humidity in convective gridboxes
+    qdif: Excess humidity in convective gridboxes (0 below the switch)
+    excess: ``qdif`` before the ``psa > psmin`` mask, which the mass flux
+        is formed from; the switch is carried by its surface-pressure
+        factor instead (``_mass_flux_pressure_factor``).
 
     """
     kx, ix, il = se.shape
@@ -104,9 +194,6 @@ def _diagnose_convection(
     rlhc = 1.0 / alhc
 
     # Minimum of moist static energy between the surface layer and the PBL top
-    # Mask for psa > psmin
-    mask_psa = psa > parameters.convection.psmin
-
     # The trigger compares the surface layer against the top of the sub-cloud
     # layer. That "PBL-top" reference is a *physical* depth (~150 hPa above the
     # surface), so it is evaluated at a fixed sigma rather than at an
@@ -158,7 +245,8 @@ def _diagnose_convection(
     qthr0 = parameters.convection.rhbl * qsat[kx-1]
     qthr1 = parameters.convection.rhbl * qsat_sc
 
-    case_1 = mask_psa & (ktop1 < kx) & (ktop2 < kx)
+    conditionally_unstable = ktop1 < kx
+    case_1 = conditionally_unstable & (ktop2 < kx)
 
     # The humidity trigger is a value jump: when either RH condition flips,
     # qdif switches between 0 and the finite surface-layer excess, and the
@@ -173,19 +261,28 @@ def _diagnose_convection(
     # reference leaves it; iptop is a level index and keeps the hard test.
     w_rh = parameters.convection.trigger_smoothing
     lqthr = (qa[kx-1] > qthr0) & (qa_sc > qthr1)
-    rh_branch = mask_psa & (ktop1 < kx) & ~(ktop2 < kx)
+    rh_branch = conditionally_unstable & ~(ktop2 < kx)
     case_2 = rh_branch & lqthr
 
-    flux_top = jnp.where(case_1 | rh_branch, ktop1, iptop)
-    iptop = jnp.where(case_1 | case_2, ktop1, iptop)
-    qdif = jnp.where(case_1, jnp.maximum(qa[kx-1] - qthr0, (mse0 - msthr) * rlhc), qdif)
-    qdif = jnp.where(
+    excess = jnp.where(case_1, jnp.maximum(qa[kx-1] - qthr0, (mse0 - msthr) * rlhc), qdif)
+    excess = jnp.where(
         rh_branch,
         _surrogate_humidity_trigger(
             qa[kx-1], qthr0, qsat[kx-1], qa_sc, qthr1, qsat_sc, w_rh),
-        qdif,
+        excess,
     )
-    return iptop, flux_top, qdif
+
+    # Convection needs psa > psmin: a switch whose reference derivative
+    # with respect to psmin is zero on both sides. The published iptop and
+    # qdif keep the hard mask; the mass flux is formed from the unmasked
+    # excess and carries the switch in its surface-pressure factor
+    # (_mass_flux_pressure_factor, 0 below psmin), whose surrogate
+    # derivative then switches a whole plume on, as the trigger's does.
+    mask_psa = psa > parameters.convection.psmin
+    flux_top = jnp.where(conditionally_unstable, ktop1, iptop)
+    iptop = jnp.where(mask_psa & (case_1 | case_2), ktop1, iptop)
+    qdif = jnp.where(mask_psa, excess, 0.0)
+    return iptop, flux_top, qdif, excess
 
 @jit
 def get_convection_tendencies(
@@ -229,12 +326,12 @@ def get_convection_tendencies(
 
     fqmax = 5.0 #maximum mass flux, not sure why this is needed
     fm0 = c.p0*physics_data.speedy_coords.dhs[-1]/(c.grav*parameters.convection.trcnv*3600.0) #prefactor for mass fluxes
-    rdps=2.0/(1.0 - parameters.convection.psmin)
 
     # 2. Check of conditions for convection. The plume is computed up to
-    # flux_top, which differs from the published iptop only in columns whose
-    # fluxes are exactly zero (see _diagnose_convection).
-    iptop, flux_top, qdif = _diagnose_convection(
+    # flux_top and from the unmasked excess, which differ from the published
+    # iptop and qdif only in columns whose fluxes are exactly zero (see
+    # _diagnose_convection).
+    iptop, flux_top, qdif, excess = _diagnose_convection(
         psa, se, qa, qsat, parameters, physics_data, forcing, terrain)
 
     # 3. Convection over selected grid-points
@@ -251,9 +348,20 @@ def get_convection_tendencies(
     # Dry static energy and moisture at upper boundary
     sb, qb = _sb_3d[k], jnp.minimum(_qb_3d, qa)[k]
     
-    # Cloud-base mass flux
-    fpsa = psa * jnp.minimum(1.0, (psa - parameters.convection.psmin) * rdps)
-    fmass = fm0 * fpsa * jnp.minimum(fqmax, qdif / (qmax - qb))
+    # Cloud-base mass flux. The surface-pressure factor is 0 below psmin,
+    # where the published qdif is masked, so forming the flux from the
+    # unmasked excess leaves every value unchanged and lets the switch's
+    # surrogate derivative (psmin_smoothing) reach the plume. The factor
+    # and the excess are independent decisions multiplied together, so a
+    # column that fails both the switch and the humidity trigger keeps a
+    # zero derivative in each (the product rule: each slope meets the
+    # other's hard zero); neither decision alone would start its
+    # convection. The fqmax cap on the humidity ratio is a plateau of the
+    # same kind and stays hard: it engages only where the surface-layer
+    # excess exceeds five times the cloud-base humidity gap.
+    fpsa = _surrogate_mass_flux_pressure_factor(
+        psa, parameters.convection.psmin, parameters.convection.psmin_smoothing)
+    fmass = fm0 * fpsa * jnp.minimum(fqmax, excess / (qmax - qb))
     cbmf = mask * fmass
 
     # Upward fluxes at upper boundary
@@ -303,13 +411,24 @@ def get_convection_tendencies(
     # 3.3 Top layer (condensation and detrainment)
     k = flux_top - 1
 
-    # Flux of convective precipitation. The onset hinge (moisture flux
-    # crossing cloud-top saturation) zeroes the gradient of every
-    # parameter through non-precipitating columns. The value is the hard
-    # hinge; precnv_smoothing > 0 [g/(m^2 s)] gives it the derivative of a
-    # softplus of that half-width.
+    # Flux of convective precipitation: the plume's moisture flux above
+    # saturation at cloud top. The onset hinge zeroes the gradient of every
+    # parameter through non-precipitating columns. Every plume flux is
+    # proportional to the cloud-base mass flux, so the onset is also formed
+    # per unit of it (unit_excess, the same plume without the cbmf factor)
+    # for the derivative, which is then a whole plume's rain in a column
+    # that is switching on (see _smooth_precnv). The value is the hard
+    # hinge on the fluxes; precnv_smoothing > 0 [g/kg per unit cloud-base
+    # mass flux] gives it the derivative of a softplus of that half-width.
     qsatb = index_array(pad_array(interpolate(qsat)), k)
-    precnv = surrogate_pos(fuq - fmass * qsatb, parameters.convection.precnv_smoothing)
+    _enmass_unit_3d = loop_mask * _zeros_3d().at[1:-1].set(entr[:, jnp.newaxis, jnp.newaxis] * psa)
+    fmass_unit, fuq_unit = (
+        index_array(pad_array(base + jnp.cumsum((_enmass_unit_3d * tracer)[::-1], axis=0)[::-1]), flux_top)
+        for base, tracer in ((1.0, 1), (qmax, qa))
+    )
+    unit_excess = fuq_unit - fmass_unit * qsatb
+    precnv = _surrogate_precnv(
+        fuq, fmass, qsatb, cbmf, unit_excess, parameters.convection.precnv_smoothing)
 
     # Net flux of dry static energy and moisture
     i, j = jnp.meshgrid(jnp.arange(ix), jnp.arange(il), indexing="ij")

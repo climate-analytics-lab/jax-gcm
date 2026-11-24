@@ -425,11 +425,13 @@ def test_radiation_scheme_custom_parameters():
     
     date = jdt.Datetime.from_pydatetime(datetime(2025, 3, 21, 12, 0, 0))  # March 21, noon
 
-    # Custom parameters with appropriate band limits
+    # Custom parameters with appropriate band limits. ``sw_band_limits`` is
+    # gone (jax-gcm#999): it had no consumer (the grey scheme's SW path
+    # never read it — the comment below is still accurate for SW), unlike
+    # ``lw_band_limits``, which genuinely drives the Planck integration.
     custom_params = RadiationParameters.default(
         solar_constant=1400.0,  # Higher than default
         lw_band_limits=((10, 250), (250, 350), (350, 500), (500, 2500)),  # 4 LW bands
-        sw_band_limits=((4000, 10000), (10000, 14500), (14500, 50000)),   # 3 SW bands
     )
     
     # Create aerosol data for custom parameters

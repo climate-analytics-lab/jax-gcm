@@ -625,8 +625,8 @@ class AerosolFreeRadiationSlowTest(unittest.TestCase):
 
     Runs the full ECHAM composition (RRTMGP + 2M clouds + MACv2-SP with
     ``aerosol_free_interval=1``) in the single-column host rather than
-    a T21 ``Model``: the claim under test — the second, aerosol-free
-    RRTMGP solve and its published ``*_noa`` fluxes — is per-column
+    a T21 ``Model``: the claim under test — the aerosol-free twins of
+    the RRTMGP solve and their published ``*_noa`` fluxes — is per-column
     physics, and running 2048 spectral columns through the most expensive
     double-compile in the suite bought only wall clock (#627, ~7 min of
     every PR gate). The column sits in the East-Asian MACv2-SP plume

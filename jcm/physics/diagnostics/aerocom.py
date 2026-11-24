@@ -22,8 +22,8 @@ What is NOT here (and cannot be)
 Diagnostics that must be produced *inside* another scheme, because the
 information does not survive to the end of the step:
 
-* aerosol-free (``*noa`` / ``*_na``) fluxes — need a second radiation call
-  with aerosol optics zeroed;
+* aerosol-free (``*noa`` / ``*_na``) fluxes — solved as the aerosol-free
+  twins inside the radiation call;
 * per-species / per-mode / per-wavelength optical depth and absorption —
   need the aerosol optics internals;
 * microphysical process rates (``autoconv``, ``accretn``, ``wbf``) —
@@ -452,6 +452,24 @@ class AerocomDiagnostics(PhysicsTerm):
 
     ALL_GROUPS: ClassVar[tuple[str, ...]] = (
         "cloud", "column", "plev", "aerosol", "nearsurface")
+    # ``"thermo_run"`` is always same-step fresh (``MoistAirColumnState``
+    # seeds it every step, first in the composition, and every temperature-
+    # or-humidity-changing term upstream of this terminal diagnostic
+    # advances it); read via ``.get()`` only so this term also composes
+    # without it. The rest are read inside the per-group helpers below
+    # (``_column_group``, ``_plev_group``, ``_nearsurface_group``,
+    # ``_aerosol_group``) rather than inline in ``__call__`` -- all
+    # same-step (this term is terminal, running after every producer in
+    # the default ``echam_physics`` order) and composition/module-optional
+    # (``"height_full"``/``"height_half"`` for a host without them,
+    # ``"radiation"``/``"surface"``/``"convection"``/``"vertical_diffusion"``
+    # for a trimmed stack, ``"_jam_state"`` for the JAM-only aerosol group) —
+    # each group degrades the fields it can't compute to zero rather than
+    # failing to build (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = (
+        "thermo_run", "height_full", "height_half", "radiation", "surface",
+        "convection", "vertical_diffusion", "_jam_state",
+    )
 
     def __init__(
         self,
@@ -459,6 +477,7 @@ class AerocomDiagnostics(PhysicsTerm):
         overlap: str = OVERLAP_MAXIMUM_RANDOM,
         plev_pa: tuple[float, ...] = (20000.0, 70000.0),
         mode_sigma_g: tuple[float, ...] | None = None,
+        aerosol_spec=None,
     ):
         """Configure which diagnostic groups to compute.
 
@@ -469,7 +488,9 @@ class AerocomDiagnostics(PhysicsTerm):
         geometric standard deviation used for each aerosol mode by the
         number and PM diagnostics, one entry per mode in the order of the
         spec's modes; ``None`` takes each mode's ``geom_std_dev`` from the
-        aerosol spec itself.
+        aerosol spec itself. ``aerosol_spec`` is the JAM population whose
+        modes the number and PM diagnostics integrate (``echam_physics``
+        passes the run's own); ``None`` assumes MAM4.
         """
         unknown = set(groups) - set(self.ALL_GROUPS)
         if unknown:
@@ -486,6 +507,7 @@ class AerocomDiagnostics(PhysicsTerm):
         # wrong mode by a parallel table falling out of order.
         self.mode_sigma_g = (tuple(float(s) for s in mode_sigma_g)
                              if mode_sigma_g is not None else None)
+        self._jam_spec = aerosol_spec
         # sigma_g = 1 is a monodisperse delta: ln(sigma) = 0 divides both
         # lognormal integrals by zero, and sigma < 1 is not a width at all.
         # The per-mode COUNT is checked against the live modal state in
@@ -574,8 +596,15 @@ class AerocomDiagnostics(PhysicsTerm):
 
         * 2-moment (``lohmann_2m``) carries prognostic ``qnc``/``qni``
           tracers in **kg^-1** as **grid means** (they are advected
-          tracers) and leaves ``CloudData.droplet_number`` at its zero
-          carry init;
+          tracers). ``lohmann_2m/scheme.py`` now also writes the resolved
+          ``qnc*rho`` into ``CloudData.droplet_number`` (#1053, grid-mean,
+          m^-3) as the saved CF output, but this function still goes
+          straight to the tracer rather than reading that field: it needs
+          the value as it will be SAVED this step
+          (``_post_physics_tracer``), which the field — written inside the
+          cloud term, before any later term's tendency could apply — cannot
+          reflect for a (currently nonexistent) term downstream of the
+          cloud scheme that also touched ``qnc``;
         * 1-moment (``echam_1m``) writes ``CloudData.droplet_number`` in
           **m^-3** as a characteristic **in-cloud** value
           (ECHAM's prescribed profile times ``cdnc_factor``,
@@ -935,7 +964,7 @@ class AerocomDiagnostics(PhysicsTerm):
                 nlev = temperature.shape[0]
                 tke = tke.reshape(-1, nlev).T if tke.shape[0] != nlev                     else tke.reshape(nlev, -1)
                 # Double-``where`` around the root, for the same reason
-                # ``tke_budget.py::echam_tke_source_update`` carries one:
+                # ``closure.py::_sqrt_nonnegative`` carries one:
                 # ``sqrt(maximum(x, 0))`` is the one floor shape that does
                 # not protect the derivative. At TKE = 0 the two arguments
                 # of ``maximum`` tie, JAX splits the derivative 0.5/0.5
@@ -1066,7 +1095,7 @@ class AerocomDiagnostics(PhysicsTerm):
         # unlike the amounts themselves, which is what these diagnostics
         # report. Documented rather than silently approximated.
         from jcm.physics.aerosol.jam import mass_name, number_name
-        spec = getattr(self, "_jam_spec", None) or _default_jam_spec()
+        spec = self._jam_spec or _default_jam_spec()
         num_post, mass_post = [], []
         for mode in spec.modes:
             n = _post_physics_tracer(state, diagnostics, number_name(mode.short))

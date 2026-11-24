@@ -3,3 +3,10 @@
 # (cache-first fetch). Terrain must be native — horizontal interpolation
 # breaks the SSO sub-grid orography fields (see _resolve_auto_terrain).
 kind: auto
+# Fraction of a cell below which the smaller of land and sea is dropped: a land
+# fraction at or below it becomes 0, one at or above 1 - fmask_threshold
+# becomes 1 (jcm.terrain.get_terrain). 0 keeps every fraction, which is what a
+# coupled ocean whose wet mask defines the coast needs -- the atmosphere's sea
+# area is then exactly the ocean's, so a conservative flux map loses nothing
+# to cells the atmosphere rounded to land. Range [0, 0.5].
+fmask_threshold: 0.1

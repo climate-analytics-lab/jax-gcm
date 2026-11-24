@@ -108,10 +108,13 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
         self.assertGreater(float(P.max()) * 86400.0, 0.01,
                            "no precipitation over two days — vacuous budget")
         # Closure is judged on the SPUN-UP second day. Day 1 is excluded
-        # because spin-up convection bursts trip the _DTDT_MAX stability cap,
-        # which scales the tendencies but cannot scale the scalar precip
-        # diagnostic — the cap's documented, inherent conservation break
-        # (it does not fire in equilibrated columns).
+        # because the cold-start RCE initial condition drives transient
+        # convective bursts before the column settles into its RCE balance;
+        # the per-term ledger (including convection's own vapour/condensate/
+        # precip balance, applied unscaled — #961 removed the stability cap
+        # that used to sit between this term and the published ledger) is
+        # exact regardless, but a transient burst can still correlate with
+        # a momentarily small denominator in the ratio pin below.
         spd = int(round(86400.0 / scm.dt_seconds))
         rel_eq = rel[spd:]
         residual_eq = residual[spd:]

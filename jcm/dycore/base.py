@@ -37,6 +37,18 @@ from typing import Any, Mapping, Sequence, TYPE_CHECKING
 import jax.numpy as jnp
 import tree_math
 
+# ``add_physics_tendency`` — the generic gridpoint forward-Euler add used
+# below as this module's default :meth:`DynamicalCore.after_physics_state` —
+# lives in :mod:`jcm.physics_interface` (#623 follow-up, Codex P1 round 5):
+# it is pure ``PhysicsState``/``PhysicsTendency`` arithmetic with no
+# dycore-specific representation, and
+# :func:`jcm.physics_interface.record_post_physics_anchor` needs the SAME
+# function as its no-dycore default for :class:`~jcm.prescribed_state_model.
+# PrescribedStateModel`, which has no ``DynamicalCore`` to ask.
+# ``physics_interface`` does not import anything from this module, so this
+# is an ordinary one-way dependency, not a cycle.
+from jcm.physics_interface import add_physics_tendency
+
 if TYPE_CHECKING:
     import numpy as np
     import xarray as xr
@@ -51,31 +63,6 @@ if TYPE_CHECKING:
 # its concrete shape other than that it must be a valid JAX pytree (so jax.lax.scan,
 # tree_map, and flax.serialization work on it without special cases).
 DycoreState = Any
-
-
-def add_physics_tendency(physics_state: "PhysicsState",
-                         physics_tendency: "PhysicsTendency",
-                         dt_seconds) -> "PhysicsState":
-    """``physics_state + dt_seconds · physics_tendency`` on the gridpoint fields.
-
-    Winds, temperature, humidity and every tracer of ``physics_state`` advance;
-    a tracer the tendency does not carry is unchanged. Geopotential and surface
-    pressure are left as they are (physics does not tend them).
-    """
-    tracers = {
-        name: value + dt_seconds * physics_tendency.tracers[name]
-        if name in physics_tendency.tracers else value
-        for name, value in physics_state.tracers.items()
-    }
-    return physics_state.copy(
-        u_wind=physics_state.u_wind + dt_seconds * physics_tendency.u_wind,
-        v_wind=physics_state.v_wind + dt_seconds * physics_tendency.v_wind,
-        temperature=(physics_state.temperature
-                     + dt_seconds * physics_tendency.temperature),
-        specific_humidity=(physics_state.specific_humidity
-                           + dt_seconds * physics_tendency.specific_humidity),
-        tracers=tracers,
-    )
 
 
 @tree_math.struct

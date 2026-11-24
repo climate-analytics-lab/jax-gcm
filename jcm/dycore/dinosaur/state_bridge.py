@@ -114,7 +114,8 @@ def dynamics_state_to_physics_state(
     # dimensionless mass fraction. Keep that representation through the
     # diagnostic calculations; treating the same value as g/kg suppresses the
     # virtual-temperature contribution by a factor of 1000.
-    q = nodal_state.tracers['specific_humidity']
+    q = (nodal_direct['specific_humidity'] if 'specific_humidity' in nodal_direct
+         else nodal_state.tracers['specific_humidity'])
 
     # Condensate loading for the virtual temperature, from whichever frame
     # each species is carried in. Both dicts hold the dimensionless kg/kg
@@ -214,7 +215,8 @@ def physics_state_to_dynamics_state(
     q = dynamics.physics_specs.nondimensionalize(
         physics_state.specific_humidity * units.dimensionless
     )
-    q_modal = dynamics.coords.horizontal.to_modal(q)
+    q_modal = (jnp.asarray(q) if 'specific_humidity' in nodal_tracers
+               else dynamics.coords.horizontal.to_modal(q))
 
     temperature = physics_state.temperature - dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
     temperature_modal = dynamics.coords.horizontal.to_modal(temperature)
@@ -285,7 +287,8 @@ def physics_tendency_to_dynamics_tendency(
         dynamics.coords.horizontal, u_tend, v_tend,
     )
     t_tend_modal = dynamics.coords.horizontal.to_modal(t_tend)
-    q_tend_modal = dynamics.coords.horizontal.to_modal(q_tend)
+    q_tend_modal = (jnp.asarray(q_tend) if 'specific_humidity' in nodal_tracers
+                    else dynamics.coords.horizontal.to_modal(q_tend))
 
     # The dinosaur ``State.log_surface_pressure`` is shape ``(1, n_lat_modes,
     # n_lon_modes)`` (a leading vertical axis of size 1 for broadcasting). The

@@ -2,7 +2,7 @@
 
 Usage:
     python tools/release_validation/health.py <run_dir with *_dayNNN.nc chunks>
-        [--last-n N] [--log FILE] [--json FILE]
+        [--last-n N] [--warm-start {auto,yes,no}] [--log FILE] [--json FILE]
 
 Computes annual, area-weighted global means from the saved chunks and
 checks loose climatological ranges (spin-up tolerant — this is a
@@ -12,7 +12,7 @@ checks loose climatological ranges (spin-up tolerant — this is a
     precip   = clouds.precip_rain + precip_snow + convection.precip_conv
                (kg/m2/s -> mm/day)                              2 - 4 mm/day
     cloud    = ECHAM total cover aclcov (clouds.total_cloud_cover) 0.5 - 0.9
-               (SPEEDY: its own shortwave_rad.cloudc)           0.4 - 0.8
+               (SPEEDY: radiation.total_cloud_cover, else cloudc) 0.4 - 0.8
     near-sfc T = temperature at the lowest level                278 - 295 K
 
 Also scans every saved variable for NaN/Inf and, with --log, reports the
@@ -20,6 +20,25 @@ settled sim-days/hr (last chunk wall) for runtime-regression tracking.
 Exit code 0 = all checks pass. ``--json FILE`` also writes every printed
 gate, reported value and aerosol statistic as JSON, for dashboards that must
 score a run with exactly these definitions.
+
+``--last-n`` scopes the gates above and the JAM block's drift/ledger/mean
+statistics, but NOT its annual-budget statistic (``dust_emission_tg_per_yr``):
+that one reads the whole run directory's trailing year regardless, because
+the band it is scored against is drawn on a full year and a ``--last-n``
+short of one measures the season rather than the year (#1010; see
+``aerosol_stats.collect_windows``). ``health.json``'s ``aerosol_stats``
+records each annual statistic's own ``*_window_days`` beside it, since it can
+differ from the drift/ledger window.
+
+On a warm-started or second JAM year, the drift/ledger/mean statistics ALSO
+ignore ``--last-n`` (#1081): that window exists to skip a cold start's
+spin-up ramp, which a warm start never has. ``--warm-start`` controls this
+(default ``auto``, which detects ``init.kind=from_state`` from the run's own
+``.hydra/config.yaml``); the climatological gates above (TOA, precip, cloud,
+AOD) still score ``--last-n``'s window either way. POA and BC additionally
+get a periodic-box correction on that whole-record drift slope; see
+``aerosol_stats.py``'s module docstring and
+``docs/source/design/jam_regression.md``.
 
 Cloud cover
 -----------
@@ -44,9 +63,14 @@ mean fraction and, where cloud moved between layers, lowers the overlap-derived
 cover. It is a fallback for archived output, not an equal alternative: an
 estimate whose bias is usually low but can have either sign, never a bound.
 
-A SPEEDY run instead scores its own ``shortwave_rad.cloudc``, which is already
-a column cover and has no profile to overlap — so it is a **different
-quantity**, gated on its own band (``RANGES["cloud_cover_speedy"]``). Nothing
+A SPEEDY run instead scores its own column cover, which has no profile to
+overlap — so it is a **different quantity**, gated on its own band
+(``RANGES["cloud_cover_speedy"]``). It is ``radiation.total_cloud_cover``, the
+cover SPEEDY's shortwave sees (the free-troposphere cover ``cloudc`` and the
+stratocumulus cover ``cloudstr`` in random overlap), and, for output written
+before SPEEDY published it, ``shortwave_rad.cloudc`` alone: that misses the
+stratocumulus deck, which the calibrated ``speedy-t31`` leans on (cloudc 0.43,
+total 0.58 against ESA-CCI's 0.63). Nothing
 about it changed with the ECHAM definition, and shifting its band with the
 ECHAM one would tighten a floor it sits closest to for a reason that does not
 apply to it.
@@ -57,6 +81,15 @@ different questions and have no agreed band of their own:
 of the saved ``clouds.cloud_fraction``, kept so the #638 and #782
 release-validation tables stay readable; ``cloud_cover_radiation`` is the McICA sub-column cover the RRTMGP
 flux solve integrates, under the configured overlap and decorrelation length.
+
+``cloud_cover_tau`` is the McICA cover counting only sub-columns whose cloud
+optical depth at 550 nm exceeds ``RadiationParameters.tau_threshold`` (default
+0.3; ``radiation.total_cloud_cover_tau``): the cover an imager's cloud mask
+(ESA-CCI AVHRR detects down to a column optical depth of about 0.2; Karlsson &
+Hakansson 2018, AMT 11, 633) can see, hence the one to compare with the
+observed ``cloud_cover_obs``. It is reported only when the run saved a
+non-zero field (RRTMGP radiation) and is never gated; see
+``docs/source/design/cloud_cover_gate.md``.
 
 ``cloud_cover_radiation`` is a **different measurement, not a consistency
 check** on the gate: it is built from ``effective_cloud_fraction`` (which
@@ -99,10 +132,11 @@ for _p in (str(_REPO), str(_TOOLS)):
 from jcm.analysis import (  # noqa: E402
     area_weights, global_mean, total_cloud_cover)
 from aerosol_stats import (  # noqa: E402
-    _AOD_KEYS, BURDEN_RANGES, anchor_gates, chunk_day, collect, format_table,
+    _AOD_KEYS, BURDEN_RANGES, anchor_gates, collect_windows, format_table,
     is_jam_run, positive_int,
-    missing_jam_diagnostics, physics_gates, run_files, summarize,
-    timestep_seconds, unscored_gates)
+    missing_jam_diagnostics, other_population_species, physics_gates,
+    resolve_warm_start, run_files, summarize, timestep_seconds,
+    unscored_gates)
 
 RANGES = {
     "toa_net_wm2": (-10.0, 10.0),
@@ -128,13 +162,12 @@ RANGES = {
     # definition. Derivation and the measured tables:
     # docs/source/design/cloud_cover_gate.md.
     "cloud_cover": (0.5, 0.9),
-    # SPEEDY scores a different quantity and so gets its own band. Its
-    # ``shortwave_rad.cloudc`` is the scheme's own RH-based column cover
-    # (speedy_shortwave.py), not an overlap of a profile, and no part of this
-    # definition work touched it — so the max-random offset that places the
-    # band above does not apply, and applying it anyway would tighten a floor
-    # the member is already closest to. The recorded values are 0.57 (#638)
-    # and 0.58 (#782), both comfortably inside.
+    # SPEEDY scores a different quantity and so gets its own band: the column
+    # cover its shortwave sees (radiation.total_cloud_cover; cloudc for older
+    # output), not an overlap of a profile, so the max-random offset that
+    # places the band above does not apply. Recorded: cloudc 0.57 (#638) and
+    # 0.58 (#782) at the reference parameters, total 0.63 at dev and 0.58 for
+    # the calibrated speedy-t31 (docs/source/design/speedy_retune.md).
     "cloud_cover_speedy": (0.4, 0.8),
     "near_surface_T": (278.0, 295.0),
     # Global-mean 550 nm AOD: JAM's jam_optics.aod_550 or MACv2-SP's
@@ -147,6 +180,9 @@ RANGES = {
 #: The saved field holding ECHAM's ``aclcov``, accumulated online from the
 #: instantaneous cloud fraction (``CloudData.total_cloud_cover``).
 ONLINE_COVER = "clouds.total_cloud_cover"
+#: SPEEDY's cover as its shortwave sees it: ``cloudc`` and the stratocumulus
+#: ``cloudstr`` in random overlap.
+SPEEDY_TOTAL_COVER = "radiation.total_cloud_cover"
 
 #: Observed total cloud cover printed beside the gate, as ``(value, source)``:
 #: the area-weighted global mean of ESA-CCI CLOUD v3.0 AVHRR-AMPM ``clt``,
@@ -165,14 +201,25 @@ def wmean(da, weights):
     return float(global_mean(da, weights))
 
 
-def files_with_online_cover(files):
-    """Return the subset of ``files`` that carry :data:`ONLINE_COVER` (headers only)."""
-    carriers = []
+def partial_variables(files):
+    """Map each variable that only some of ``files`` save to the files that do.
+
+    Headers only. A run resumed across a change of what the model publishes
+    (ECHAM's online cover, SPEEDY's ``radiation.*`` and clear-sky fields, a
+    renamed carry field) has chunks with and without such a variable, and
+    ``open_mfdataset`` fills the frames of the chunks without it with NaN: a
+    value the model never saved.
+    """
+    present = []
     for f in files:
         with xr.open_dataset(f) as one:
-            if ONLINE_COVER in one.variables:
-                carriers.append(f)
-    return carriers
+            present.append(set(one.data_vars))
+    everywhere = set.intersection(*present) if present else set()
+    partial = {}
+    for f, names in zip(files, present):
+        for v in sorted(names - everywhere):
+            partial.setdefault(v, []).append(f)
+    return partial
 
 
 def cloud_cover_basis(ds, speedy):
@@ -181,12 +228,14 @@ def cloud_cover_basis(ds, speedy):
     ``"online"`` — ``clouds.total_cloud_cover``, ECHAM's ``aclcov`` accumulated
     in the model; ``"offline_mean_profile"`` — the max-random overlap of the
     saved ``clouds.cloud_fraction``, for output that carries no online cover;
-    ``"speedy_cloudc"`` — SPEEDY's own column cover. The one place that
+    ``"speedy_total"`` — SPEEDY's ``radiation.total_cloud_cover`` (the cover its
+    shortwave sees); ``"speedy_cloudc"`` — its free-troposphere ``cloudc``
+    alone, for output written before the total was published. The one place that
     decides, so the field :func:`cloud_cover_fields` scores and the label
     :func:`main` prints cannot disagree.
     """
     if speedy:
-        return "speedy_cloudc"
+        return "speedy_total" if SPEEDY_TOTAL_COVER in ds else "speedy_cloudc"
     return "online" if ONLINE_COVER in ds else "offline_mean_profile"
 
 
@@ -211,17 +260,23 @@ def cloud_cover_fields(ds, speedy):
     the saved ``clouds.cloud_fraction`` (:func:`cloud_cover_basis` decides, and
     :func:`main` prints which), ``cloud_cover_colmax`` the column maximum kept for
     continuity with the earlier tables, and ``cloud_cover_radiation`` the McICA
-    sub-column cover when the run saved a non-zero one. It is absent from
+    sub-column cover when the run saved a non-zero one, and ``cloud_cover_tau``
+    the detection-thresholded sub-column cover under the same condition. It is absent from
     output written before the diagnostic existed (``b772ffec``, 2026-07-31) and
     identically zero under grey two-stream radiation, which samples no
     sub-columns; both cases drop the key rather than report a zero as if it
     were a measurement. The NN emulator does publish it — the analytic
     expectation of the same McICA draw.
 
-    SPEEDY dialect: ``shortwave_rad.cloudc`` is already the scheme's own
-    column cover, so there is nothing to overlap and nothing to cross-check.
+    SPEEDY dialect: the column cover its shortwave sees,
+    ``radiation.total_cloud_cover``, else (older output) ``shortwave_rad.cloudc``
+    (:func:`cloud_cover_basis`); with the total, ``cloud_cover_cloudc`` reports
+    the free-troposphere part beside it. Nothing to overlap.
     """
     if speedy:
+        if cloud_cover_basis(ds, speedy) == "speedy_total":
+            return {"cloud_cover": ds[SPEEDY_TOTAL_COVER],
+                    "cloud_cover_cloudc": ds["shortwave_rad.cloudc"]}, None
         return {"cloud_cover": ds["shortwave_rad.cloudc"]}, None
 
     cloud_fraction = ds["clouds.cloud_fraction"]
@@ -231,6 +286,15 @@ def cloud_cover_fields(ds, speedy):
                         else total_cloud_cover(cloud_fraction)),
         "cloud_cover_colmax": cloud_fraction.max("level"),
     }
+    # The detection-thresholded McICA cover (RRTMGP only): reported whenever
+    # the run saved a non-zero one, independently of the radiation cover
+    # below. An identically-zero field is the "not computed" signature of the
+    # grey and emulator schemes (and of output written before the field
+    # existed it is simply absent), so it is dropped rather than reported as a
+    # cloudless sky.
+    tau_cover = ds.get("radiation.total_cloud_cover_tau")
+    if tau_cover is not None and bool((tau_cover != 0.0).any()):
+        fields["cloud_cover_tau"] = tau_cover
     radiation_cover = ds.get("radiation.total_cloud_cover")
     if radiation_cover is None:
         return fields, ("the window saves no radiation.total_cloud_cover "
@@ -251,6 +315,18 @@ def main():
     ap.add_argument("--log")
     ap.add_argument("--last-n", type=positive_int, default=None,
                     help="use only the last N chunks (default: all)")
+    ap.add_argument("--warm-start", choices=("auto", "yes", "no"),
+                    default="auto",
+                    help="is this record warm-started or a second year (no "
+                         "cold-start spin-up ramp)? Affects only the JAM "
+                         "aerosol block's REQUEST window (#1081): when yes, "
+                         "its drift/ledger/mean statistics are scored over "
+                         "the WHOLE run -- --last-n above still applies to "
+                         "the climatological gates -- and POA/BC get the "
+                         "box-model correction. 'auto' (default) detects "
+                         "init.kind=from_state from the run's "
+                         ".hydra/config.yaml and falls back to cold-start "
+                         "when that is absent")
     ap.add_argument("--json", metavar="FILE",
                     help="also write the gates and reported values as JSON")
     a = ap.parse_args()
@@ -261,34 +337,49 @@ def main():
     # Same discovery as aerosol_stats.run_files, so the two cannot disagree
     # about which files are chunks (``run.snapshot_interval`` writes a
     # ``_day<N>_snapshots.nc`` stream that a ``*_day*.nc`` glob also matches).
-    files = run_files(a.run_dir)
-    if not files:
+    all_files = run_files(a.run_dir)
+    if not all_files:
         print(f"FAIL  no chunk files in {a.run_dir}")
         report["overall"] = "FAIL"
         _write_json(a.json, report)
         return 1
-    # The label of the chunk before a ``--last-n`` slice is the retained
-    # window's start; ``chunk_centres`` needs it to place the first node.
-    window_start = None
-    if a.last_n:
-        if a.last_n < len(files):
-            window_start = chunk_day(files[-a.last_n - 1])
-        files = files[-a.last_n:]
+    # Resolved once, up front: used only by the JAM block's REQUEST window
+    # below (the climatological gates keep their own --last-n window
+    # unchanged, and the ANNUAL window (#1010) already ignores --last-n
+    # unconditionally either way).
+    warm, warm_reason = resolve_warm_start(a.warm_start, a.run_dir)
+    report["info"]["warm_start"] = warm
+    report["info"]["warm_start_reason"] = warm_reason
+    # The --last-n slice: the settled window the gates below (NaN scan, TOA,
+    # precip, cloud cover, near-surface T) score, and the one the aerosol
+    # block's drift/ledger/mean statistics score too. Its annual-budget
+    # statistic (dust_emission_tg_per_yr) needs more than this slice offers
+    # when it is short of a year, so it is resolved separately from
+    # ``all_files`` by collect_windows() in the JAM block below (#1010).
+    files = (all_files[-a.last_n:] if a.last_n and a.last_n < len(all_files)
+             else all_files)
     ds = xr.open_mfdataset(files, combine="by_coords")
-    # A run resumed across the introduction of ``clouds.total_cloud_cover`` has
-    # chunks with and without it, and ``open_mfdataset`` fills the missing
-    # frames with NaN, which would fail the NaN scan of a healthy run and score
-    # the cover of only the later frames. A window that is not wholly online is
-    # scored wholly offline, and says so; the field's real values in the chunks
-    # that carry it are still scanned for NaN/Inf below, from those chunks alone.
-    carriers = files_with_online_cover(files)
-    n_online = len(carriers)
-    mixed_window = 0 < n_online < len(files)
-    online_in_carriers = None
-    if mixed_window:
-        online_in_carriers = xr.open_mfdataset(
-            carriers, combine="by_coords")[ONLINE_COVER]
-        ds = ds.drop_vars(ONLINE_COVER)
+    # A run resumed across a change of what the model saves has chunks with and
+    # without some variables, and ``open_mfdataset`` fills the missing frames
+    # with NaN, which would fail the NaN scan of a healthy run and score a gate
+    # field over the later frames only. Every such variable is scanned for
+    # NaN/Inf below from the chunks that saved it alone, and leaves the merged
+    # window: a window that is not wholly online (ECHAM's
+    # ``clouds.total_cloud_cover``) or wholly SPEEDY-total
+    # (``radiation.total_cloud_cover``) scores the older cover over the whole
+    # window, and says so.
+    partial = partial_variables(files)
+    mixed_window = ONLINE_COVER in partial
+    n_online = len(partial[ONLINE_COVER]) if mixed_window else 0
+    n_speedy_total = len(partial.get(SPEEDY_TOTAL_COVER, ()))
+    partial_scans = {}
+    by_carriers = {}
+    for v, carriers in partial.items():
+        by_carriers.setdefault(tuple(carriers), []).append(v)
+    for carriers, names in by_carriers.items():
+        held = xr.open_mfdataset(list(carriers), combine="by_coords")
+        partial_scans.update({v: held[v] for v in names})
+    ds = ds.drop_vars(list(partial))
     weights = area_weights(ds)
 
     ok = True
@@ -309,8 +400,7 @@ def main():
     # dask-backed window the former reduces chunk by chunk, the latter pulls
     # every variable of the whole window into memory one at a time.
     scanned = {v: ds[v] for v in ds.data_vars}
-    if online_in_carriers is not None:
-        scanned[ONLINE_COVER] = online_in_carriers
+    scanned.update(partial_scans)
     bad = []
     for v, da in scanned.items():
         if not bool(np.isfinite(da).all()):
@@ -355,6 +445,10 @@ def main():
         print(f"NOTE  cloud_cover is the max-random overlap of the saved "
               f"clouds.cloud_fraction (offline overlap of the saved mean "
               f"profile; usually biased low, not a bound): {why}")
+    if basis == "speedy_cloudc" and n_speedy_total:
+        print(f"NOTE  cloud_cover is SPEEDY's free-troposphere cloudc: only "
+              f"{n_speedy_total} of {len(files)} chunks save "
+              f"{SPEEDY_TOTAL_COVER}")
     obs_value, obs_source = OBS_CLOUD_COVER
     print(f"INFO  cloud_cover_obs = {obs_value:.2f} ({obs_source}; "
           "reference, not gated)")
@@ -364,7 +458,8 @@ def main():
     # release-validation tables forward, the McICA cover says what the flux
     # solve saw (a different measurement, not a check on the gate — see the
     # module docstring).
-    for name in ("cloud_cover_colmax", "cloud_cover_radiation"):
+    for name in ("cloud_cover_colmax", "cloud_cover_radiation",
+                 "cloud_cover_tau", "cloud_cover_cloudc"):
         if name in cover:
             report["info"][name] = wmean(cover[name], weights)
             print(f"INFO  {name} = {report['info'][name]:.2f} "
@@ -403,13 +498,33 @@ def main():
         for namespace in missing_jam_diagnostics(ds):
             print(f"NOTE  no {namespace}.* diagnostics saved; the aerosol "
                   "statistics that read them are absent from the report")
-        days, series = collect(files)
+        # (days, series, window_start) is the --last-n request above, UNLESS
+        # this is a warm-started/second year (#1081): then --last-n is
+        # ignored for this window (the climatological gates above still used
+        # it) because there is no cold-start spin-up ramp to skip, and the
+        # whole run is scored instead. The annual-budget statistic
+        # (dust_emission_tg_per_yr) is unaffected either way — it is scored
+        # on the whole run directory's trailing year regardless of
+        # --last-n (#1010) — see aerosol_stats.collect_windows and
+        # summarize()/unscored_gates().
+        aerosol_last_n = None if warm else a.last_n
+        if warm and a.last_n:
+            print(f"NOTE  --last-n {a.last_n} applies to the climatological "
+                  f"gates above but not the aerosol drift/ledger/mean "
+                  f"window: {warm_reason} -- the whole run "
+                  f"({len(all_files)} chunks) is scored there "
+                  "(jam_regression.md)")
+        request, annual = collect_windows(all_files, aerosol_last_n)
+        days, series, window_start = request
+        annual_days, annual_series, annual_window_start = annual
         # The dynamics-conservation gate is per STEP, so it needs the run's
         # timestep; ``unscored_gates`` reports it when either is missing.
         dt = timestep_seconds(a.run_dir)
-        stats = summarize(days, series, dt, window_start)
+        stats = summarize(days, series, dt, window_start,
+                          annual_days, annual_series, annual_window_start)
+        other = other_population_species(series)
         for sp in BURDEN_RANGES:
-            if f"burden_{sp}_mg_m2" not in stats:
+            if f"burden_{sp}_mg_m2" not in stats and sp not in other:
                 print(f"NOTE  no {sp} mass tracers; skipping burden")
         # Anchors and physics gates share one implementation with the
         # standalone scorer, so the two commands cannot disagree about a run.
@@ -420,13 +535,24 @@ def main():
             report["gates"].append({"name": name, "value": value,
                                     "limit": str(limit), "pass": good})
             ok = ok and good
-        unscored = unscored_gates(days, series, dt, window_start)
+        unscored = unscored_gates(days, series, dt, window_start,
+                                  annual_days, annual_series,
+                                  annual_window_start)
         for name, reason in unscored:
             print(f"UNSCORED  {name}: {reason}")
             report["unscored"][name] = reason
         if unscored:
             print(f"NOTE  {len(unscored)} aerosol gate(s) could not be "
                   "evaluated; they have passed nothing")
+        if "dust_window_days" in stats and window_start != annual_window_start:
+            # dust_emission_tg_per_yr's window_days (in ``stats``, printed
+            # below) differs from record_days (the window above): say so
+            # explicitly rather than leaving a reader to notice the two
+            # numbers in the table disagree (#1010).
+            print(f"NOTE  dust_emission_tg_per_yr is scored over the run "
+                  f"directory's whole trailing year "
+                  f"({stats['dust_window_days']:.0f} days), not the "
+                  f"--last-n window above ({stats['record_days']:.0f} days)")
         print()
         print(format_table(stats, []))
         report["aerosol_stats"] = stats

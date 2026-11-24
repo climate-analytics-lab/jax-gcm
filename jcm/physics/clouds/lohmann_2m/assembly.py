@@ -286,7 +286,16 @@ def update_tendencies_and_important_vars(
 
 
 def update_in_cloud_water(
-    pressure: jnp.ndarray,               # Original: pap
+    aerosol_number_available: jnp.ndarray,  # Original: pap -- NOT pressure
+    # Original: pcdncact. Fortran F2594 reads this (``pcdncact``) UNMASKED
+    # against the in-cloud droplet number (``ztmp1 = pcdncact - pcdnc``, no
+    # ``paclc``/cloud-fraction factor) -- the same read ECHAM's two
+    # section-1 sources (#1160) use. The caller (``cloud_microphysics_2m``)
+    # passes its resolved ``activation_potential``, not the SPA-style
+    # ``spa_activated_cdnc`` grid-mean floor: that floor's cloud_fraction
+    # factor is a deliberate design choice for ITS OWN use as a per-cell
+    # ``Nc_min`` bound, not a stand-in for ECHAM's unmasked activation
+    # diagnostic at a possibly-different cell (jax-gcm#1161).
     activated_cdnc: jnp.ndarray,         # Original: pcdncact
     condensation_rate: jnp.ndarray,      # Original: pcnd
     deposition_rate: jnp.ndarray,        # Original: pdep
@@ -332,7 +341,7 @@ def update_in_cloud_water(
     7. Enforce CDNC >= computed minimum (pcdnc_min) or = cqtmin where no cloud present.
     8. Update ICNC where cloud ice present and below icemin:
        - nic_cirrus==1: prognostic conversion from ice mass -> number using rhoice and prid
-       - nic_cirrus==2: use pnicex (capped by pressure*1e6)
+       - nic_cirrus==2: use pnicex (capped by aerosol_number_available)
        Then enforce picnc >= icemin (or cqtmin where no cloud).
 
     Parameters
@@ -489,8 +498,18 @@ def update_in_cloud_water(
         )
         icnc_candidate = jnp.minimum(prefactor / r_safe_scaled**3, params.icemax)
     elif params.nic_cirrus == 2:
-        # min(pnicex, pap*1e6)
-        icnc_candidate = jnp.minimum(newly_formed_ice, pressure * 1.0e6)
+        # min(pnicex, pap*1e6) -- mo_cloud_micro_2m.f90:2618. ``pap`` here is
+        # NOT the generic ECHAM pressure convention: this subroutine's own
+        # ``pap`` is declared "total number of aerosols available"
+        # (:2520), fed at the call site (:1507) from ``zap`` (the per-level,
+        # mode-summed, ICNC-depleted aerosol number), not ``papm1``. It is
+        # taken directly in SI (1/m3), with the *1e6
+        # unit conversion moved to the caller (which already needs 1/cm3
+        # for ``xfrzmstr``, so the conversion happens once there, not
+        # twice). ``nic_cirrus==2`` is the only path that reads this
+        # argument, so the rename cannot move any other preset's result.
+        icnc_candidate = jnp.minimum(
+            newly_formed_ice, aerosol_number_available)
     else:
         # default: leave unchanged candidate (set to existing to be MERGE-safe)
         icnc_candidate = ice_crystal_number

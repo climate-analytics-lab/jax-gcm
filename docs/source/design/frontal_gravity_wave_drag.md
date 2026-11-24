@@ -50,10 +50,10 @@ upper interface is above 600 hPa, from reference pressures `a + b·p0`).
 - `frontogenesis.py` provides the field for **separable lat-lon grids**
   (dinosaur backend): centered differences with spherical metric factors
   (`1/(a cos φ) ∂λ`, `1/a ∂φ`), periodic in longitude, one-sided at the
-  first/last latitude rows. Unstructured-grid (pySES pg2 / SE-GLL)
-  stencils are **out of scope** — those backends must supply their own
-  `"frontogenesis"` diagnostic. Wiring a provider into each backend (and
-  composing the term into `echam_physics()`) is a follow-up.
+  first/last latitude rows. Unstructured grids supply
+  their own: `PysesCamSEDycore(compute_frontogenesis=True)` uses weak-form
+  GLL gradients + DSS averaged to pg2 (CAM-SE's own `compute_frontogenesis`).
+  `echam_physics(gw_scheme="frontal"|"both")` composes the term.
 
 ## Deviations from CAM (complete list)
 
@@ -183,9 +183,7 @@ the physics buffer. jcm mirrors this with a `DynamicalCore` hook:
 - `DinosaurDycore(compute_frontogenesis=True)` enables the lat-lon
   provider (theta from the core's own hybrid/sigma coefficients, then
   `frontogenesis_function`; spectral-gradient upgrade possible).
-  The pySES/pg2 provider (weak-form GLL gradients + DSS + gll_to_fv,
-  i.e. CAM-SE's own compute_frontogenesis) is a follow-up.
-- `echam_physics(gw_scheme="hines" | "frontal" | "none")` selects the
-  non-orographic GW scheme; the two schemes are exclusive alternatives
-  (same physical role — running both would double-count mid-atmosphere
-  drag unless retuned together).
+- `echam_physics(gw_scheme="hines" | "frontal" | "both" | "none")` selects the
+  non-orographic GW scheme. `"both"` runs the two together; they share a
+  physical role, so it double-counts mid-atmosphere drag unless `taubgnd` and
+  the Hines source are retuned jointly.

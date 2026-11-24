@@ -1,8 +1,109 @@
 """Phase 6 tests: harness factory + echam_physics(aerosol_module="jam")."""
 
+import contextlib
+import sys
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import pytest
+
+
+class OptionalCoreInstallHintTest(unittest.TestCase):
+    """A missing optional microphysics core says how to install it.
+
+    The default JAM configuration runs M7, whose m7-jax is not on PyPI, so a
+    bare ``No module named 'm7_jax'`` would leave a PyPI user stuck. The core
+    is made absent here (``None`` in ``sys.modules``) whatever this
+    environment has installed, and its adapter unloaded so it re-imports.
+    """
+
+    M7_ADAPTER = "jcm.physics.aerosol.jam.microphysics.m7_jax"
+    MAM4_ADAPTER = "jcm.physics.aerosol.jam.microphysics.mam4_jax"
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _absent(package, adapter):
+        """``package`` uninstallable and ``adapter`` unloaded, for the block.
+
+        Only these two ``sys.modules`` keys are saved and restored. Restoring
+        the whole dict would also drop every module first imported inside the
+        block (the adapter's own imports), while their parent packages kept
+        them as attributes: a later ``from pkg import mod`` would then return
+        that copy and a dotted import load a second one.
+        """
+        keys = (package, adapter)
+        saved = {key: sys.modules[key] for key in keys if key in sys.modules}
+        sys.modules.pop(adapter, None)
+        sys.modules[package] = None
+        try:
+            yield
+        finally:
+            for key in keys:
+                sys.modules.pop(key, None)
+            sys.modules.update(saved)
+
+    def test_missing_m7_core_names_the_github_preinstall(self):
+        from jcm.physics.aerosol.jam import jam_terms
+        from jcm.physics.aerosol.jam.microphysics import M7_JAX_REQUIREMENT
+        with self._absent("m7_jax", self.M7_ADAPTER), \
+                self.assertRaises(ModuleNotFoundError) as cm:
+            jam_terms._load_m7_jax()
+        message = str(cm.exception)
+        self.assertIn(f'pip install "{M7_JAX_REQUIREMENT}"', message)
+        self.assertIn("jcm[m7]", message)
+        self.assertIn("t63-echam-jam-mam4", message)
+        self.assertEqual(cm.exception.name, "m7_jax")
+
+    def test_missing_mam4_core_names_its_extra(self):
+        from jcm.physics.aerosol.jam import jam_terms
+        with self._absent("mam4_jax", self.MAM4_ADAPTER), \
+                self.assertRaises(ModuleNotFoundError) as cm:
+            jam_terms._load_mam4_jax()
+        self.assertIn("pip install 'jcm[mam4]'", str(cm.exception))
+        self.assertIn("mam4_jax_astem", str(cm.exception))
+        self.assertEqual(cm.exception.name, "mam4_jax")
+
+    def test_package_attribute_gives_the_same_hint(self):
+        """``microphysics.M7JaxMicrophysics`` is the other way in."""
+        from jcm.physics.aerosol.jam import microphysics
+        with self._absent("m7_jax", self.M7_ADAPTER), \
+                self.assertRaises(ModuleNotFoundError) as cm:
+            microphysics.M7JaxMicrophysics  # noqa: B018
+        self.assertIn(microphysics.M7_JAX_REQUIREMENT, str(cm.exception))
+
+    def test_a_missing_dependency_of_the_core_keeps_its_message(self):
+        """A broken install is not reworded as a missing core."""
+        from jcm.physics.aerosol.jam import jam_terms, microphysics
+        broken = ModuleNotFoundError("No module named 'some_dependency'",
+                                     name="some_dependency")
+        with mock.patch.object(microphysics.importlib, "import_module",
+                               side_effect=broken), \
+                self.assertRaises(ModuleNotFoundError) as cm:
+            jam_terms._load_m7_jax()
+        self.assertIs(cm.exception, broken)
+
+    def test_only_the_core_itself_is_reworded(self):
+        """A module the core's own code imports keeps its own message."""
+        from jcm.physics.aerosol.jam.microphysics import _missing_core
+        self.assertTrue(_missing_core(
+            ModuleNotFoundError(name="m7_jax.model"), "m7_jax"))
+        self.assertFalse(_missing_core(
+            ModuleNotFoundError(name="some_dependency"), "m7_jax"))
+        self.assertFalse(_missing_core(ModuleNotFoundError(), "m7_jax"))
+
+    def test_m7_requirement_is_the_preinstall_and_documented_line(self):
+        """One commit everywhere a user or CI reads the m7-jax install."""
+        from jcm.physics.aerosol.jam.microphysics import M7_JAX_REQUIREMENT
+        root = Path(__file__).resolve().parents[4]
+        preinstall = (root / "tools" / "ci" / "extras_preinstall.txt")
+        self.assertIn(M7_JAX_REQUIREMENT,
+                      [line.strip() for line in
+                       preinstall.read_text().splitlines()])
+        for doc in ("getting_started.rst", "advanced_features.rst",
+                    "running_at_scale.rst"):
+            text = (root / "docs" / "source" / doc).read_text()
+            self.assertIn(f'pip install "{M7_JAX_REQUIREMENT}"', text, doc)
 
 
 class JamFactoryTest(unittest.TestCase):
@@ -77,6 +178,147 @@ class JamFactoryTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             jam_aerosol_physics(microphysics="m7")
+
+    def test_nucleation_activation_derives_from_activation_scheme(self):
+        """``wetdep_scheme="ham"`` with ``nucleation_activation=None`` (the
+
+        default) composes the WetScavenging term with ``nucleation_
+        activation`` following ``activation_scheme`` -- ``ic_scav_nuc``
+        always reads whatever activation term was actually composed
+        (jax-gcm#1045 review).
+        """
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetScavenging
+
+        for scheme in ("ham_arg", "ham_lin_leaitch"):
+            terms = jam_aerosol_physics(
+                microphysics="m7_placeholder", wetdep_scheme="ham",
+                activation_scheme=scheme)
+            wetdep = next(t for t in terms if isinstance(t, WetScavenging))
+            self.assertEqual(wetdep._nucleation_activation, scheme)
+
+    def test_nucleation_activation_mismatch_with_activation_scheme_raises(self):
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+
+        with self.assertRaisesRegex(ValueError, "match activation_scheme"):
+            jam_aerosol_physics(
+                microphysics="m7_placeholder", wetdep_scheme="ham",
+                activation_scheme="ham_arg",
+                nucleation_activation="ham_lin_leaitch")
+
+    def test_activation_parameters_must_match_the_scheme(self):
+        """An ``activation`` object of the other scheme's class is refused at
+        composition, not at the first step.
+        """
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+        from jcm.physics.aerosol.jam.activation.arg_term import ArgParameters
+
+        with self.assertRaisesRegex(TypeError, "HamActivationParameters"):
+            jam_aerosol_physics(
+                microphysics="m7_placeholder", activation_scheme="ham_arg",
+                activation=ArgParameters.default())
+
+    def test_wetdep_ham_rejects_cam_arg_activation_scheme(self):
+        """``activation_scheme="arg"`` (CAM's own, the default) has no
+
+        ``ncd_activ`` analogue, so it cannot pair with
+        ``wetdep_scheme="ham"`` even with ``nucleation_activation`` left
+        at its default.
+        """
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+
+        with self.assertRaisesRegex(ValueError, "activation_scheme"):
+            jam_aerosol_physics(
+                microphysics="m7_placeholder", wetdep_scheme="ham")
+
+    def test_nucleation_activation_unused_for_non_ham_wetdep(self):
+        """A non-"ham" ``wetdep_scheme`` never consults
+
+        ``nucleation_activation``, so a mismatched explicit value is not an
+        error -- it resolves to an inert placeholder on the composed term.
+        """
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetScavenging
+
+        terms = jam_aerosol_physics(
+            activation_scheme="arg", wetdep_scheme="jcm",
+            nucleation_activation="ham_lin_leaitch")
+        wetdep = next(t for t in terms if isinstance(t, WetScavenging))
+        self.assertEqual(wetdep.scheme, "jcm")
+    def test_microphysics_options_unknown_key_raises_naming_core_and_keys(self):
+        # PlaceholderMicrophysics.__init__ takes no keyword beyond ``spec``,
+        # so every key is unknown for it — the simplest core to exercise the
+        # validation with (jax-gcm#1017 task 6).
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+
+        with self.assertRaises(ValueError) as ctx:
+            jam_aerosol_physics(
+                microphysics="placeholder",
+                microphysics_options={"nucleation_scheme": 2},
+            )
+        message = str(ctx.exception)
+        self.assertIn("placeholder", message)
+        self.assertIn("nucleation_scheme", message)
+
+    def test_microphysics_options_rejected_with_an_instance_core(self):
+        # An already-constructed core has made its own choices (or taken
+        # its own defaults); microphysics_options would be ambiguous there,
+        # so it is an error rather than a silent no-op.
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+        from jcm.physics.aerosol.jam.microphysics.placeholder import (
+            PlaceholderMicrophysics,
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            jam_aerosol_physics(
+                microphysics=PlaceholderMicrophysics(),
+                microphysics_options={"anything": 1},
+            )
+        self.assertIn("microphysics_options", str(ctx.exception))
+
+    def test_microphysics_options_pass_through_to_a_string_named_core(self):
+        # A tiny fake core (not the real m7_jax adapter, which needs the
+        # optional jcm[m7] extra) exercises the pass-through path: the
+        # mapping reaches the core's own constructor, unknown keys still
+        # raise, and ``None`` still means "no options" for every untouched
+        # core (jax-gcm#1017 task 6, deliverable 2).
+        from jcm.physics.aerosol.jam.jam_terms import _MICROPHYSICS, _build_core
+        from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
+        from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
+
+        received = {}
+
+        class _FakeCore(ModalMicrophysicsTerm):
+            name = "fake_core_for_options_test"
+            spec = MAM4_SPEC
+
+            def __init__(self, spec=None, *, favourite_number=0):
+                received["favourite_number"] = favourite_number
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                raise NotImplementedError
+
+        try:
+            _MICROPHYSICS["_fake_for_options_test"] = (
+                lambda spec, options: _build_core(
+                    _FakeCore, spec, options, "_fake_for_options_test"))
+
+            from jcm.physics.aerosol.jam.jam_terms import _resolve_microphysics
+
+            core = _resolve_microphysics(
+                "_fake_for_options_test", None, {"favourite_number": 7})
+            self.assertIsInstance(core, _FakeCore)
+            self.assertEqual(received["favourite_number"], 7)
+
+            with self.assertRaises(ValueError) as ctx:
+                _resolve_microphysics(
+                    "_fake_for_options_test", None, {"bogus_key": 1})
+            message = str(ctx.exception)
+            self.assertIn("_fake_for_options_test", message)
+            self.assertIn("bogus_key", message)
+            self.assertIn("favourite_number", message)
+        finally:
+            del _MICROPHYSICS["_fake_for_options_test"]
 
     def test_harness_declares_aerosol_tracers(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, jam_aerosol_physics, tracer_specs

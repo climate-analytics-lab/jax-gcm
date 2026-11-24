@@ -158,13 +158,13 @@ class FrontogenesisProviderTest(unittest.TestCase):
             dycore=dycore,
             physics=idealized_echam_physics(
                 gw_scheme="frontal",
-                # pySES computes omega internally but exposes no provider
-                # for it (#698), so ECHAM's ``lmfmid`` mid-level convection
-                # trigger cannot run on this backend. Turning it off with
-                # the reference's own namelist switch is the documented
-                # escape hatch; the Model contract check would otherwise
-                # (correctly) refuse to build. Exercised here so the hatch
-                # stays working.
+                # Off here purely to keep this test focused on the
+                # frontogenesis provider alone: pySES can supply omega too
+                # (jax-gcm#698; see omega_provider_test.py for that path),
+                # but ECHAM's own namelist switch remains a valid way to
+                # turn ``cubasmc`` off for a composition that wants to skip
+                # the extra per-step omega cost. Exercised here so that
+                # escape hatch stays working.
                 convection=ConvectionParameters.default(cu_lmfmid=False),
             ),
         )

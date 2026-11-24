@@ -25,13 +25,18 @@
 # from nx/npt/nlev here. ``run.time_step`` is also ignored (the Model
 # adopts dt_seconds). Requires `pip install jcm[pyses]`.
 #
-# NOTE: pySES exposes no ``omega`` provider (it computes the vertical
-# pressure velocity internally but does not publish it — #698), so ECHAM's
-# ``lmfmid`` mid-level convection trigger (``cubasmc``, #697) cannot run on
-# this backend. Model construction will refuse to build an ECHAM package
-# here until you turn that trigger off with the reference's own switch. The
-# spelling depends on the shape of the physics group you compose, because
-# ``cu_lmfmid`` reaches the term by a different route in each:
+# NOTE: pySES publishes ``omega`` (pressure vertical velocity, Pa/s) as an
+# opt-in diagnostic field (``compute_omega`` below), so ECHAM's ``lmfmid``
+# mid-level convection trigger (``cubasmc``, #697) can run on this backend
+# (jax-gcm#698). ``compute_omega`` defaults false here as a pure cost knob —
+# ``Model`` turns it on automatically for any composed physics that declares
+# ``requires_dycore_fields = ("omega",)`` (TiedtkeConvection with
+# ``cu_lmfmid`` on, the ECHAM default), so most callers never set it
+# directly. A composition that wants ``cubasmc`` off for some other reason
+# (cost, or a production preset pending its own stability validation — see
+# ``configuration/ma-ne30-l{47,95}.yaml`` and jax-gcm#1174) still uses the
+# reference's own switch, whose spelling depends on the shape of the
+# physics group you compose:
 #
 #   # term-list presets (physics=echam, echam-rrtmgp-2m, ...)
 #   +physics.terms.tiedtke_convection.params.cu_lmfmid=false
@@ -41,11 +46,7 @@
 #
 # The wrong one of the two does not silently fall back: a ``terms`` node on a
 # factory-built group is rejected, and the scalar is not a key of a term-list
-# group. The packaged ``+configuration=ma-ne30-l{47,95}`` presets already set
-# the right one, so prefer those.
-#
-# That is a real capability gap, not a formality: elevated convection above
-# a stable layer is simply absent from such a run. Prefer fixing #698.
+# group.
 name: pyses
 nx: 30
 npt: 4
@@ -59,6 +60,11 @@ n_sponge: 8
 tracer_substeps: 5
 dyn_substeps_per_tracer: -1
 compute_frontogenesis: false
+# Omega (Dp/Dt) diagnostic provider — see the NOTE above. ``null``/``false``
+# leaves it to ``Model``'s automatic resolution; set ``true`` only to force
+# it on for a composition that reads ``omega`` without declaring the
+# requirement (e.g. a term using the soft ``diagnostics.get`` pattern).
+compute_omega: false
 # Terrain source. Null -> the packaged T63 climatology (a downscale).
 # Preferred: the assembled native ne30pg3 terrain bundle (GMTED2010 SSO,
 # CESM LANDFRAC land fraction, exact GLL orography from the topo

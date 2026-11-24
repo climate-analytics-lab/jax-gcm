@@ -5,18 +5,28 @@ silently: a bug here does not crash, it reports a plausible wrong number.
 """
 
 import os
+import shutil
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from benchmark import (  # noqa: E402
     PRESETS,
+    _abs_pythonpath,
     _auto_emission_files,
+    _auto_ham_input_files,
     _auto_terrain_files,
+    _check_pythonpath_resolution,
     _compose_preset,
+    _load_expand_yearly_files,
+    _load_ham_inputs,
+    _load_mirror_manifest,
+    _remote,
     _preset_data_files,
+    _pythonpath_jcm_root,
     _summarize_gpu,
     should_keep_output,
 )
@@ -188,6 +198,195 @@ class KeepOutputTest(unittest.TestCase):
         self.assertFalse(should_keep_output({"exit_code": 0}))
 
 
+class AbsPythonpathTest(unittest.TestCase):
+    """Codex review on #1111: a relative ``--pythonpath`` entry means
+    "relative to the caller's cwd", but the preflight probe and the model
+    subprocess (``cwd=REPO``) do not share a cwd -- left relative, the two
+    could resolve the same string to different directories. Normalizing to
+    absolute paths up front removes the ambiguity entirely.
+    """
+
+    def test_relative_entry_is_resolved_against_the_current_directory(self):
+        cwd = os.getcwd()
+        self.assertEqual(_abs_pythonpath("relative/worktree"),
+                         os.path.join(cwd, "relative/worktree"))
+
+    def test_absolute_entry_is_unchanged(self):
+        self.assertEqual(_abs_pythonpath("/already/absolute"),
+                         "/already/absolute")
+
+    def test_none_and_empty_become_none(self):
+        """An empty string isn't a no-op entry: in sys.path semantics it
+        means "the current directory", reintroducing the exact cwd
+        ambiguity -P exists to remove -- so it must be dropped, not kept.
+        """
+        self.assertIsNone(_abs_pythonpath(None))
+        self.assertIsNone(_abs_pythonpath(""))
+
+    def test_empty_segment_within_a_nonempty_value_is_dropped(self):
+        """A stray leading/trailing/doubled separator (e.g. a shell `::`)
+        must not survive into the effective PYTHONPATH as an empty entry.
+        """
+        result = _abs_pythonpath(
+            os.pathsep.join(["/already/absolute", "", "/also/absolute"]))
+        self.assertEqual(
+            result, os.pathsep.join(["/already/absolute", "/also/absolute"]))
+        self.assertNotIn("", result.split(os.pathsep))
+
+    def test_each_colon_separated_entry_is_resolved_independently(self):
+        cwd = os.getcwd()
+        result = _abs_pythonpath(
+            os.pathsep.join(["/already/absolute", "relative/one"]))
+        self.assertEqual(result, os.pathsep.join(
+            ["/already/absolute", os.path.join(cwd, "relative/one")]))
+
+
+class PythonpathJcmRootTest(unittest.TestCase):
+    """``--pythonpath`` also pins library-only worktrees (jax-rrtmgp,
+    dinosaur, mam4-jax) with no ``jcm`` package at all -- the resolution
+    check must apply ONLY when an entry actually is a jcm checkout (#1111).
+    """
+
+    def test_directory_with_jcm_package_is_found(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "jcm").mkdir()
+            (root / "jcm" / "__init__.py").write_text("")
+            self.assertEqual(_pythonpath_jcm_root(str(root)), root)
+
+    def test_library_only_directory_returns_none(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "rrtmgp").mkdir()
+            (root / "rrtmgp" / "__init__.py").write_text("")
+            self.assertIsNone(_pythonpath_jcm_root(str(root)))
+
+    def test_none_and_empty_return_none(self):
+        self.assertIsNone(_pythonpath_jcm_root(None))
+        self.assertIsNone(_pythonpath_jcm_root(""))
+
+    def test_second_colon_separated_entry_is_found(self):
+        """A pinned sweep lists several worktrees on one --pythonpath; the
+        jcm one need not be first.
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            lib_only = root / "rrtmgp-worktree"
+            jcm_worktree = root / "jcm-worktree"
+            (lib_only / "rrtmgp").mkdir(parents=True)
+            (lib_only / "rrtmgp" / "__init__.py").write_text("")
+            (jcm_worktree / "jcm").mkdir(parents=True)
+            (jcm_worktree / "jcm" / "__init__.py").write_text("")
+            pythonpath = os.pathsep.join([str(lib_only), str(jcm_worktree)])
+            self.assertEqual(_pythonpath_jcm_root(pythonpath), jcm_worktree)
+
+
+class CheckPythonpathResolutionTest(unittest.TestCase):
+    """The preflight gate: does the resolution the model subprocess will use
+    actually match a ``--pythonpath`` that named a jcm worktree? (#1111)
+
+    ``_resolve_jcm_path`` is stubbed throughout -- it is a real subprocess
+    whose own correctness is exercised in :class:`ResolveJcmPathTest` below
+    with the actual ``-P`` interpreter behaviour; here only the comparison
+    logic is under test.
+    """
+
+    def test_library_only_pythonpath_is_never_asserted_against(self):
+        """No jcm package on the path at all -- e.g. pinning jax-rrtmgp only
+        -- must not raise, matching the historical, still-working half of
+        ``--pythonpath``. ``_resolve_jcm_path`` is still called (its result
+        is recorded in ``result.json`` regardless), but no assertion is made
+        against it since there is nothing requested to check.
+        """
+        with mock.patch("benchmark._resolve_jcm_path",
+                        return_value="/clone/jcm") as probe:
+            r = _check_pythonpath_resolution(
+                "python", "/some/rrtmgp/worktree", {})
+        probe.assert_called_once()
+        self.assertEqual(r, {"resolved_jcm": "/clone/jcm",
+                             "requested_pythonpath": "/some/rrtmgp/worktree"})
+
+    def test_matching_resolution_is_accepted(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "jcm").mkdir()
+            (root / "jcm" / "__init__.py").write_text("")
+            with mock.patch("benchmark._resolve_jcm_path",
+                            return_value=str(root / "jcm")):
+                r = _check_pythonpath_resolution("python", str(root), {})
+            self.assertEqual(r["resolved_jcm"], str(root / "jcm"))
+            self.assertEqual(r["requested_pythonpath"], str(root))
+
+    def test_mismatched_resolution_is_refused_before_the_gpu_gate(self):
+        """The #1111 reproducer: --pythonpath names a jcm worktree, but
+        (because -P was missing, or any other reason) the probe resolved a
+        DIFFERENT jcm -- e.g. the clone's. This must raise, naming both
+        paths, rather than silently benchmarking the wrong tree.
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "jcm").mkdir()
+            (root / "jcm" / "__init__.py").write_text("")
+            with mock.patch("benchmark._resolve_jcm_path",
+                            return_value="/data/dwatsonparris/jax-gcm/jcm"):
+                with self.assertRaises(SystemExit) as cm:
+                    _check_pythonpath_resolution("python", str(root), {})
+            msg = str(cm.exception)
+            self.assertIn(str(root), msg)
+            self.assertIn("/data/dwatsonparris/jax-gcm/jcm", msg)
+
+    def test_failed_import_under_a_requested_jcm_worktree_is_refused(self):
+        """``_resolve_jcm_path`` returns ``None`` on a failed probe (bad
+        interpreter, broken env) -- that must refuse exactly like a mismatch,
+        not be read as "no jcm on the path".
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "jcm").mkdir()
+            (root / "jcm" / "__init__.py").write_text("")
+            with mock.patch("benchmark._resolve_jcm_path", return_value=None):
+                with self.assertRaises(SystemExit):
+                    _check_pythonpath_resolution("python", str(root), {})
+
+    def test_no_pythonpath_at_all_resolves_but_asserts_nothing(self):
+        """The clone's own run (no --pythonpath) still resolves and records
+        `jcm`'s path -- it is simply never compared against a request,
+        since there is no requested worktree to have been shadowed.
+        """
+        with mock.patch("benchmark._resolve_jcm_path",
+                        return_value="/clone/jcm"):
+            r = _check_pythonpath_resolution("python", None, {})
+        self.assertEqual(r, {"resolved_jcm": "/clone/jcm",
+                             "requested_pythonpath": None})
+
+
+class ResolveJcmPathTest(unittest.TestCase):
+    """The actual subprocess probe, exercised with the real interpreter.
+
+    No GPU and no model build -- just ``import jcm`` under ``-P``, which this
+    repo's own ``jcm`` must resolve successfully since the test suite itself
+    runs against it.
+    """
+
+    def test_resolves_the_installed_jcm_under_dash_p(self):
+        import benchmark
+        resolved = benchmark._resolve_jcm_path(sys.executable,
+                                               dict(os.environ))
+        self.assertIsNotNone(resolved)
+        self.assertEqual(os.path.basename(resolved), "jcm")
+
+    def test_broken_interpreter_returns_none_not_an_exception(self):
+        import benchmark
+        self.assertIsNone(
+            benchmark._resolve_jcm_path("/nonexistent/python", {}))
+
+
 #: Prescribed-emission bundles that actually exist on the data mirror. The
 #: mirror builds per-grid bundles only for the Gaussian grids in
 #: jcm/data/mirror/build_mirror.py's ``GRIDS`` (t63, t106) at L47/L95; T119 and
@@ -199,9 +398,12 @@ _MIRROR_EMISSION_BUNDLES = frozenset(
      for g in ("t63", "t106")
      for p in ("emissions_pd.nc", "dms.nc", "dust_potential_sources.nc",
                "dust_preferential_sources.nc", "dust_soil_types.nc",
-               "dust_regions.nc", "dust_surface_roughness.nc")]
+               "dust_regions.nc", "dust_surface_roughness.nc",
+               "dust_msg_sources.nc")]
     + [f"hf://bundles/{g}_l{lv}/oxidants_pd.nc"
        for g in ("t63", "t106") for lv in (47, 95)]
+    # The grid-free volcanic SO2 point sources (#1190), one file for every grid.
+    + ["hf://products/volcanic_so2_cmip.nc"]
 )
 
 
@@ -264,11 +466,48 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
                     unknown, [],
                     f"{name} would prefetch non-mirror bundle(s): {unknown}")
 
+    def test_key_lists_are_the_runners(self):
+        """The harness's copies of the runner's auto-key lists stay in step."""
+        import benchmark
+
+        from jcm import forcing_assembly
+        self.assertEqual(benchmark._EMISSION_AUTO_KEYS,
+                         forcing_assembly._EMISSION_AUTO_KEYS)
+        self.assertEqual(benchmark._DUST_COMPANION_KEYS,
+                         forcing_assembly.DUST_COMPANION_KEYS)
+
+    def test_jam_m7_preset_prefetches_the_msg_map_and_nucleation_tables(self):
+        """t63-echam-jam's ndust=5 map and nsnucl=2 tables join the prefetch."""
+        import os
+        from unittest import mock
+        cfg = _compose_preset(PRESETS["t63-echam-jam"])
+        self.assertIn("hf://bundles/t63/dust_msg_sources.nc",
+                      _auto_emission_files(cfg))
+        tables = [f"hf://products/ham_input/{n}" for n in (
+            "parnuc.15H2SO4.A0.total.nc", "gcr_ipr_solmin.txt",
+            "gcr_ipr_solmax.txt")]
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HAM_INPUT_DIR", None)
+            self.assertEqual(_auto_ham_input_files(cfg), tables)
+            self.assertEqual(_auto_ham_input_files(_compose_preset(
+                [*PRESETS["t63-echam-jam"],
+                 "physics.jam_microphysics_options.nucleation_scheme=1"])), [])
+            # A local directory replaces the mirror, so its tables are the
+            # ones checked (here absent, so the preflight reports them).
+            os.environ["HAM_INPUT_DIR"] = "/local/ham"
+            self.assertEqual(_auto_ham_input_files(cfg), [
+                f"/local/ham/{n}" for n in (
+                    "parnuc.15H2SO4.A0.total.nc", "gcr_ipr_solmin.txt",
+                    "gcr_ipr_solmax.txt")])
+        self.assertNotIn("hf://bundles/t63/dust_msg_sources.nc",
+                         _auto_emission_files(
+                             _compose_preset(PRESETS["t63-echam-jam-mam4"])))
+
     def test_jam_spectral_preset_enumerates_its_bundles(self):
         """A t63 JAM preset resolves every auto key to its t63 bundle, and they
         reach the prefetch list ``run`` iterates.
         """
-        cfg = _compose_preset(PRESETS["t63-echam-jam"])
+        cfg = _compose_preset(PRESETS["t63-echam-jam-mam4"])
         self.assertEqual(sorted(_auto_emission_files(cfg)), sorted([
             "hf://bundles/t63/emissions_pd.nc",
             "hf://bundles/t63/dms.nc",
@@ -278,8 +517,9 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
             "hf://bundles/t63/dust_regions.nc",
             "hf://bundles/t63/dust_surface_roughness.nc",
             "hf://bundles/t63_l47/oxidants_pd.nc",
+            "hf://products/volcanic_so2_cmip.nc",
         ]))
-        prefetched = _preset_data_files(PRESETS["t63-echam-jam"])
+        prefetched = _preset_data_files(PRESETS["t63-echam-jam-mam4"])
         self.assertIn("hf://bundles/t63/emissions_pd.nc", prefetched)
         self.assertIn("hf://bundles/t63_l47/oxidants_pd.nc", prefetched)
 
@@ -292,7 +532,7 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
         ``--extra`` that nulls an auto input must not leave the harness
         downloading (or failing offline on) a bundle the run never uses.
         """
-        preset = PRESETS["t63-echam-jam"]
+        preset = PRESETS["t63-echam-jam-mam4"]
         # Preset alone: the four auto bundles are enumerated for prefetch.
         base = _preset_data_files(preset)
         self.assertIn("hf://bundles/t63/emissions_pd.nc", base)
@@ -319,7 +559,7 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
         """``forcing.dust_file=null`` must not leave four companions on ``auto``
         prefetching bundles the run never opens (Codex P2).
         """
-        preset = PRESETS["t63-echam-jam"]
+        preset = PRESETS["t63-echam-jam-mam4"]
         with_extra = _preset_data_files([*preset, "forcing.dust_file=null"])
         for bundle in ("hf://bundles/t63/dust_potential_sources.nc",
                        "hf://bundles/t63/dust_preferential_sources.nc",
@@ -342,14 +582,18 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
 
     def test_non_jam_and_pyses_prefetch_no_emissions(self):
         """A non-JAM package consumes no emissions; the pySES backend's native
-        grids are not the spectral-token bundles — both resolve ``auto`` to
-        nothing, matching jcm.runners.
+        grids are not the spectral-token bundles, so there ``auto`` resolves
+        only the grid-free volcanic product, matching jcm.runners.
         """
-        for name in ("t63-echam-rrtmgp", "t63-echam-2m", "speedy-t31",
-                     "ma-ne30-l47", "ma-ne30-l95"):
+        for name in ("t63-echam-rrtmgp", "t63-echam-2m", "speedy-t31"):
             with self.subTest(name):
                 self.assertEqual(
                     _auto_emission_files(_compose_preset(PRESETS[name])), [])
+        for name in ("ma-ne30-l47", "ma-ne30-l95"):
+            with self.subTest(name):
+                self.assertEqual(
+                    _auto_emission_files(_compose_preset(PRESETS[name])),
+                    ["hf://products/volcanic_so2_cmip.nc"])
 
     def test_year_pattern_expands_to_concrete_prefetch_files(self):
         """A ``{year}`` pattern + ``forcing.years`` reaches the prefetch list as
@@ -479,6 +723,8 @@ class MirrorRevisionTest(unittest.TestCase):
                 extra=[])
             with mock.patch.object(benchmark, "_preset_data_files",
                                    return_value=[]), \
+                    mock.patch.object(benchmark, "_resolve_jcm_path",
+                                      return_value=None), \
                     mock.patch.object(benchmark, "_require_free_gpu"), \
                     mock.patch.object(benchmark, "_gpu_sampler"), \
                     mock.patch.object(benchmark, "_gpu_name",
@@ -497,3 +743,562 @@ class MirrorRevisionTest(unittest.TestCase):
         self.assertEqual(seen["env"], pin)
         for text in texts:
             self.assertIn(pin, text)
+
+
+class RunPythonpathPreflightTest(unittest.TestCase):
+
+    @staticmethod
+    def _fake_jcm_tree(root):
+        """Build a ``--pythonpath`` jcm tree as the preflight reads it.
+
+        The package marker, plus the import-free ``jcm/data/remote.py`` every
+        jcm tree has: the prefetch reads the mirror pin of the tree the run
+        imports (``_mirror_revision(jcm_root)``), not this clone's.
+        """
+        import benchmark
+        (root / "jcm" / "data").mkdir(parents=True)
+        (root / "jcm" / "__init__.py").write_text("")
+        shutil.copy(benchmark.REPO / "jcm" / "data" / "remote.py",
+                    root / "jcm" / "data" / "remote.py")
+        return root
+    """End-to-end (no GPU, no model) coverage of the #1111 fix inside
+    :func:`benchmark.run`: the model command runs with ``-P``, and a
+    ``--pythonpath`` that names a jcm worktree is asserted BEFORE the GPU
+    gate, in both directions (honoured / silently shadowed).
+    """
+
+    def _args(self, d, pythonpath):
+        import argparse
+        return argparse.Namespace(
+            preset=sorted(PRESETS)[0], months=1, days=1, gpu=0,
+            label="pp", chunk_days=1, save_interval=1, outdir=d,
+            python=sys.executable, pythonpath=pythonpath,
+            allow_unhealthy=False, f32=False, tol=0.1, keep_output=True,
+            scratch_root=d, wait_for_gpu=0.0, allow_busy_gpu=True, extra=[])
+
+    def test_model_subprocess_runs_with_dash_p(self):
+        """``-P`` must sit between the interpreter and ``-m`` -- that is
+        what stops ``cwd=REPO`` from shadowing a jcm worktree named by
+        ``--pythonpath`` on ``sys.path`` (#1111).
+        """
+        import subprocess
+        import tempfile
+
+        import benchmark
+
+        captured = {}
+
+        def fake_run(cmd, cwd, env, stdout, stderr, check):
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args(d, None)
+            with mock.patch.object(benchmark, "_preset_data_files",
+                                   return_value=[]), \
+                    mock.patch.object(benchmark, "_resolve_jcm_path",
+                                      return_value=None), \
+                    mock.patch.object(benchmark, "_require_free_gpu"), \
+                    mock.patch.object(benchmark, "_gpu_sampler"), \
+                    mock.patch.object(benchmark, "_gpu_name",
+                                      return_value="fake"), \
+                    mock.patch.object(benchmark, "_provenance",
+                                      return_value={}), \
+                    mock.patch.object(benchmark.subprocess, "run",
+                                      side_effect=fake_run):
+                benchmark.run(args)
+        cmd = captured["cmd"]
+        self.assertEqual(cmd[0], sys.executable)
+        self.assertEqual(cmd[1], "-P")
+        self.assertEqual(cmd[2], "-m")
+        self.assertEqual(cmd[3], "jcm.main")
+
+    def test_result_records_resolution_against_the_request(self):
+        """A --pythonpath naming a jcm worktree that WAS honoured: result.json
+        carries both fields, matching the preset's own (clone) resolution
+        when no override is given.
+        """
+        import json
+        import subprocess
+        import tempfile
+
+        import benchmark
+
+        with tempfile.TemporaryDirectory() as d:
+            worktree = self._fake_jcm_tree(pathlib.Path(d) / "jcm-worktree")
+            args = self._args(d, str(worktree))
+
+            def fake_run(cmd, cwd, env, stdout, stderr, check):
+                return subprocess.CompletedProcess(cmd, 0)
+
+            with mock.patch.object(benchmark, "_preset_data_files",
+                                   return_value=[]), \
+                    mock.patch.object(
+                        benchmark, "_resolve_jcm_path",
+                        return_value=str(worktree / "jcm")), \
+                    mock.patch.object(benchmark, "_require_free_gpu"), \
+                    mock.patch.object(benchmark, "_gpu_sampler"), \
+                    mock.patch.object(benchmark, "_gpu_name",
+                                      return_value="fake"), \
+                    mock.patch.object(benchmark, "_provenance",
+                                      return_value={}), \
+                    mock.patch.object(benchmark.subprocess, "run",
+                                      side_effect=fake_run):
+                result = benchmark.run(args)
+            saved = json.loads(
+                (pathlib.Path(d) / "pp" / "result.json").read_text())
+            report = (pathlib.Path(d) / "pp" / "report.md").read_text()
+        for r in (result, saved):
+            self.assertEqual(r["resolved_jcm"], str(worktree / "jcm"))
+            self.assertEqual(r["requested_pythonpath"], str(worktree))
+        self.assertIn(str(worktree), report)
+
+    def test_shadowed_pythonpath_refuses_before_the_gpu_gate(self):
+        """The #1111 reproducer end-to-end: --pythonpath names a jcm
+        worktree, but resolution landed on a different jcm (the clone's,
+        simulated here). ``run`` must raise, and neither the GPU gate nor
+        the model subprocess may have been reached -- the whole point of a
+        preflight is failing in seconds, not after the run.
+        """
+        import tempfile
+
+        import benchmark
+
+        with tempfile.TemporaryDirectory() as d:
+            worktree = self._fake_jcm_tree(pathlib.Path(d) / "jcm-worktree")
+            args = self._args(d, str(worktree))
+
+            with mock.patch.object(
+                    benchmark, "_resolve_jcm_path",
+                    return_value="/data/dwatsonparris/jax-gcm/jcm") as probe, \
+                    mock.patch.object(
+                        benchmark, "_preset_data_files",
+                        side_effect=AssertionError(
+                            "prefetch must not run")) as prefetch, \
+                    mock.patch.object(
+                        benchmark, "_require_free_gpu",
+                        side_effect=AssertionError(
+                            "GPU gate must not run")) as gate, \
+                    mock.patch.object(
+                        benchmark.subprocess, "run",
+                        side_effect=AssertionError(
+                            "model must not run")) as model_run:
+                with self.assertRaises(SystemExit) as cm:
+                    benchmark.run(args)
+            probe.assert_called_once()
+            prefetch.assert_not_called()
+            gate.assert_not_called()
+            model_run.assert_not_called()
+            self.assertIn(str(worktree), str(cm.exception))
+            self.assertIn("/data/dwatsonparris/jax-gcm/jcm",
+                          str(cm.exception))
+
+    def test_relative_pythonpath_is_normalized_before_either_subprocess(self):
+        """Codex review on #1111: a relative ``--pythonpath`` must be
+        resolved against the CALLER's cwd once, up front -- not interpreted
+        separately (and inconsistently) by the preflight probe and the
+        model subprocess, which run under different cwds. ``result.json``'s
+        ``requested_pythonpath`` is the proof: it must come back absolute
+        even though a relative string was passed in.
+        """
+        import json
+        import subprocess
+        import tempfile
+
+        import benchmark
+
+        with tempfile.TemporaryDirectory() as d:
+            self._fake_jcm_tree(pathlib.Path(d) / "jcm-worktree")
+            cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                args = self._args(d, "jcm-worktree")   # relative
+                expected_abs = os.path.join(d, "jcm-worktree")
+
+                def fake_run(cmd, cwd, env, stdout, stderr, check):
+                    return subprocess.CompletedProcess(cmd, 0)
+
+                with mock.patch.object(benchmark, "_preset_data_files",
+                                       return_value=[]), \
+                        mock.patch.object(
+                            benchmark, "_resolve_jcm_path",
+                            return_value=os.path.join(
+                                expected_abs, "jcm")), \
+                        mock.patch.object(benchmark, "_require_free_gpu"), \
+                        mock.patch.object(benchmark, "_gpu_sampler"), \
+                        mock.patch.object(benchmark, "_gpu_name",
+                                          return_value="fake"), \
+                        mock.patch.object(benchmark, "_provenance",
+                                          return_value={}), \
+                        mock.patch.object(benchmark.subprocess, "run",
+                                          side_effect=fake_run):
+                    result = benchmark.run(args)
+                saved = json.loads(
+                    (pathlib.Path(d) / "pp" / "result.json").read_text())
+            finally:
+                os.chdir(cwd)
+        for r in (result, saved):
+            self.assertEqual(r["requested_pythonpath"], expected_abs)
+
+    def test_repo_is_always_a_pythonpath_fallback(self):
+        """Codex review on #1111: ``-P`` removes cwd from ``sys.path``, so
+        the default (no ``--pythonpath``) run must not depend on whatever
+        ``jcm`` the interpreter's site-packages happens to have installed --
+        REPO has to be explicitly on ``PYTHONPATH`` as the floor, or the
+        guarantee ``cwd=REPO`` used to provide for free is lost silently.
+        """
+        import subprocess
+        import tempfile
+
+        import benchmark
+
+        captured = {}
+
+        def fake_run(cmd, cwd, env, stdout, stderr, check):
+            captured["env"] = env
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args(d, None)     # no --pythonpath at all
+            with mock.patch.object(benchmark, "_preset_data_files",
+                                   return_value=[]), \
+                    mock.patch.object(benchmark, "_resolve_jcm_path",
+                                      return_value=str(
+                                          benchmark.REPO / "jcm")), \
+                    mock.patch.object(benchmark, "_require_free_gpu"), \
+                    mock.patch.object(benchmark, "_gpu_sampler"), \
+                    mock.patch.object(benchmark, "_gpu_name",
+                                      return_value="fake"), \
+                    mock.patch.object(benchmark, "_provenance",
+                                      return_value={}), \
+                    mock.patch.object(benchmark.subprocess, "run",
+                                      side_effect=fake_run):
+                benchmark.run(args)
+        pythonpath_entries = captured["env"]["PYTHONPATH"].split(os.pathsep)
+        self.assertIn(str(benchmark.REPO), pythonpath_entries)
+
+    def test_requested_worktree_still_wins_over_the_repo_fallback(self):
+        """The REPO fallback must sit BEHIND, never ahead of, a requested
+        jcm worktree -- otherwise the floor added for the no-override case
+        would itself re-shadow the very override #1111 is about.
+        """
+        import subprocess
+        import tempfile
+
+        import benchmark
+
+        captured = {}
+
+        def fake_run(cmd, cwd, env, stdout, stderr, check):
+            captured["env"] = env
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with tempfile.TemporaryDirectory() as d:
+            worktree = self._fake_jcm_tree(pathlib.Path(d) / "jcm-worktree")
+            args = self._args(d, str(worktree))
+            with mock.patch.object(benchmark, "_preset_data_files",
+                                   return_value=[]), \
+                    mock.patch.object(
+                        benchmark, "_resolve_jcm_path",
+                        return_value=str(worktree / "jcm")), \
+                    mock.patch.object(benchmark, "_require_free_gpu"), \
+                    mock.patch.object(benchmark, "_gpu_sampler"), \
+                    mock.patch.object(benchmark, "_gpu_name",
+                                      return_value="fake"), \
+                    mock.patch.object(benchmark, "_provenance",
+                                      return_value={}), \
+                    mock.patch.object(benchmark.subprocess, "run",
+                                      side_effect=fake_run):
+                benchmark.run(args)
+        entries = captured["env"]["PYTHONPATH"].split(os.pathsep)
+        self.assertLess(entries.index(str(worktree)),
+                        entries.index(str(benchmark.REPO)))
+
+    def test_repo_wins_over_an_ambient_pythonpath_jcm_too(self):
+        """Codex review on #1111 reproducer: the CALLER's shell already
+        exports a PYTHONPATH naming some OTHER jcm checkout (not via
+        --pythonpath), and no --pythonpath override is given at all. The
+        historical default (cwd=REPO, ahead of ALL of PYTHONPATH) always
+        measured THIS repo in that case; REPO must still win over the
+        ambient entry now that cwd no longer provides that guarantee.
+        """
+        import subprocess
+        import tempfile
+
+        import benchmark
+
+        captured = {}
+
+        def fake_run(cmd, cwd, env, stdout, stderr, check):
+            captured["env"] = env
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with tempfile.TemporaryDirectory() as d:
+            ambient = pathlib.Path(d) / "some-other-jcm-checkout"
+            (ambient / "jcm").mkdir(parents=True)
+            (ambient / "jcm" / "__init__.py").write_text("")
+            args = self._args(d, None)     # no --pythonpath override
+            with mock.patch.dict(os.environ, {"PYTHONPATH": str(ambient)}), \
+                    mock.patch.object(benchmark, "_preset_data_files",
+                                      return_value=[]), \
+                    mock.patch.object(benchmark, "_resolve_jcm_path",
+                                      return_value=str(
+                                          benchmark.REPO / "jcm")), \
+                    mock.patch.object(benchmark, "_require_free_gpu"), \
+                    mock.patch.object(benchmark, "_gpu_sampler"), \
+                    mock.patch.object(benchmark, "_gpu_name",
+                                      return_value="fake"), \
+                    mock.patch.object(benchmark, "_provenance",
+                                      return_value={}), \
+                    mock.patch.object(benchmark.subprocess, "run",
+                                      side_effect=fake_run):
+                benchmark.run(args)
+        entries = captured["env"]["PYTHONPATH"].split(os.pathsep)
+        self.assertLess(entries.index(str(benchmark.REPO)),
+                        entries.index(str(ambient)))
+
+    def test_no_empty_pythonpath_entry_reaches_either_subprocess(self):
+        """A stray doubled separator in the caller's ambient PYTHONPATH must
+        not survive into the effective value: an empty sys.path entry means
+        "current directory", which is exactly the ambiguity -P exists to
+        remove (Codex review on #1111).
+        """
+        import subprocess
+        import tempfile
+
+        import benchmark
+
+        captured = {}
+
+        def fake_run(cmd, cwd, env, stdout, stderr, check):
+            captured["env"] = env
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args(d, None)
+            with mock.patch.dict(os.environ, {"PYTHONPATH": "::/tmp::"}), \
+                    mock.patch.object(benchmark, "_preset_data_files",
+                                      return_value=[]), \
+                    mock.patch.object(benchmark, "_resolve_jcm_path",
+                                      return_value=str(
+                                          benchmark.REPO / "jcm")), \
+                    mock.patch.object(benchmark, "_require_free_gpu"), \
+                    mock.patch.object(benchmark, "_gpu_sampler"), \
+                    mock.patch.object(benchmark, "_gpu_name",
+                                      return_value="fake"), \
+                    mock.patch.object(benchmark, "_provenance",
+                                      return_value={}), \
+                    mock.patch.object(benchmark.subprocess, "run",
+                                      side_effect=fake_run):
+                benchmark.run(args)
+        entries = captured["env"]["PYTHONPATH"].split(os.pathsep)
+        self.assertNotIn("", entries)
+
+    def test_preset_data_files_is_called_with_the_resolved_jcm_root(self):
+        """Codex review on #1111: a --pythonpath worktree must be the tree
+        the PREFLIGHT composes/enumerates against too, not just the one the
+        model subprocess imports -- otherwise an --extra naming a Hydra key
+        the worktree added gets rejected against the clone's config instead.
+        """
+        import subprocess
+        import tempfile
+
+        import benchmark
+
+        with tempfile.TemporaryDirectory() as d:
+            worktree = self._fake_jcm_tree(pathlib.Path(d) / "jcm-worktree")
+            args = self._args(d, str(worktree))
+            captured = {}
+
+            def fake_preset_data_files(overrides, jcm_root=None):
+                captured["jcm_root"] = jcm_root
+                return []
+
+            with mock.patch.object(benchmark, "_preset_data_files",
+                                   side_effect=fake_preset_data_files), \
+                    mock.patch.object(
+                        benchmark, "_resolve_jcm_path",
+                        return_value=str(worktree / "jcm")), \
+                    mock.patch.object(benchmark, "_require_free_gpu"), \
+                    mock.patch.object(benchmark, "_gpu_sampler"), \
+                    mock.patch.object(benchmark, "_gpu_name",
+                                      return_value="fake"), \
+                    mock.patch.object(benchmark, "_provenance",
+                                      return_value={}), \
+                    mock.patch.object(
+                        benchmark.subprocess, "run",
+                        return_value=subprocess.CompletedProcess([], 0)):
+                benchmark.run(args)
+        self.assertEqual(captured["jcm_root"], worktree)
+
+    def test_preset_data_files_defaults_to_repo_with_no_override(self):
+        import subprocess
+        import tempfile
+
+        import benchmark
+
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args(d, None)
+            captured = {}
+
+            def fake_preset_data_files(overrides, jcm_root=None):
+                captured["jcm_root"] = jcm_root
+                return []
+
+            with mock.patch.object(benchmark, "_preset_data_files",
+                                   side_effect=fake_preset_data_files), \
+                    mock.patch.object(benchmark, "_resolve_jcm_path",
+                                      return_value=str(
+                                          benchmark.REPO / "jcm")), \
+                    mock.patch.object(benchmark, "_require_free_gpu"), \
+                    mock.patch.object(benchmark, "_gpu_sampler"), \
+                    mock.patch.object(benchmark, "_gpu_name",
+                                      return_value="fake"), \
+                    mock.patch.object(benchmark, "_provenance",
+                                      return_value={}), \
+                    mock.patch.object(
+                        benchmark.subprocess, "run",
+                        return_value=subprocess.CompletedProcess([], 0)):
+                benchmark.run(args)
+        self.assertEqual(captured["jcm_root"], benchmark.REPO)
+
+
+class JcmRootThreadingTest(unittest.TestCase):
+    """The preflight's Hydra composition and auto-input enumeration must use
+    the SAME jcm tree the model subprocess will import, not unconditionally
+    REPO (Codex review on #1111) -- :func:`_compose_preset`,
+    :func:`_load_mirror_manifest`, :func:`_load_expand_yearly_files` and
+    :func:`_auto_terrain_files` all take a ``jcm_root`` for exactly this.
+    """
+
+    def test_compose_preset_reads_the_given_jcm_roots_config_dir(self):
+        """A directory with no ``jcm/config`` at all must make composition
+        fail -- proof the parameter actually selects the directory used,
+        not a cosmetic default that REPO quietly overrides.
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            empty_root = pathlib.Path(d)
+            with self.assertRaises(Exception):
+                _compose_preset(["+configuration=speedy-t31"], empty_root)
+        # The real default (jcm_root=REPO) still composes normally --
+        # exercised throughout this file's other tests via _compose_preset
+        # called with no jcm_root at all.
+        cfg = _compose_preset(PRESETS["speedy-t31"])
+        self.assertIsNotNone(cfg)
+
+    def test_load_mirror_manifest_loads_from_the_given_jcm_root(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            fake_root = pathlib.Path(d)
+            data_dir = fake_root / "jcm" / "data"
+            data_dir.mkdir(parents=True)
+            (data_dir / "mirror_manifest.py").write_text(
+                "SENTINEL = 'from-fake-jcm-root'\n")
+            mod = _load_mirror_manifest(fake_root)
+        self.assertEqual(mod.SENTINEL, "from-fake-jcm-root")
+        # The real default still loads the real module (used throughout this
+        # file's other tests via _load_mirror_manifest() with no argument).
+        real = _load_mirror_manifest()
+        self.assertTrue(hasattr(real, "load_manifest"))
+
+    def test_load_expand_yearly_files_loads_from_the_given_jcm_root(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            fake_root = pathlib.Path(d)
+            data_dir = fake_root / "jcm" / "data"
+            data_dir.mkdir(parents=True)
+            (data_dir / "input_resolution.py").write_text(
+                "def expand_yearly_files(*a, **k):\n"
+                "    return ['SENTINEL_FROM_FAKE_ROOT']\n")
+            expand = _load_expand_yearly_files(fake_root)
+        self.assertEqual(expand("x", None, None), ["SENTINEL_FROM_FAKE_ROOT"])
+
+    def test_ham_inputs_load_from_the_given_jcm_root(self):
+        """The M7 core's nucleation-table names come from the run's own tree.
+
+        ``_auto_ham_input_files`` must enumerate the files THAT tree's core
+        will fetch, so both the loader and the enumeration read ``jcm_root``.
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            fake_root = pathlib.Path(d)
+            data_dir = fake_root / "jcm" / "data"
+            data_dir.mkdir(parents=True)
+            (data_dir / "ham_inputs.py").write_text(
+                "HAM_INPUT_ENV = 'HAM_INPUT_DIR'\n"
+                "HAM_INPUT_PRODUCT = 'fake_product'\n"
+                "HAM_INPUT_FILES = ('SENTINEL_FROM_FAKE_ROOT.nc',)\n")
+            self.assertEqual(_load_ham_inputs(fake_root).HAM_INPUT_PRODUCT,
+                             "fake_product")
+            cfg = {"physics": {"jam_microphysics": "m7_jax",
+                               "jam_microphysics_options":
+                                   {"nucleation_scheme": 2}}}
+            env = {k: v for k, v in os.environ.items()
+                   if k != "HAM_INPUT_DIR"}
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(
+                    _auto_ham_input_files(cfg, fake_root),
+                    ["hf://products/fake_product/SENTINEL_FROM_FAKE_ROOT.nc"])
+        self.assertTrue(hasattr(_load_ham_inputs(), "HAM_INPUT_FILES"))
+
+    def test_ham_input_files_follow_the_runs_environment(self):
+        """HAM_INPUT_DIR is read from the environment the RUN will see.
+
+        Unset, the run reads the mirror's tables; set, it reads that
+        directory's, so those are the paths the preflight checks: each under
+        the first accepted name present, else under its first name, which
+        then reads as missing before any GPU is claimed.
+        """
+        import tempfile
+        cfg = {"physics": {"jam_microphysics": "m7_jax",
+                           "jam_microphysics_options": {"nucleation_scheme": 2}}}
+        on_mirror = _auto_ham_input_files(cfg, environ={})
+        self.assertTrue(on_mirror)
+        self.assertTrue(all(f.startswith("hf://products/") for f in on_mirror))
+        with tempfile.TemporaryDirectory() as d:
+            local = pathlib.Path(d)
+            (local / "parnuc.15H2SO4.nc").write_text("")     # an alias
+            (local / "solmin.txt").write_text("")            # an alias
+            expected = [str(local / "parnuc.15H2SO4.nc"),
+                        str(local / "solmin.txt"),
+                        str(local / "gcr_ipr_solmax.txt")]   # absent
+            self.assertEqual(
+                _auto_ham_input_files(cfg, environ={"HAM_INPUT_DIR": d}),
+                expected)
+            self.assertFalse(pathlib.Path(expected[-1]).exists())
+            # The default is this process's (a local model subprocess
+            # inherits it).
+            with mock.patch.dict(os.environ, {"HAM_INPUT_DIR": d}):
+                self.assertEqual(_auto_ham_input_files(cfg), expected)
+
+    def test_remote_loads_from_the_given_jcm_root(self):
+        """The prefetch reads the mirror pin of the tree the run imports."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            fake_root = pathlib.Path(d)
+            data_dir = fake_root / "jcm" / "data"
+            data_dir.mkdir(parents=True)
+            (data_dir / "remote.py").write_text(
+                "MIRROR_REVISION = 'SENTINEL_FROM_FAKE_ROOT'\n")
+            self.assertEqual(_remote(fake_root).MIRROR_REVISION,
+                             "SENTINEL_FROM_FAKE_ROOT")
+        self.assertTrue(hasattr(_remote(), "fetch"))
+
+    def test_auto_terrain_files_checks_the_given_jcm_roots_packaged_bc(self):
+        """A truncation no shipped grid uses, so REPO certainly has no
+        packaged file for it -- proves the packaged-file check is reading
+        whichever ``jcm_root`` was passed, not always REPO.
+        """
+        import tempfile
+        cfg = {"terrain": {"kind": "auto"},
+               "grid": {"spectral_truncation": 999}}
+        self.assertEqual(_auto_terrain_files(cfg),
+                         ["hf://bundles/t999/terrain.nc"])
+        with tempfile.TemporaryDirectory() as d:
+            fake_root = pathlib.Path(d)
+            bc_dir = fake_root / "jcm" / "data" / "bc" / "t999"
+            bc_dir.mkdir(parents=True)
+            (bc_dir / "terrain.nc").write_text("")
+            # Same cfg, but THIS jcm_root packages the file -- no prefetch.
+            self.assertEqual(_auto_terrain_files(cfg, fake_root), [])

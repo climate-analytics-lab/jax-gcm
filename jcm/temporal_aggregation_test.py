@@ -370,3 +370,96 @@ def test_stream_is_bitwise_the_xarray_accumulation(tmp_path, seams):
             assert got.dtype == np.float64
             assert np.array_equal(got, want, equal_nan=True), (label, name)
     assert np.isnan(months.temperature.values[:, 1, 2, 3]).all()
+
+
+# ---------------------------------------------------------------------------
+# schedule_monthly_segments (#903): the leading/month-boundary/trailing edge
+# schedule that lets a caller use one save_interval over a run that does not
+# already tile the calendar, instead of being refused by the check above.
+
+Segment = temporal_aggregation.MonthlySegment
+
+
+def test_noon_start_gets_one_leading_edge_then_tiles_every_month():
+    # 2000-01-01T12:00 -> 2000-04-01T12:00 (91 days) with 1-day saves: a
+    # 12h leading edge realigns to midnight, then 1 day tiles every month
+    # exactly (Jan 31, leap Feb 29, Mar 31), so no further edges appear
+    # until the run's own end needs a trailing 12h edge.
+    schedule = temporal_aggregation.schedule_monthly_segments(
+        "2000-01-01T12:00:00", save_seconds=86400, total_seconds=91 * 86400,
+        dt_seconds=1800)
+    assert schedule == [
+        Segment(0, 43200, 43200, True),               # Jan 1 12:00 -> Jan 2 00:00
+        Segment(43200, 30 * 86400, 86400, False),      # Jan 2 -> Feb 1
+        Segment(43200 + 30 * 86400, 29 * 86400, 86400, False),  # Feb (leap)
+        Segment(43200 + 59 * 86400, 31 * 86400, 86400, False),  # Mar
+        Segment(43200 + 90 * 86400, 43200, 43200, True),        # Apr 1 00:00->12:00
+    ]
+    # Every segment's own intervals tile it exactly; the schedule covers
+    # [0, total_seconds) with no gap or overlap.
+    total = 91 * 86400
+    offset = 0
+    for segment in schedule:
+        assert segment.offset_seconds == offset
+        assert segment.duration_seconds % segment.save_interval_seconds == 0
+        offset += segment.duration_seconds
+    assert offset == total
+
+
+def test_5day_means_split_at_every_month_start_from_a_midnight_start():
+    # 2000-01-01 -> 2000-04-01 (one calendar quarter) with 5-day saves: none
+    # of Jan (31), leap Feb (29) or Mar (31) is a multiple of 5, so each
+    # month ends with a shorter stub that lands exactly on the next month's
+    # first instant, and the regular grid restarts fresh there.
+    schedule = temporal_aggregation.schedule_monthly_segments(
+        "2000-01-01", save_seconds=5 * 86400, total_seconds=91 * 86400,
+        dt_seconds=86400)
+    assert schedule == [
+        Segment(0, 6 * 5 * 86400, 5 * 86400, False),                  # Jan 1-31
+        Segment(30 * 86400, 1 * 86400, 1 * 86400, True),               # Jan 31->Feb 1
+        Segment(31 * 86400, 5 * 5 * 86400, 5 * 86400, False),          # Feb 1-26
+        Segment(56 * 86400, 4 * 86400, 4 * 86400, True),               # Feb 26->Mar 1
+        Segment(60 * 86400, 6 * 5 * 86400, 5 * 86400, False),          # Mar 1-31
+        Segment(90 * 86400, 1 * 86400, 1 * 86400, True),               # Mar 31->Apr 1
+    ]
+
+
+def test_a_5day_interval_starting_on_december_31_no_longer_needs_rejecting():
+    # The gotcha the T63 ``run=longrun`` presets hit on restart: a 5-day
+    # save interval beginning exactly on a month's last day. Both resulting
+    # intervals are now one-day edges rather than a refusal.
+    schedule = temporal_aggregation.schedule_monthly_segments(
+        "2000-12-31", save_seconds=5 * 86400, total_seconds=4 * 86400,
+        dt_seconds=86400)
+    assert schedule == [
+        Segment(0, 86400, 86400, True),            # Dec 31 -> Jan 1
+        Segment(86400, 3 * 86400, 3 * 86400, True),  # Jan 1 -> Jan 4 (run end)
+    ]
+
+
+def test_unreachable_edge_is_rejected_before_any_segment_after_it():
+    # 14h saves (compatible with a 7-minute model step on their own) tile
+    # January with a 2h remainder (7200 s) that is NOT a whole number of
+    # 7-minute (420 s) steps: refused up front, naming the offending
+    # interval, rather than discovered after integrating January's body.
+    with pytest.raises(ValueError, match="not reachable in whole model steps"):
+        temporal_aggregation.schedule_monthly_segments(
+            "2000-01-01", save_seconds=14 * 3600, total_seconds=2678760,
+            dt_seconds=420)
+
+
+def test_save_interval_not_a_whole_number_of_model_steps_is_rejected():
+    with pytest.raises(ValueError, match="not a whole number of model steps"):
+        temporal_aggregation.schedule_monthly_segments(
+            "2000-01-01", save_seconds=100, total_seconds=86400,
+            dt_seconds=7)
+
+
+def test_already_midnight_month_start_needs_no_leading_edge():
+    # start_time exactly on a month boundary: no leading realignment, and a
+    # save_interval that tiles the month (1 day) produces one body segment
+    # with no edges at all.
+    schedule = temporal_aggregation.schedule_monthly_segments(
+        "2000-02-01", save_seconds=86400, total_seconds=29 * 86400,
+        dt_seconds=86400)
+    assert schedule == [Segment(0, 29 * 86400, 86400, False)]

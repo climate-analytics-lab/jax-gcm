@@ -19,10 +19,13 @@ otherwise use.
 
 from __future__ import annotations
 
+import os
 import warnings
 from typing import TYPE_CHECKING, Any, Mapping
 
-from jcm.physics.aerosol import Macv2SpAerosol
+import jax.numpy as jnp
+
+from jcm.physics.aerosol import Macv2NaturalAerosol, Macv2SpAerosol
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
 from jcm.physics.chemistry import SimpleChemistry
 from jcm.physics.clouds.echam_1m import (
@@ -30,7 +33,10 @@ from jcm.physics.clouds.echam_1m import (
     MicrophysicsParameters,
 )
 from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
-from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+from jcm.physics.clouds.lohmann_2m_params import (
+    PRESCRIBED_DROPLET_WARM_RAIN_2M,
+    CloudParams2M,
+)
 from jcm.physics.clouds.sundqvist import (
     SundqvistCloudFraction,
     CloudParameters,
@@ -47,6 +53,7 @@ from jcm.physics.forcing.echam_boundary_conditions import (
 from jcm.physics.gravity_waves.hines import HinesGwd, HinesParameters
 from jcm.physics.gravity_waves.sso import LottMillerSso, SSOParameters
 from jcm.physics.physics_term import with_field_overrides
+from jcm.physics.surface.slim import SlimLand, SlimParameters
 from jcm.physics.surface.echam.jsbach_land import JsbachLandParameters
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.resolution_defaults import (
@@ -58,9 +65,20 @@ from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 from jcm.physics.radiation.aerosol_free import (
     resolve_aerosol_free_interval,
 )
-from jcm.physics.radiation.band_config import RadiationBandConfig
-from jcm.physics.radiation.radiation_types import RadiationParameters
-from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+from jcm.physics.radiation.echam_cloud_optics_defaults import (
+    JAM_ARG_ICE_INHOMOGENEITY_T63,
+)
+from jcm.physics.radiation.radiation_types import (
+    RadiationParameters,
+    radiation_parameters_of,
+)
+from jcm.physics.radiation.rrtmgp import (
+    DEFAULT_GAS_OPTICS_MODE,
+    DEFAULT_COLUMN_BLOCK,
+    DEFAULT_GPT_CHUNK,
+    DEFAULT_USE_SCAN,
+    RRTMGPRadiation,
+)
 from jcm.physics.surface.echam.surface_physics import EchamSurface
 from jcm.physics.surface.echam.surface_exchange_publisher import (
     EchamSurfaceExchange,
@@ -76,6 +94,8 @@ if TYPE_CHECKING:
     # Only the annotations of ``echam_physics`` name these: the JAM package is
     # imported in the JAM branch of the factory, not for every composition.
     from jcm.physics.aerosol.jam.activation.arg_term import ArgParameters
+    from jcm.physics.aerosol.jam.activation.ham_activation_term import (
+        HamActivationParameters)
     from jcm.physics.aerosol.jam.chemistry.aqueous import (
         AqueousSulfurParameters)
     from jcm.physics.aerosol.jam.chemistry.oxidants import OxidantParameters
@@ -87,7 +107,9 @@ if TYPE_CHECKING:
     from jcm.physics.aerosol.jam.emissions.anthropogenic import (
         EmissionParameters)
     from jcm.physics.aerosol.jam.emissions.dms import DmsParameters
+    from jcm.physics.aerosol.jam.emissions.dust import DustParameters
     from jcm.physics.aerosol.jam.emissions.seasalt import SeaSaltParameters
+    from jcm.physics.aerosol.jam.emissions.volcanic import VolcanicParameters
     from jcm.physics.aerosol.jam.sedimentation.sedi_term import SedParameters
     from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetDepParameters
     from jcm.physics.convection.tracer_transport import ConvTransportParameters
@@ -111,28 +133,41 @@ GREY_RADIATION_REJECTION = (
     "GreyTwoStreamRadiation\n"
     "    physics = echam_physics(radiation_scheme=GreyTwoStreamRadiation())\n"
     "(radiation parameters go to its constructor, params=...). The factory "
-    "derives the band structure and the JAM optics cadence from the term it is "
-    "given, so this is the one supported route."
+    "derives the band structure and the JAM optics cadence from the term it "
+    "is given, which is the simplest way to build a fresh idealized "
+    "composition from nothing."
 )
 
 
-def default_radiation_parameters(aerosol_module: str = "macv2sp"
+def default_radiation_parameters(aerosol_module: str = "macv2sp",
+                                 truncation: int | None = 63,
                                  ) -> RadiationParameters:
     """``RadiationParameters`` the ECHAM factory uses when none are given.
+
+    The three liquid factors and the ice factor otherwise come from ECHAM's
+    per-truncation table (``RadiationParameters.default(truncation=...)``,
+    :mod:`jcm.physics.radiation.echam_cloud_optics_defaults`, #974).
 
     ECHAM-HAM re-tunes the ice-cloud inhomogeneity for its two-moment +
     Abdul-Razzak & Ghan configuration (``lcdnc_progn`` with ``ncd_activ = 2``:
     ``zinhomi = 0.7`` at T63, L31 and L47 alike;
-    ``mo_cloud_optics.f90::setup_cloud_optics``). jcm's JAM stack is exactly
-    that pairing — the 2M scheme fed by ARG activation — so it takes HAM's
-    value; every other composition keeps ECHAM6's T63 ``zinhomi = 0.8``.
+    ``mo_cloud_optics.f90::setup_cloud_optics``), a row ECHAM defines at T63
+    only. jcm's JAM stack is exactly that pairing — the 2M scheme fed by ARG
+    activation — so it takes HAM's value at EVERY truncation (there is no
+    other row to interpolate from or to; see
+    ``echam_cloud_optics_defaults``'s module docstring for why it is held
+    rather than interpolated), overriding only the table's ice factor; every
+    other composition keeps the table's ice factor (0.80 at T31/T63, 0.85 at
+    T127/T255) unmodified.
 
     Public so a caller that builds its own radiation term for
     ``echam_physics(radiation_scheme=<term>)`` can give it the same defaults
     the string route would.
     """
+    ice_override = (JAM_ARG_ICE_INHOMOGENEITY_T63
+                    if aerosol_module == "jam" else None)
     return RadiationParameters.default(
-        cloud_inhomogeneity_ice=0.7 if aerosol_module == "jam" else 0.8)
+        truncation=truncation, cloud_inhomogeneity_ice=ice_override)
 
 
 def _warn_if_shared_cloud_constants_differ(cover_params, cloud_params, cloud_scheme):
@@ -177,16 +212,19 @@ def echam_physics(
     vertical_diffusion: VDiffParameters | Mapping[str, Any] | None = None,
     surface: SurfaceParameters | Mapping[str, Any] | None = None,
     land_surface: JsbachLandParameters | Mapping[str, Any] | None = None,
+    slim_land: SlimParameters | Mapping[str, Any] | None = None,
     aerosol: AerosolParameters | Mapping[str, Any] | None = None,
     hines: HinesParameters | Mapping[str, Any] | None = None,
     sso: SSOParameters | Mapping[str, Any] | None = None,
     seasalt: SeaSaltParameters | Mapping[str, Any] | None = None,
     dms: DmsParameters | Mapping[str, Any] | None = None,
+    dust: DustParameters | Mapping[str, Any] | None = None,
     anthropogenic_params: EmissionParameters | Mapping[str, Any] | None = None,
+    volcanic_params: VolcanicParameters | Mapping[str, Any] | None = None,
     oxidants: OxidantParameters | Mapping[str, Any] | None = None,
     sulfur_gas: SulfurGasParameters | Mapping[str, Any] | None = None,
     aqueous: AqueousSulfurParameters | Mapping[str, Any] | None = None,
-    activation: ArgParameters | Mapping[str, Any] | None = None,
+    activation: ArgParameters | HamActivationParameters | Mapping[str, Any] | None = None,
     cloud_borne_exchange: (
         CloudBorneExchangeParameters | Mapping[str, Any] | None) = None,
     sedimentation: SedParameters | Mapping[str, Any] | None = None,
@@ -200,19 +238,36 @@ def echam_physics(
     radiation_scheme: str | PhysicsTerm = "rrtmgp",
     emulator_weights_file: str | None = "auto",
     radiation_compute_cre: bool = True,
+    radiation_lw_solver: str = "two_stream",
+    radiation_gas_optics_mode: str = DEFAULT_GAS_OPTICS_MODE,
+    radiation_gpt_chunk: int = DEFAULT_GPT_CHUNK,
+    radiation_use_scan: bool = DEFAULT_USE_SCAN,
+    radiation_column_block: int | str | None = DEFAULT_COLUMN_BLOCK,
     cloud_scheme: str = "1m",
     aerosol_module: str = "macv2sp",
+    natural_aerosol: bool | None = None,
     jam_microphysics: str = "placeholder",
+    jam_microphysics_options: Mapping[str, Any] | None = None,
     jam_cloud_borne: bool = True,
     jam_optics: bool = True,
+    jam_optics_backend: str = "jcm",
+    jam_optics_tables_dir: str | os.PathLike | None = None,
+    jam_seasalt_scheme: str = "gong",
+    jam_wetdep_scheme: str = "jcm",
+    jam_nucleation_activation: str | None = None,
     jam_arg_variant: str = "arg2000",
+    jam_activation_scheme: str = "arg",
+    jam_nactivpdf: int = 0,
     jam_aqueous_scheme: str = "full",
     jam_incloud_impaction: str = "ham",
+    jam_below_cloud_lookup: str = "ham",
+    jam_stratiform_nucleation: str = "ham",
     jam_dust_preset: int = 4,
     jam_dust_nudged: bool = False,
     jam_dust_nduscale_scale: float | None = None,
     jam_anthropogenic: bool = False,
     jam_prescribed_speciated: bool = False,
+    jam_volcanic: bool = False,
     jam_convective_transport: bool = True,
     convective_updraft_precip_cover: bool | None = None,
     enable_cosp: bool = False,
@@ -221,6 +276,7 @@ def echam_physics(
     cosp_modis: bool = False,
     cosp_isccp: bool = False,
     aerosol_free_interval: int | None = None,
+    radiation_use_host_effective_radii: bool = False,
     enable_aerocom: bool = False,
     aerocom_groups: tuple[str, ...] = ("cloud", "column"),
     aerocom_overlap: str = "maximum-random",
@@ -228,6 +284,7 @@ def echam_physics(
     diagnose_omega: bool = False,
     cu_lmfmid: bool | None = None,
     prescribed_surface_fluxes: bool = False,
+    land_model: str = "prescribed",
     coords=None,
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
@@ -254,9 +311,19 @@ def echam_physics(
     ``cloud_borne_exchange`` without ``jam_cloud_borne``, ``conv_transport``
     without ``jam_convective_transport``, ``radiation`` with a radiation term
     instance) and a mapping that sets ``cu_lmfmid`` alongside the scalar
-    ``cu_lmfmid`` flag are rejected rather than ignored. The JAM dust
-    parameters have no argument here beyond the ``jam_dust_*`` flags yet
-    (jax-gcm#995).
+    ``cu_lmfmid`` flag are rejected rather than ignored. ``dust`` is the one
+    exception to "applied on the class ``.default()``, here, at
+    construction": its base object depends on the ``jam_dust_*`` preset
+    flags and the run's TRUE truncation (the T63 regional tuning vector),
+    which this factory does not yet know when ``coords`` is not given (the
+    common case — ``Model`` supplies it later via ``cache_coords``). A
+    mapping is therefore carried through unresolved, as
+    ``DustEmissions.field_overrides``, and applied by its own
+    ``cache_coords`` on the preset rebuilt for the real grid — resolving it
+    here instead, at a possibly-wrong fallback truncation, would silently
+    freeze it there forever (jax-gcm#1123). An unknown field still raises
+    immediately (at ``DustEmissions.__init__``, against the same fallback
+    preset, whose field names and shapes do not vary with truncation).
 
     Args:
         convection: Override for ``ConvectionParameters``.
@@ -277,6 +344,10 @@ def echam_physics(
         land_surface: Override for the land tile's
             :class:`~jcm.physics.surface.echam.jsbach_land.JsbachLandParameters`
             (the JSBACH evaporation form and skin energy balance, #979).
+            Read with ``land_model="prescribed"`` only.
+        slim_land: Override for SLIM's
+            :class:`~jcm.physics.surface.slim.SlimParameters` (a mapping of
+            field overrides or an object). ``land_model="slim"`` only.
         aerosol: Override for MACv2-SP ``AerosolParameters``. Also
             supplies the SPA activation knobs read by the 2M scheme
             when ``cloud_scheme="2m"``.
@@ -291,12 +362,30 @@ def echam_physics(
             :class:`~jcm.physics.aerosol.jam.emissions.dms.DmsParameters`
             (``flux_scale``, the multiplier on the emitted DMS flux).
             ``aerosol_module="jam"`` only, as ``seasalt``.
+        dust: Override for the Tegen/HAMMOZ wind-erosion dust emission
+            :class:`~jcm.physics.aerosol.jam.emissions.dust.DustParameters`
+            (the regional threshold vector ``nduscale_reg``, the soil/
+            roughness constants, ...). A mapping is forwarded to
+            :class:`~jcm.physics.aerosol.jam.emissions.dust.DustEmissions`
+            as ``field_overrides`` and applied by its own
+            ``cache_coords`` on the ``jam_dust_*``-flag-selected preset
+            rebuilt for the model's REAL truncation — not resolved here,
+            where the truncation may still be a fallback (jax-gcm#1123) —
+            so the ``jam_dust_*`` flags still choose the preset the mapping
+            is layered on. An explicit object supersedes them exactly as it
+            does for ``DustEmissions`` directly, and is used as given (never
+            rebuilt). ``aerosol_module="jam"`` only, as ``seasalt``.
         anthropogenic_params: Override for the prescribed CEDS anthropogenic
             emission
             :class:`~jcm.physics.aerosol.jam.emissions.anthropogenic.EmissionParameters`
             (``scale``, the overall multiplier, and the per-super-sector
             injection profile). ``aerosol_module="jam"`` with
             ``jam_anthropogenic=True`` only.
+        volcanic_params: Override for the volcanic SO₂
+            :class:`~jcm.physics.aerosol.jam.emissions.volcanic.VolcanicParameters`
+            (``degassing_scale``, ``eruption_scale``,
+            ``so4_primary_fraction``). ``aerosol_module="jam"`` with
+            ``jam_volcanic=True`` only.
         oxidants: Override for the prescribed-oxidant
             :class:`~jcm.physics.aerosol.jam.chemistry.oxidants.OxidantParameters`
             (``oh_ref``, ``h2o2_ref_vmr``, ``no3_ref_vmr``). JAM only, as
@@ -388,10 +477,34 @@ def echam_physics(
             null`` could not otherwise reach a random init and would silently
             mean ``auto``; use ``"random"`` to train from scratch. Rejected
             (not silently ignored) with any non-emulated scheme.
-        radiation_compute_cre: RRTMGP only — run the extra clear-sky solve
-            for the cloud-radiative-effect diagnostic (default True).
-            ``False`` halves the RRTMGP cost on radiation-compute steps;
-            use for production throughput runs that don't analyse CRE.
+        radiation_compute_cre: RRTMGP only — also return the clear-sky
+            fluxes for the cloud-radiative-effect diagnostic (default True).
+            The library solves the clear sky inside the all-sky g-point loop,
+            on the gas optics the two solves share. ``False`` drops that
+            transport on radiation-compute steps; use for production
+            throughput runs that don't analyse CRE.
+        radiation_lw_solver: RRTMGP only — the library's longwave transport,
+            ``"two_stream"`` (default) or ``"noscat"`` (RTE's absorption-only
+            solver, as ECHAM6's ``mo_lrtm_solver.f90``; see
+            :class:`~jcm.physics.radiation.rrtmgp.RRTMGPRadiation`). Rejected
+            (not silently ignored) with any other radiation scheme.
+        radiation_gas_optics_mode / radiation_gpt_chunk / radiation_use_scan:
+            RRTMGP only — where jax-rrtmgp evaluates the gas optics
+            (``"all_gpts"`` default, or ``"per_gpt"``), how many g-points its
+            spectral loop solves per iteration (default 64) and whether its
+            vertical recurrences are a ``lax.scan`` (default True).
+            Performance options with no effect on the physics; the defaults
+            are the measured A100 optimum (see
+            :class:`~jcm.physics.radiation.rrtmgp.RRTMGPRadiation`).
+            Rejected (not silently ignored) when set away from the default
+            with any other radiation scheme.
+        radiation_column_block: RRTMGP only — how the column solve is laid
+            out: an integer B (B columns per device per scan step, strided
+            across the mesh devices), ``None`` (one vmap) or ``"auto"``
+            (default: 8 on CPU, ``None`` otherwise). No effect on the
+            physics beyond float32 rounding; see
+            :class:`~jcm.physics.radiation.rrtmgp.RRTMGPRadiation`. Rejected
+            when set away from the default with any other radiation scheme.
         cloud_scheme: ``"1m"`` (default, single-moment) or ``"2m"``
             (two-moment warm-rain).
         aerosol_module: ``"macv2sp"`` (default; prescribed simple plumes) or
@@ -407,8 +520,36 @@ def echam_physics(
             tracers and an ``activated_cdnc`` that the 2M scheme prefers over
             the SPA floor. The online aerosol *direct radiative* effect that
             would let JAM fully replace MACv2-SP optics is tracked in #495.
+        natural_aerosol: compose the MACv2 natural aerosol background
+            (:class:`~jcm.physics.aerosol.macv2_natural.Macv2NaturalAerosol`)
+            after the simple plumes, so the radiation sees the coarse mode
+            and pre-industrial fine mode the plumes are an increment on.
+            ``None`` (default) composes it with ``aerosol_module="macv2sp"``
+            on ``radiation_scheme="rrtmgp"`` and nowhere else: JAM carries its
+            own natural aerosol, and the emulated radiation was trained on
+            the plumes' optics alone. The term is inert until the forcing
+            carries ``natural_aerosol`` (``forcing.natural_aerosol_file``).
+            ``True`` with ``aerosol_module="jam"`` raises.
         jam_microphysics: JAM core when ``aerosol_module="jam"`` —
-            ``"placeholder"`` (κ-Köhler equilibrium) today; MAM4-JAX is #490.
+            ``"placeholder"`` (κ-Köhler equilibrium on the MAM4 population,
+            default) today; ``"mam4_jax"`` is #490 (optional ``jcm[mam4]``
+            extra). ``"m7_placeholder"`` is the same κ-Köhler core on the M7
+            population instead (the ``echam-jam-m7`` preset's earlier
+            chain-test vehicle, #1017). ``"m7_jax"`` is the real ECHAM-HAM M7
+            core over the optional ``jcm[m7]`` extra (#1017); its switches
+            (nucleation/organic scheme, coagulation, condensation,
+            precision) are set via ``jam_microphysics_options``, not a
+            dedicated argument here.
+        jam_microphysics_options: keyword arguments forwarded to the
+            ``jam_microphysics`` core's constructor when it names a string
+            core — e.g. ``{"nucleation_scheme": 2}`` selects ``"m7_jax"``'s
+            Kazil and Lovejoy (2007) ion-mediated nucleation (needs
+            ``HAM_INPUT_DIR`` and an m7-jax with Kazil support; construction
+            raises naming both if either is missing), or
+            ``{"core_dtype": "float32"}`` selects its forward-only float32
+            core. ``None`` (default) means today's call for every core —
+            MAM4 and the placeholder cores take no options, so any key is
+            unknown for them.
         jam_cloud_borne: prognose the explicit cloud-borne aerosol phase
             (#602). ``True`` (default) cycles the ``mc_*``/``nc_*`` phase
             in the physics carry (activation transfer, resuspension,
@@ -420,11 +561,55 @@ def echam_physics(
             reads. ``False`` keeps MACv2-SP optics (cheaper; also makes
             the JAM aerosol radiatively passive, which controlled A/B
             experiments rely on).
+        jam_optics_backend: ``jam_aerosol_physics``'s ``optics_backend`` --
+            ``"jcm"`` (default) or ``"ham_lut"`` (ECHAM-HAM M7's own
+            Mie-table lookup, #1017). Ignored when ``jam_optics=False``.
+        jam_optics_tables_dir: directory holding HAM's authentic
+            ``lut_optical_properties_M7.nc``/``lut_optical_properties_lw_
+            M7.nc`` for ``jam_optics_backend="ham_lut"``. ``None`` (default)
+            reads the ``HAM_INPUT_DIR`` environment variable instead;
+            ignored for ``jam_optics_backend="jcm"``.
+        jam_seasalt_scheme: ``"gong"`` (default, unchanged) or ``"long"``
+            (Long et al. 2011 + the Sofiev et al. 2011 SST correction, HAM
+            ``nseasalt=7``; #1017) — passed through to
+            :func:`~jcm.physics.aerosol.jam.jam_terms.jam_aerosol_physics`'s
+            ``seasalt_scheme``. ``"long"`` requires ``jam_microphysics``'s
+            population to carry exactly two ``ss`` classes (HAM's own
+            accumulation-then-coarse split); the default MAM4 population
+            carries three (it also has an Aitken-mode sea salt tracer, which
+            HAM's M7 configuration does not) and so is rejected with
+            ``"long"``.
+        jam_wetdep_scheme: ``jam_aerosol_physics``'s ``wetdep_scheme`` --
+            ``"jcm"`` (default), ``"ham_below_cloud"`` (ECHAM-HAM's own
+            below-cloud Croft tables only, #1017 -- a deliberately narrower
+            ablation configuration) or ``"ham"`` (the Croft below-cloud
+            tables plus HAM's own nucleation scavenging ``ic_scav_nuc``;
+            with the default ``jam_incloud_impaction="ham"`` this is the
+            full ``nwetdep=3``). ``"ham_below_cloud"``/``"ham"`` require
+            ``cloud_scheme="2m"`` (enforced below) and turn on the 2M
+            scheme's ``"precip_cover"``/``"pfrain"``/``"pfsnow"``
+            diagnostics they read.
+        jam_nucleation_activation: only consulted for ``jam_wetdep_scheme=
+            "ham"`` -- ``"ham_arg"`` or ``"ham_lin_leaitch"``, forwarded to
+            ``jam_aerosol_physics``'s ``nucleation_activation``. ``None``
+            (default) derives it from ``jam_activation_scheme`` below; an
+            explicit value must match it (see ``jam_aerosol_physics``'s
+            ``nucleation_activation`` Args entry for why -- ``ic_scav_nuc``
+            reads whichever activation term ``jam_activation_scheme``
+            actually composed).
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
+        jam_activation_scheme: ``jam_aerosol_physics``'s ``activation_scheme``
+            -- ``"arg"`` (default), ``"ham_arg"`` or ``"ham_lin_leaitch"``
+            (#1017). An ``activation`` mapping applies to the chosen scheme's
+            Parameters class.
+        jam_nactivpdf: ``jam_aerosol_physics``'s ``nactivpdf`` (HAM's updraft
+            PDF switch, ``"ham_arg"`` only; default 0).
         jam_dust_preset: HAMMOZ ``ndust`` preset for the Tegen dust scheme —
-            4 (default, HAM2: Stier 2005 + East-Asian soils), 3 (Stier 2005)
-            or 2 (Cheng 2008). The resolution-dependent regional tuning vector
-            is rebuilt at the model's own truncation.
+            5 (HAM2 + the MSG-SEVIRI Saharan source-activation map; needs
+            ``forcing.dust_msg_file`` set), 4 (HAM2: Stier 2005 + East-Asian
+            soils), 3 (Stier 2005) or 2 (Cheng 2008). The resolution-dependent
+            regional tuning vector is rebuilt at the model's own truncation
+            (shared bit-for-bit between 4 and 5).
         jam_dust_nudged: take HAM's *nudged* regional tuning vector
             (0.95/1.25 at T63) instead of the free-running one (1.05/1.45).
             The shipped config leaves this ``null``, which the runner fills
@@ -432,7 +617,7 @@ def echam_physics(
         jam_dust_nduscale_scale: global multiplier on that regional vector —
             jcm's single dust-emission calibration knob (#808). ``null``
             takes the calibrated default, which exists at T63 ``ndust = 4``
-            only.
+            or ``5`` only (the two share the same vector and calibration).
         jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
             (H2O2-limited) in-cloud aqueous sulfur chemistry.
         jam_incloud_impaction: in-cloud impaction scavenging of interstitial
@@ -441,12 +626,29 @@ def echam_physics(
             defects corrected), ``"ham_r7492"`` (the compiled r7492 lookup,
             for like-for-like comparison with ECHAM-HAM) or ``"none"`` (CAM's
             form, no in-cloud impaction).
+        jam_below_cloud_lookup: the Croft rain lookup of the HAM below-cloud
+            schemes (``jam_wetdep_scheme="ham_below_cloud"``/``"ham"``):
+            ``"ham"`` (default, r7492's swapped interpolation corners and its
+            zero rate below the first rain-rate node corrected) or
+            ``"ham_r7492"`` (the compiled ``bc_rain``).
+        jam_stratiform_nucleation: the weight on stratiform nucleation
+            scavenging of droplet/crystal-resident aerosol under
+            ``jam_wetdep_scheme="jcm"`` (#1080): ``"ham"`` (default) is
+            ECHAM-HAM's mode-wise, temperature-regime fraction table
+            (``mo_ham_wetdep.f90::get_icscavfrac`` ``kscavICtype=2``,
+            ``wetdep.stratiform_fractions``); ``"activated_fraction"`` is
+            the pre-#1080 behaviour (ARG's own per-mode activated fraction
+            with no explicit cloud-borne phase, or no cap at all with one).
+            Inert under ``jam_wetdep_scheme="ham"``.
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions
             (#498), the bulk in-model-speciated path; inert until CEDS forcing
             fluxes are supplied.
         jam_prescribed_speciated: include the CAM6/MAM4-faithful already-
             speciated emission path (#498); inert until per-tracer forcing
             fields are supplied.
+        jam_volcanic: include volcanic SO₂ (#1190), continuous degassing plus
+            eruptions; inert (with a run-start warning) until
+            ``forcing.volcanic_file`` supplies the sources.
         convective_updraft_precip_cover: choose the fractional precipitation
             cover ECHAM ``cuflx`` uses for the sub-cloud rain evaporation
             (``mo_cufluxdts.f90:414-420``, jax-gcm#812). ``None`` (default)
@@ -477,14 +679,31 @@ def echam_physics(
         cu_lmfmid: Enable ECHAM's mid-level convection trigger
             (``lmfmid``, default on). ``None`` leaves the trigger as the
             ``convection`` Parameters set it (on by default); ``False``
-            disables it. The trigger needs the dycore's ``omega``; a
-            backend that cannot supply it (pySES, #698) must set this
-            ``False`` or Model construction raises — hence the ne30
-            experiments turn it off (#715). Mutually exclusive with a
+            disables it. The trigger needs the dycore's ``omega``, which
+            both shipped backends (dinosaur, pySES) can supply (jax-gcm#698)
+            — a composition that still wants it off (the ne30 presets,
+            pending that campaign's own stability validation, #715) sets
+            this ``False``. Mutually exclusive with a
             ``ConvectionParameters`` object (set the field on that object
             instead) and with ``cu_lmfmid`` in a ``convection`` mapping;
             with a mapping of other fields it sets the base the mapping is
             applied to.
+        land_model: The land under the land tile. ``"prescribed"`` (default):
+            the prescribed-moisture JSBACH tile with a prognostic skin
+            (:mod:`jcm.physics.surface.echam.jsbach_land`, #979).
+            ``"slim"``: SLIM (Laguë et al. 2019, :mod:`jcm.physics.surface.slim`),
+            a water bucket, a snow bucket and a ten-layer soil temperature
+            column with prescribed monthly surface properties read from
+            ``forcing.slim_file``; composes
+            :class:`~jcm.physics.surface.slim.SlimLand` after the microphysics
+            and hands SLIM's constants to the vertical diffusion and the
+            boundary conditions. Not available with
+            ``prescribed_surface_fluxes`` (SLIM's surface is solved with the
+            lowest level). The ECHAM Hydra presets (the CLI) default to
+            ``"slim"``, with ``forcing.slim_file`` supplying the dataset, while
+            this Python factory defaults to ``"prescribed"``, because a
+            ``ForcingData`` built in Python carries no SLIM properties unless
+            the caller attaches them (``ForcingData.slim_properties``).
         coords: The model's coordinate system. The schemes whose tunable
             parameters have resolution-dependent defaults (the cloud cover's
             ``CloudParameters``, the 1M ``MicrophysicsParameters``) take the
@@ -519,16 +738,27 @@ def echam_physics(
         cosp_calipso: Also run the CALIPSO lidar simulator on the
             SAME subcolumn realization, giving the CFMIP
             ``cltcalipso``/``cllcalipso``/``clmcalipso``/
-            ``clhcalipso`` layered cloud cover.
+            ``clhcalipso`` layered cloud cover, each with a ``<name>_n``
+            time-mean-safety companion (see ``cosp_cloudsat``'s "Time-mean
+            safety" docstring section).
         cosp_modis: Also run the MODIS imager simulator on that
             realization (``cltmodis``, ``clwmodis``, ``climodis``,
             ``tauwmodis``, ``tauimodis``, ``reffclwmodis``,
             ``reffclimodis``, ``lwpmodis``, ``iwpmodis``, and the
             joint histograms ``clmodis`` / ``jpdftaure*modis`` /
-            ``lwpreffmodis`` / ``iwpreffmodis``).
+            ``lwpreffmodis`` / ``iwpreffmodis``). These are daytime-only
+            and/or in-cloud conditional means; a shared ``cosp_sunlit``
+            companion and the ``clwmodis``/``climodis`` weighting recover
+            them (see ``cosp_cloudsat``'s "Time-mean safety" docstring
+            section). The same retrievals also give ``lwpcci``/``iwpcci``,
+            the all-sky liquid and ice water paths as ESA Cloud_cci
+            retrieves them, with their daylight companion
+            ``cosp_sunlit_cci``.
         cosp_isccp: Also run the ISCCP (ICARUS) simulator on that
             realization (``clisccp`` tau/CTP histogram and
-            ``cltisccp``); see jax-gcm#597.
+            ``cltisccp``); see jax-gcm#597. Its products are daytime-only
+            means too, sharing the same ``cosp_sunlit`` companion
+            ``cosp_modis`` uses.
         aerosol_free_interval: radiation steps between aerosol-free
             companion solves, which produce the AeroCom ``*noa`` TOA fluxes
             (rsutnoa/rlutnoa and clear-sky variants) that ERFari is
@@ -537,20 +767,40 @@ def echam_physics(
             ``None`` (default)
                 No ``*noa`` fluxes and no extra cost.
             ``1``
-                A SECOND RRTMGP solve per compute step with the aerosol
-                optics zeroed. The exact reference. ~+64 % runtime,
-                radiation being the dominant cost of a step.
+                The aerosol-free twin of every problem, solved inside the
+                one RRTMGP call on the shared gas optics (only the cell
+                properties and the transport are repeated per g-point).
+                The exact reference. +88 % per radiation call
+                when it was a second solve, +48 % now
+                (142.7 -> 211.7 ms, T63L47 ``echam-jam-aerocom``
+                on an A100).
             ``N > 1``
                 That companion only every Nth step, holding the aerosol
                 EFFECT (as a fraction of the all-sky flux) in between. A
-                monotonic cost/fidelity dial: ~+17 % at N=4, for a
-                measured ERFari error of ~12 % — though that figure
-                predates three fixes to the hold and is a stale upper
-                bound (jax-gcm#648).
+                monotonic cost/fidelity dial (160 on average ms per call at
+                N=4), for a measured ERFari error of ~12 % at N=4 — though
+                that figure predates three fixes to the hold and is a stale
+                upper bound (jax-gcm#648).
 
-            The simulation is bit-identical at every N; only the diagnostic
-            is approximated. See ``docs/source/design/
-            aerocom_erfari_sampling.md``.
+            Only the diagnostic is approximated by N. The simulation is
+            unchanged to float32 rounding, not bit-identical: the fluxes
+            with aerosol come out of a program that also solves the twins
+            and is fused differently (see :class:`RRTMGPRadiation`). See
+            ``docs/source/design/aerocom_erfari_sampling.md``.
+        radiation_use_host_effective_radii: RRTMGP only — forward
+            ``use_host_effective_radii`` to :class:`RRTMGPRadiation`
+            (jax-gcm#1135): read the droplet/crystal effective radii from
+            the host's ``clouds.r_eff_liq``/``r_eff_ice`` instead of
+            forming them from the composition's own ``qnc``/``qni`` or
+            prescribed profile. Default False (every jcm-owned preset's
+            own cloud scheme is the radius source, as before). This knob
+            exists mainly so a composition built through this factory can
+            be exercised with host-supplied radii in tests/experiments;
+            jax-les, the motivating host, constructs
+            ``RRTMGPRadiation`` directly rather than through this factory.
+            Rejected (not silently ignored) with any other
+            ``radiation_scheme`` — see ``aerosol_free_interval`` above for
+            why that class of silent no-op is not acceptable here.
 
     """
     # Checked first so the grey request gets its own explanation rather than
@@ -565,6 +815,14 @@ def echam_physics(
     # through in silence — exactly the class of silently-ignored argument
     # this knob is meant to abolish.
     resolve_aerosol_free_interval(aerosol_free_interval)
+    if natural_aerosol and aerosol_module == "jam":
+        raise ValueError(
+            "natural_aerosol=True needs aerosol_module='macv2sp': the JAM "
+            "module carries dust, sea salt and the fine mode prognostically, "
+            "and the climatology would count them twice.")
+    if natural_aerosol is None:
+        natural_aerosol = (aerosol_module == "macv2sp"
+                           and radiation_scheme == "rrtmgp")
     if aerosol_free_interval is not None and radiation_scheme != "rrtmgp":
         raise ValueError(
             f"aerosol_free_interval={aerosol_free_interval!r} needs "
@@ -573,6 +831,17 @@ def echam_physics(
             "radiation term instance is composed as given, so "
             f"radiation_scheme={radiation_scheme!r} would silently emit "
             "all-zero *noa fluxes.")
+
+    # Same precedent as aerosol_free_interval: a radiation-scheme-specific
+    # flag paired with a different scheme (or a custom term instance) would
+    # otherwise be silently ignored rather than rejected.
+    if radiation_use_host_effective_radii and radiation_scheme != "rrtmgp":
+        raise ValueError(
+            f"radiation_use_host_effective_radii=True needs "
+            "radiation_scheme='rrtmgp' — only RRTMGPRadiation reads "
+            f"clouds.r_eff_liq/r_eff_ice as an input, so "
+            f"radiation_scheme={radiation_scheme!r} would silently ignore "
+            "it.")
 
     # ``None`` is normalised to the "auto" default: the Hydra builder strips
     # ``null`` kwargs (so ``physics.emulator_weights_file=null`` never reaches
@@ -593,6 +862,27 @@ def echam_physics(
             "radiation_scheme='emulated' — any other radiation scheme loads "
             f"no NN checkpoint, so radiation_scheme={radiation_scheme!r} "
             "would ignore it.")
+
+    # ``radiation_lw_solver`` selects the RRTMGP library's longwave transport;
+    # another scheme would ignore it (same precedent as emulator_weights_file).
+    if radiation_lw_solver != "two_stream" and radiation_scheme != "rrtmgp":
+        raise ValueError(
+            f"radiation_lw_solver={radiation_lw_solver!r} needs "
+            "radiation_scheme='rrtmgp' — no other radiation scheme has a "
+            f"library longwave solver, so radiation_scheme={radiation_scheme!r}"
+            " would ignore it.")
+    if radiation_scheme != "rrtmgp" and (
+            radiation_gas_optics_mode != DEFAULT_GAS_OPTICS_MODE
+            or radiation_gpt_chunk != DEFAULT_GPT_CHUNK
+            or radiation_use_scan != DEFAULT_USE_SCAN
+            or radiation_column_block != DEFAULT_COLUMN_BLOCK):
+        raise ValueError(
+            f"radiation_gas_optics_mode={radiation_gas_optics_mode!r} / "
+            f"radiation_gpt_chunk={radiation_gpt_chunk!r} / "
+            f"radiation_use_scan={radiation_use_scan!r} / "
+            f"radiation_column_block={radiation_column_block!r} are RRTMGP "
+            "options — radiation_scheme="
+            f"{radiation_scheme!r} would ignore them.")
 
     # Field-override mappings (see the docstring) are set aside here, so the
     # resolution below builds exactly the object this factory would use
@@ -637,13 +927,16 @@ def echam_physics(
     # so a Parameters object is refused as well as a mapping: either would
     # otherwise be dropped without a trace.
     _jam_args = dict(
-        seasalt=seasalt, dms=dms, anthropogenic_params=anthropogenic_params,
+        seasalt=seasalt, dms=dms, dust=dust,
+        anthropogenic_params=anthropogenic_params,
+        volcanic_params=volcanic_params,
         oxidants=oxidants, sulfur_gas=sulfur_gas, aqueous=aqueous,
         activation=activation, cloud_borne_exchange=cloud_borne_exchange,
         sedimentation=sedimentation, drydep=drydep, wetdep=wetdep,
         tracer_diffusion=tracer_diffusion, conv_transport=conv_transport)
     _jam_not_composed = {
         "anthropogenic_params": not jam_anthropogenic,
+        "volcanic_params": not jam_volcanic,
         "cloud_borne_exchange": not jam_cloud_borne,
         "conv_transport": not jam_convective_transport,
     }
@@ -656,6 +949,7 @@ def echam_physics(
             "The JAM scheme parameters need aerosol_module='jam' (got "
             f"{aerosol_module!r}); anthropogenic_params also needs "
             f"jam_anthropogenic=True (got {jam_anthropogenic}), "
+            f"volcanic_params jam_volcanic=True (got {jam_volcanic}), "
             "cloud_borne_exchange jam_cloud_borne=True (got "
             f"{jam_cloud_borne}) and conv_transport "
             f"jam_convective_transport=True (got {jam_convective_transport}).")
@@ -667,10 +961,12 @@ def echam_physics(
 
     # ``cu_lmfmid`` is the scalar escape hatch for the ECHAM mid-level
     # convection trigger (ECHAM ``lmfmid``, default on). With it on,
-    # TiedtkeConvection declares an ``omega`` dycore requirement; a backend
-    # that cannot supply omega — today pySES (#698) — then fails at Model
-    # construction, so the ne30 experiments turn it off. It is a scalar flag
-    # so a preset can pin it in one line (``physics.cu_lmfmid=false``).
+    # TiedtkeConvection declares an ``omega`` dycore requirement, which both
+    # shipped backends can now supply (jax-gcm#698); a composition that
+    # still wants it off for other reasons (the ne30 presets, pending that
+    # campaign's own stability validation — #715) sets this ``False``. It
+    # is a scalar flag so a preset can pin it in one line
+    # (``physics.cu_lmfmid=false``).
     # Passing it with a ConvectionParameters object is a silently-ignored-
     # argument bug — the class this factory abolishes — so it is rejected;
     # set cu_lmfmid on the object you pass instead. With a field-override
@@ -691,12 +987,24 @@ def echam_physics(
     truncation = 63 if coords is None else spectral_truncation(coords)
     clouds_are_defaults = clouds is None
     microphysics_are_defaults = microphysics is None
-    clouds_p = clouds or default_parameters(CloudParameters, truncation)
+    # Used below to tell RRTMGPRadiation's resolution-defaulted
+    # RadiationParameters (#974) from a user-supplied object, same
+    # ``params_are_defaults`` contract as the cloud terms.
+    radiation_are_defaults = radiation is None
+    # The T63 cover is calibrated per droplet-number source: JAM activates its
+    # droplets from the prognostic aerosol (echam_cloud_defaults).
+    clouds_p = clouds or CloudParameters.default(
+        truncation=truncation, jam_aerosol=aerosol_module == "jam")
     microphysics_p = microphysics or default_parameters(
         MicrophysicsParameters, truncation)
     microphysics_2m_are_defaults = microphysics_2m is None
     microphysics_2m_p = microphysics_2m or default_parameters(
         CloudParams2M, truncation)
+    if microphysics_2m is None and aerosol_module != "jam":
+        # The 2M defaults are the JAM hosts' warm rain; a prescribed droplet
+        # number has its own pair, fitted with its cover.
+        microphysics_2m_p = microphysics_2m_p.replace(**{
+            k: jnp.asarray(v) for k, v in PRESCRIBED_DROPLET_WARM_RAIN_2M.items()})
     if isinstance(radiation_scheme, PhysicsTerm):
         # A radiation term instance carries its own parameters; the factory
         # reads them back (below) rather than composing a second, possibly
@@ -709,11 +1017,29 @@ def echam_physics(
                 "pass them to its constructor (params=...).")
         radiation_p = None
     else:
-        # An explicit ``radiation=`` wins over the factory default.
-        radiation_p = radiation or default_radiation_parameters(aerosol_module)
+        # An explicit ``radiation=`` wins over the factory default. Built for
+        # the run's truncation (#974), same as clouds_p/microphysics_p above.
+        radiation_p = radiation or default_radiation_parameters(
+            aerosol_module, truncation)
     vertical_diffusion_p = vertical_diffusion or VDiffParameters.default()
     surface_p = surface or SurfaceParameters.default()
     land_surface_p = land_surface or JsbachLandParameters.default()
+    if land_model not in ("prescribed", "slim"):
+        raise ValueError(f"land_model must be 'prescribed' or 'slim', got {land_model!r}")
+    if land_model != "slim" and slim_land:
+        raise ValueError("slim_land overrides SLIM's constants, which only "
+                         "land_model='slim' composes.")
+    slim_p = None
+    if land_model == "slim":
+        if prescribed_surface_fluxes:
+            raise ValueError(
+                "land_model='slim' solves the land surface with the lowest level; "
+                "prescribed_surface_fluxes switches that coupling off.")
+        if isinstance(slim_land, Mapping):
+            slim_p = with_field_overrides(SlimParameters.default(), slim_land,
+                                          scheme="slim_land")
+        else:
+            slim_p = slim_land or SlimParameters.default()
     aerosol_p = aerosol or AerosolParameters.default()
     hines_p = hines or HinesParameters.default()
     sso_p = sso or SSOParameters.default()
@@ -721,21 +1047,66 @@ def echam_physics(
     if aerosol_module == "jam":
         # Imported here, not at module scope: the JAM package is only worth
         # loading for a JAM composition (as ``jam_aerosol_physics`` below).
-        from jcm.physics.aerosol.jam.jam_terms import JAM_PARAMETER_CLASSES
+        from jcm.physics.aerosol.jam.jam_terms import (
+            JAM_PARAMETER_CLASSES, activation_parameter_class)
+        _jam_classes = {**JAM_PARAMETER_CLASSES,
+                        "activation": activation_parameter_class(
+                            jam_activation_scheme)}
         # A mapping is applied on the class default (the JAM schemes have no
         # factory choice of their own to keep); an object is used as given and
         # ``None`` leaves the scheme to build its default.
+        # The sea-salt default depends on the scheme (Gong's calibration,
+        # Long's native scale).
+        _jam_defaults = {name: cls.default for name, cls in _jam_classes.items()}
+        _jam_defaults["seasalt"] = lambda: _jam_classes["seasalt"].default(
+            jam_seasalt_scheme)
+        # ``dust`` is excluded here and handled below: unlike every other JAM
+        # scheme, its base is composition-derived (the ``jam_dust_*`` flags
+        # and the run's truncation), known only once ``DustEmissions.
+        # cache_coords`` runs against the real grid. Resolving a mapping into
+        # a concrete object at this point — the factory's OWN (possibly
+        # fallback T63) truncation — would make it indistinguishable from an
+        # explicit object, so ``cache_coords`` could never correct it for the
+        # real grid: a non-T63 run with a ``dust`` mapping would silently
+        # keep T63 values (Codex review, jax-gcm#1123). See
+        # ``jam_aerosol_physics``'s ``dust_field_overrides``.
         jam_p = {
             name: (with_field_overrides(
-                       JAM_PARAMETER_CLASSES[name].default(), value,
+                       _jam_defaults[name](), value,
                        scheme=name)
                    if isinstance(value, Mapping) else value)
-            for name, value in _jam_args.items()}
+            for name, value in _jam_args.items() if name != "dust"}
+        jam_p["dust"] = None if isinstance(dust, Mapping) else dust
+        jam_p["dust_field_overrides"] = (
+            dust if isinstance(dust, Mapping) else None)
     # Fields a valid mapping can set but no run of this composition reads. A
     # sweep over one would run identical arms, so each is flagged, not
     # rejected (the scheme still takes the object, and a configuration that
     # composes differently may read it).
+    # HAM activation reads one updraft tunable set per path: the PDF (ham_arg
+    # with jam_nactivpdf != 0) only w_sigma_min, the single updraft w_min with
+    # fact_tke (ARG) or fact_tke_lin_leaitch (Lin & Leaitch).
+    _ham_activation = jam_activation_scheme in ("ham_arg", "ham_lin_leaitch")
+    _ham_pdf = jam_activation_scheme == "ham_arg" and bool(jam_nactivpdf)
     _jam_inert_fields = {
+        ("activation", "w_min"): (
+            _ham_pdf,
+            "HAM's updraft PDF (jam_nactivpdf != 0) takes its width from "
+            "sqrt(2/3 TKE) floored at w_sigma_min and never reads the "
+            "single-updraft floor"),
+        ("activation", "fact_tke"): (
+            _ham_pdf or jam_activation_scheme == "ham_lin_leaitch",
+            "it is HAM's ARG single-updraft prefactor: the updraft PDF "
+            "(jam_nactivpdf != 0) does not read it and Lin & Leaitch reads "
+            "fact_tke_lin_leaitch"),
+        ("activation", "fact_tke_lin_leaitch"): (
+            jam_activation_scheme == "ham_arg",
+            "only HAM's Lin & Leaitch activation "
+            "(jam_activation_scheme=ham_lin_leaitch) reads it"),
+        ("activation", "w_sigma_min"): (
+            _ham_activation and not _ham_pdf,
+            "only HAM's updraft PDF (jam_activation_scheme=ham_arg with "
+            "jam_nactivpdf != 0) reads it"),
         ("wetdep", "conv_scav_ratio"): (
             jam_convective_transport,
             "the convective in-cloud scavenging is then the transport term's "
@@ -795,22 +1166,26 @@ def echam_physics(
             )
         rad_term = radiation_scheme
         # Siblings that follow the radiation cadence (the JAM optics gate)
-        # must read it from the instance itself. Every in-tree radiation term
-        # holds its RadiationParameters as ``self.params``; a term that does
-        # not leaves ``radiation_p`` None, which is an error only where a
-        # sibling needs it (below), never a silent default.
-        _held = getattr(rad_term, "params", None)
-        _held = _held.get_value() if hasattr(_held, "get_value") else _held
-        radiation_p = (_held if isinstance(_held, RadiationParameters)
-                       else None)
+        # must read it from the instance itself. ``radiation_parameters_of``
+        # reads it off ``self.params``; a term that exposes none comes back
+        # ``None``, which is an error only where a sibling needs it (below),
+        # never a silent default.
+        radiation_p = radiation_parameters_of(rad_term)
     elif radiation_scheme == "rrtmgp":
-        # compute_cre doubles the RRTMGP work on radiation steps (a second
-        # full clear-sky solve) purely for the CRE diagnostic — production
+        # compute_cre adds the clear-sky transport (on the all-sky solve's
+        # shared gas optics) purely for the CRE diagnostic — production
         # throughput runs can turn it off.
         rad_term = RRTMGPRadiation(
             params=radiation_p,
             compute_cre=radiation_compute_cre,
-            aerosol_free_interval=aerosol_free_interval)
+            aerosol_free_interval=aerosol_free_interval,
+            use_host_effective_radii=radiation_use_host_effective_radii,
+            lw_solver=radiation_lw_solver,
+            gas_optics_mode=radiation_gas_optics_mode,
+            gpt_chunk=radiation_gpt_chunk,
+            use_scan=radiation_use_scan,
+            column_block=radiation_column_block,
+            **defaults_flag_kwargs(RRTMGPRadiation, radiation_are_defaults))
     elif radiation_scheme == "emulated":
         # "auto" (default) resolves the packaged trained checkpoint
         # (jcm/data/emulator_weights_per_band_u64.nc). The explicit "random"
@@ -830,14 +1205,25 @@ def echam_physics(
             "Choose 'rrtmgp' (default), 'emulated', or pass a radiation "
             "PhysicsTerm instance."
         )
-    # Aerosol and cloud optics need the same band metadata as the selected
-    # radiation term, so Python-created RRTMGP compositions must carry the
-    # multi-band config just like the Hydra runner path — both resolve it
-    # through RadiationBandConfig.for_terms. The emulator is included: its
-    # per-band features expect the RRTMGP band structure, and a broadband
-    # 1-SW/0-LW aerosol layout fails its band-count check at first compute.
-    band_config = RadiationBandConfig.for_terms([rad_term])
+    # `band_config` is NOT precomputed here any more (jax-gcm#926's final
+    # design): leaving it unset (`None`) on the `ComposablePhysics(...)`
+    # call below means `_finalize`/`cache_coords()` derives it lazily from
+    # whichever radiation term is actually in the FINAL term set --
+    # including after a later `replace("radiation", ...)`, which this
+    # factory's own eager `RadiationBandConfig.for_terms([rad_term])` used
+    # to silently survive (the exact bug `test_replace_radiation_matches_
+    # the_factory_route` exists to catch): a value computed here is, from
+    # `ComposablePhysics`'s perspective, indistinguishable from a genuine
+    # user override, so it would be carried through `replace`/`remove`/`+`
+    # VERBATIM even after the radiation term it was computed FOR is gone.
 
+    if jam_wetdep_scheme in ("ham_below_cloud", "ham") and cloud_scheme != "2m":
+        raise ValueError(
+            f"jam_wetdep_scheme={jam_wetdep_scheme!r} requires cloud_scheme="
+            "'2m' (it reads the 2M scheme's 'precip_cover'/'pfrain'/'pfsnow' "
+            "diagnostics; the 1M scheme does not compute them), got "
+            f"cloud_scheme={cloud_scheme!r}."
+        )
     if cloud_scheme == "1m":
         micro_term = Echam1MMicrophysics(
             params=microphysics_p,
@@ -857,6 +1243,14 @@ def echam_physics(
             aerosol_p.spa_exponent,
             aerosol_p.spa_cap_smoothing,
         )
+        # HAM's below-cloud wetdep pathway needs three per-level
+        # hydrological inputs only the 2M scheme computes: the
+        # precipitating-area fraction (ECHAM's pclc/zclcpre) and the
+        # in-cloud pre-evaporation rain/snow flux (zfrain/zfsnow); see
+        # WetScavenging's "ham_below_cloud" scheme and
+        # Lohmann2MMicrophysics.configure_wetdep_hydro_diagnostics.
+        if jam_wetdep_scheme in ("ham_below_cloud", "ham"):
+            micro_term.configure_wetdep_hydro_diagnostics(True)
     else:
         raise ValueError(
             f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."
@@ -889,6 +1283,8 @@ def echam_physics(
         )
     if aerosol_module == "macv2sp":
         aerosol_terms = [Macv2SpAerosol(params=aerosol_p)]
+        if natural_aerosol:
+            aerosol_terms.append(Macv2NaturalAerosol())
     elif aerosol_module == "jam":
         if cloud_scheme != "2m":
             # The JAM wet-deposition and cloud-borne exchange terms key to
@@ -906,17 +1302,28 @@ def echam_physics(
             )
         from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
         jam_terms = jam_aerosol_physics(
-            microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
-            optics=jam_optics,
+            microphysics=jam_microphysics,
+            microphysics_options=jam_microphysics_options,
+            cloud_borne=jam_cloud_borne,
+            optics=jam_optics, optics_backend=jam_optics_backend,
+            ham_optics_tables_dir=jam_optics_tables_dir,
+            seasalt_scheme=jam_seasalt_scheme,
+            wetdep_scheme=jam_wetdep_scheme,
+            nucleation_activation=jam_nucleation_activation,
             arg_variant=jam_arg_variant,
+            activation_scheme=jam_activation_scheme,
+            nactivpdf=jam_nactivpdf,
             aqueous_scheme=jam_aqueous_scheme,
             incloud_impaction=jam_incloud_impaction,
+            below_cloud_lookup=jam_below_cloud_lookup,
+            stratiform_nucleation=jam_stratiform_nucleation,
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,
             dust_nduscale_scale=jam_dust_nduscale_scale,
             **jam_p,
             anthropogenic=jam_anthropogenic,
             prescribed_speciated=jam_prescribed_speciated,
+            volcanic=jam_volcanic,
             convective_transport=jam_convective_transport,
             optics_diagnostics=aerocom_optics,
         )
@@ -1025,8 +1432,14 @@ def echam_physics(
     aerocom_terms: list[PhysicsTerm] = []
     if enable_aerocom:
         from jcm.physics.diagnostics.aerocom import AerocomDiagnostics
+        from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
+        # The number/PM diagnostics integrate the run's own modes (M7 has
+        # seven, MAM4 four), so the diagnostic takes the JAM core's spec.
+        jam_core = next((t for t in (jam_terms if aerosol_module == "jam" else ())
+                         if isinstance(t, ModalMicrophysicsTerm)), None)
         aerocom_terms = [AerocomDiagnostics(
-            groups=tuple(aerocom_groups), overlap=aerocom_overlap)]
+            groups=tuple(aerocom_groups), overlap=aerocom_overlap,
+            aerosol_spec=jam_core.spec if jam_core is not None else None)]
 
     # Forced surface mode (#301): the vdiff implicit solve runs
     # interior-only (its surface Robin BC off) and the prescribed fluxes
@@ -1041,7 +1454,9 @@ def echam_physics(
     return ComposablePhysics(
         terms=[
             MoistAirColumnState(),
-            EchamBoundaryConditions(),
+            EchamBoundaryConditions(
+                slim_albedo=None if slim_p is None else slim_p.albedo,
+                slim_params=slim_p),
             *aerosol_terms,
             SimpleChemistry(),
             SundqvistCloudFraction(
@@ -1051,6 +1466,8 @@ def echam_physics(
                 params=vertical_diffusion_p,
                 land_params=land_surface_p,
                 couple_surface=not prescribed_surface_fluxes,
+                land_model=land_model,
+                slim_params=slim_p,
             ),
             *prescribed_terms,
             EchamSurface(params=surface_p),
@@ -1068,6 +1485,9 @@ def echam_physics(
                 ),
             ),
             micro_term,
+            # SLIM's buckets take the step's rain and snow, after the
+            # convection and the microphysics have delivered them.
+            *([SlimLand(params=slim_p)] if slim_p is not None else []),
             # Publishes the package-independent surface-exchange coupling
             # struct (#754). After the microphysics so the stratiform
             # precipitation it reads is the SAME step's.
@@ -1083,5 +1503,4 @@ def echam_physics(
         ],
         checkpoint_terms=checkpoint_terms,
         vectorize_columns=True,
-        band_config=band_config,
     )

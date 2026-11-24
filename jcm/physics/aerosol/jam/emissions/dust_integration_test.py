@@ -18,9 +18,13 @@ import numpy as np
 import pytest
 import xarray as xr
 
-# A T21 Gaussian grid: 32 latitudes x 64 longitudes.
+# A T21 Gaussian grid: 32 latitudes x 64 longitudes. T21 is the lowest
+# spectral truncation ``get_coords`` accepts; 4 sigma levels (vs. the
+# original 20) is unrelated to any of this file's assertions (column-gating,
+# month-boundary selection, finiteness, the MAM4 mode split) and shrinks
+# every test that builds a ``Model`` or a ``DustEmissions`` term here.
 _NLAT, _NLON = 32, 64
-_TRUNC, _NLEV = 21, 20
+_TRUNC, _NLEV = 21, 4
 _MONTHS = np.array([np.datetime64(f"2005-{m:02d}-01") for m in range(1, 13)])
 
 
@@ -183,7 +187,12 @@ class DustEndToEndTest(unittest.TestCase):
 
         Exercises the term inside ``ComposablePhysics`` under the scan — the
         carry-state path, the diagnostics pytree and the tracer tendencies —
-        which the per-call unit tests never reach.
+        which the per-call unit tests never reach. One 30-minute step is
+        enough: the dust source is time-independent within a month (the
+        fixtures's whole-grid mask), so emission -- and therefore the carry/
+        diagnostics/tendency plumbing this test guards -- is already active
+        on step 1; it does not need to accumulate over several steps the way
+        a transport-chain burden check would.
         """
         import jax.numpy as jnp
 
@@ -192,7 +201,9 @@ class DustEndToEndTest(unittest.TestCase):
         mask = np.ones((_NLAT, _NLON), dtype=bool)
         with tempfile.TemporaryDirectory() as tmp:
             forcing = _forcing_with_dust(coords, _write_dust_fixtures(tmp, mask))
-        preds = model.run(forcing=forcing, save_interval=0.125, total_time=0.125)
+        one_step_days = 30 / 1440  # a single 30-minute (time_step) GCM step
+        preds = model.run(forcing=forcing, save_interval=one_step_days,
+                           total_time=one_step_days)
         dyn = preds.dynamics
         self.assertFalse(bool(jnp.any(jnp.isnan(dyn.temperature))))
         for key in (mass_name("du", "acc"), mass_name("du", "cor"),

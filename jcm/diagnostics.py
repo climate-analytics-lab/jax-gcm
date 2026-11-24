@@ -80,12 +80,73 @@ def aerosol_budget_report(ds, dt_seconds: float) -> list[str]:
     return lines
 
 
-def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
+def check_health(ds, chunk_idx: int, elapsed_days: float, *,
+                 is_bootstrap_chunk: bool | None = None,
+                 max_wind_speed: float | None = 250.0,
+                 max_temperature: float | None = 400.0,
+                 boundary_state=None) -> tuple[bool, dict]:
     """Inspect ``ds`` for atmosphere-blowup signatures.
 
     ``ds`` is the xarray Dataset returned by
     ``ModelPredictions.to_xarray()``. The function looks at the *last*
     timestep in the dataset.
+
+    ``boundary_state`` (Codex review finding on #1145): under
+    ``run.output_averages=true`` (every ``run=longrun``/``run=pyses_year``
+    chunked run) ``ds``'s fields are INTERVAL MEANS over the save interval,
+    not the instantaneous chunk-boundary state -- a wind that alternates
+    sign within the interval averages toward zero and passes a speed
+    ceiling the instantaneous wind blew straight through, and a transient
+    temperature spike is smoothed the same way. Pass the gridpoint
+    ``PhysicsState`` at the chunk boundary (``model.dycore.to_physics_state
+    (job.run_state.dynamics)`` in ``jcm.runners.run_chunked``) to evaluate
+    every extreme-value check -- ``T_min``/``T_max``/``T_nan_frac``,
+    ``q_max_gkg``/``q_mean_gkg``/``q_nan_frac``, and the wind-speed ceiling
+    -- on that instantaneous snapshot instead of ``ds``. Left ``None`` (any
+    caller with no such snapshot, including this module's own tests and
+    the non-chunked/prescribed/scm run modes, which already evaluate an
+    instantaneous state), those checks fall back to ``ds`` as before. The
+    NaN scan and the informational surface-temperature/radiation/precip/
+    emission-wind fields are NOT moved: a NaN anywhere in the interval
+    propagates forward and so still shows in the mean (checking the mean
+    is, if anything, more sensitive, since it also catches a NaN that
+    healed before the boundary), and the emission-wind fraction is a
+    deliberately interval-based diagnostic (see its own comment below).
+    Orientation (physics-internal top-first vs. output surface-first)
+    never matters here: every check is a plain min/max/mean over the
+    whole field, independent of which end is which.
+
+    ``chunk_idx`` is only the cosmetic ordinal shown in ``report["chunk"]``/
+    ``print_report`` -- it is NOT what decides the one-legitimate-fallback
+    exemption below. ``is_bootstrap_chunk`` is: pass it explicitly as
+    whether this chunk's own simulated interval starts at the run's
+    absolute time zero. ``jcm.runners.run_chunked`` does, from
+    ``job.elapsed_seconds - job.cur_chunk_seconds == 0`` rather than from
+    ``chunk_idx``: under #903, a monthly schedule's leading edge can be
+    shorter than ``run.chunk_days``, so a resume from the checkpoint it
+    wrote lands ``elapsed_seconds // chunk_seconds == 0`` for the very next
+    (body) interval too, even though that interval is not the bootstrap one
+    -- ``chunk_idx`` is a stale proxy for "simulation time zero" once chunks
+    are not all the same length. Left ``None`` (any other caller, including
+    this module's own tests), the exemption falls back to ``chunk_idx ==
+    0``, i.e. the pre-#903 meaning, for a caller using ``chunk_idx`` as a
+    plain ordinal with no better signal to give.
+
+    ``max_wind_speed`` (m/s) and ``max_temperature`` (K) are the two
+    configurable ceilings from #1145: an unforced dry core (no physics, or
+    physics that only ever removes energy/momentum such as SSO drag) has no
+    equilibrium to relax to and can drift to an arbitrarily extreme state
+    without ever producing a NaN or crossing the much larger absolute-blowup
+    thresholds below (``T_max > 500``). The 2026-10-16 Lott-Miller
+    investigation found a two-year dry T63 core reaching ~520 m/s top-level
+    winds (max 672) and ~467 K (L95; ~420 m/s / 351 K at L47) while every
+    chunk reported ``OK``. Defaults (250 m/s, 400 K) sit well above every
+    validated configuration (Held-Suarez on the same core: 78 m/s, 314 K;
+    the T21 smoke configurations and the release-matrix bands are all far
+    cooler/calmer) but below that drift, so a healthy run never trips them.
+    Either may be set to ``None`` to disable it for a deliberately hot/windy
+    experiment. Configured via ``run.health.max_wind_speed`` /
+    ``run.health.max_temperature`` (see ``jcm/config/run/default.yaml``).
 
     Returns
     -------
@@ -94,24 +155,47 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
         report dict can be passed straight to ``print_report``.
 
     """
+    if is_bootstrap_chunk is None:
+        is_bootstrap_chunk = chunk_idx == 0
     report: dict = {"chunk": chunk_idx, "elapsed_days": elapsed_days}
 
     nan_vars = [v for v in ds.data_vars if ds[v].isnull().any()]
     report["n_nan_vars"] = len(nan_vars)
     report["n_total_vars"] = len(ds.data_vars)
 
-    if "temperature" in ds:
-        T_vals = ds["temperature"].isel(time=-1).values
+    # Every extreme-value check below prefers the instantaneous
+    # ``boundary_state`` (see the docstring) over ``ds``, which may be an
+    # interval mean.
+    if boundary_state is not None:
+        T_vals = np.asarray(boundary_state.temperature)
+        u_vals = np.asarray(boundary_state.u_wind)
+        v_vals = np.asarray(boundary_state.v_wind)
+        q_vals_kgkg = np.asarray(boundary_state.specific_humidity)
+    else:
+        T_vals = (np.asarray(ds["temperature"].isel(time=-1).values)
+                 if "temperature" in ds else None)
+        u_vals = (np.asarray(ds["u_wind"].isel(time=-1).values)
+                 if "u_wind" in ds else None)
+        v_vals = (np.asarray(ds["v_wind"].isel(time=-1).values)
+                 if "v_wind" in ds else None)
+        q_vals_kgkg = (np.asarray(ds["specific_humidity"].isel(time=-1).values)
+                      if "specific_humidity" in ds else None)
+
+    if T_vals is not None:
         report["T_min"] = float(np.nanmin(T_vals))
         report["T_max"] = float(np.nanmax(T_vals))
         report["T_mean"] = float(np.nanmean(T_vals))
         report["T_nan_frac"] = float(np.isnan(T_vals).mean())
 
-    if "specific_humidity" in ds:
+    if u_vals is not None and v_vals is not None:
+        speed = np.hypot(u_vals, v_vals)
+        report["wind_speed_max"] = float(np.nanmax(speed))
+        report["wind_speed_mean"] = float(np.nanmean(speed))
+
+    if q_vals_kgkg is not None:
         # Public state and serialized output use kg/kg. Convert only the
         # human-facing health metrics to g/kg so their names and thresholds
         # stay intuitive (healthy tropical near-surface q is ~10--25 g/kg).
-        q_vals_kgkg = ds["specific_humidity"].isel(time=-1).values
         report["q_max_gkg"] = float(np.nanmax(q_vals_kgkg)) * 1000.0
         report["q_mean_gkg"] = float(np.nanmean(q_vals_kgkg)) * 1000.0
         report["q_nan_frac"] = float(np.isnan(q_vals_kgkg).mean())
@@ -169,15 +253,33 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
         ok = False
         reasons.append(f"q_max={report['q_max_gkg']:.1f} g/kg (> 100)")
 
+    # #1145: configurable ceilings that catch an unforced/underdamped core
+    # drifting far outside any physical regime well before it reaches the
+    # absolute-blowup thresholds above (or produces a NaN at all).
+    if (max_wind_speed is not None
+            and report.get("wind_speed_max", 0) > max_wind_speed):
+        ok = False
+        reasons.append(
+            f"wind_speed_max={report['wind_speed_max']:.0f} m/s "
+            f"(> {max_wind_speed:.0f})")
+    if (max_temperature is not None
+            and report.get("T_max", 0) > max_temperature):
+        ok = False
+        reasons.append(
+            f"T_max={report['T_max']:.0f}K (> {max_temperature:.0f}K)")
+
     # A fallback that never stops is a different thing from the bootstrap
     # step: it reads 1.0 in EVERY chunk (no vdiff term, or wind_10m never
     # published), and costs +37-46 % sea salt for the whole run. Caught by
     # bounding the legitimate value rather than by exempting a case:
-    # after the first chunk the flag can only be zero, and a one-step chunk —
-    # the one legitimate way to read 1.0 — can only be the first. So this
-    # needs no timestep and no notion of a cold start, which is what the
-    # earlier exemption needed and crashed on (run.time_step: null).
-    if (chunk_idx > 0
+    # after the first simulated interval the flag can only be zero, and a
+    # one-step interval — the one legitimate way to read 1.0 — can only be
+    # the first. So this needs no timestep and no notion of a cold start,
+    # which is what the earlier exemption needed and crashed on
+    # (run.time_step: null). "The first" is ``is_bootstrap_chunk``, not
+    # ``chunk_idx > 0`` (see the docstring: #903's variable-length edges
+    # make chunk_idx a stale proxy for it after a resume).
+    if (not is_bootstrap_chunk
             and report.get("emission_wind_model_level_frac", 0.0) > 0.5):
         ok = False
         reasons.append(
@@ -204,6 +306,11 @@ def print_report(report: dict) -> None:
         print(
             f"  Temperature: {report['T_min']:.1f} - {report['T_max']:.1f} K "
             f"(mean {report['T_mean']:.1f} K, NaN {report.get('T_nan_frac', 0):.1%})"
+        )
+    if "wind_speed_max" in report:
+        print(
+            f"  Wind speed:  max {report['wind_speed_max']:.1f} m/s "
+            f"(mean {report['wind_speed_mean']:.1f} m/s)"
         )
     if "q_max_gkg" in report:
         print(

@@ -7,10 +7,11 @@ get the per-month averages the test compares) and
 becomes the stored mean/std climatology).
 
 ``generate()`` writes ``default_statistics.nc`` next to itself. Run it
-once whenever the default integration scheme changes in a way that
-shifts the 90-day climatology — most recently the operator-split
-refactor (#471), which shifted lower-level humidity enough to break
-the 3σ bands.
+whenever the default model changes in a way that shifts the 90-day
+climatology: the integration scheme, or a default physics choice. The
+stored bands are the default ``Model`` with SPEEDY's slab land
+(``SpeedySurfaceFlux``'s default); a humidity band is narrow enough that a
+change of land model leaves it.
 
 Usage (recommended on GPU, tens of minutes on a single A100)::
 

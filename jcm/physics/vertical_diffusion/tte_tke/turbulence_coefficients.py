@@ -1,7 +1,9 @@
-"""Turbulence coefficient calculations for vertical diffusion.
+"""Surface exchange and turbulence diagnostics of the vertical diffusion.
 
-This module computes exchange coefficients for momentum, heat, and moisture
-based on atmospheric stability and turbulence closure schemes.
+The interior exchange coefficients are ECHAM's closure (:mod:`.closure`); this
+module holds the interior Richardson number, the Businger-Dyer surface-layer
+option, the friction velocities and the assembly of
+:class:`~.vertical_diffusion_types.VDiffDiagnostics`.
 """
 
 import jax
@@ -9,8 +11,27 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from .closure import lowest_level_height_above_surface
 from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
+from .surface_layer import tile_wind_speed
 from .vertical_diffusion_types import VDiffParameters, VDiffState, VDiffDiagnostics
+
+
+def _lowest_level_reference_height(state: VDiffState) -> jnp.ndarray:
+    """ECHAM's surface-layer reference height ``pgeom1(klev)/g`` [m] (ncol,).
+
+    Unfloored, as :func:`~.closure.lowest_level_height_above_surface` itself
+    is — each caller here applies the same floor it already did on the old
+    ``height_full[:,-1] - height_half[:,-1]`` (jax-gcm#1171): that difference
+    is half the gap between the two lowest full levels (``height_half[-1]``
+    is an extrapolated bottom half-level for OTHER diagnostics'
+    layer-thickness bookkeeping, ``moist_air_state.py``), not ECHAM's own
+    hydrostatic lowest-level height.
+    """
+    tv_air = state.temperature[:, -1] * (1.0 + c.vtmpc1 * state.qv[:, -1]
+                                          - state.qc[:, -1] - state.qi[:, -1])
+    return lowest_level_height_above_surface(
+        tv_air, state.pressure_half[:, -2], state.pressure_half[:, -1])
 
 
 @jax.jit
@@ -35,168 +56,6 @@ def compute_richardson_number(state: VDiffState) -> jnp.ndarray:
     return richardson_number(*interior_buoyancy_and_shear(state))
 
 
-@jax.jit
-def compute_mixing_length(
-    height_full: jnp.ndarray,
-    height_half: jnp.ndarray,
-    richardson_number: jnp.ndarray,
-    boundary_layer_height: jnp.ndarray,
-    von_karman: float = 0.4,
-    ri_critical: float = 0.25
-) -> jnp.ndarray:
-    """Compute mixing length for turbulence parameterization.
-    
-    Args:
-        height_full: Full level heights [m] (ncol, nlev)
-        height_half: Half level heights [m] (ncol, nlev+1)
-        richardson_number: Richardson number [-] (ncol, nlev-1)
-        boundary_layer_height: PBL height [m] (ncol,)
-        von_karman: von Kármán constant [-]
-        ri_critical: Critical Richardson number [-]
-        
-    Returns:
-        Mixing length [m] (ncol, nlev)
-
-    """
-    ncol, nlev = height_full.shape
-    
-    # Distance from surface
-    surface_height = height_half[:, -1:] # Surface is at bottom
-    distance_from_surface = height_full - surface_height
-    
-    # Distance from top
-    top_height = height_half[:, :1]  # Top is at index 0
-    distance_from_top = top_height - height_full
-    
-    # Free atmosphere mixing length (asymptotic value)
-    mixing_length_free = jnp.minimum(distance_from_surface, distance_from_top)
-    
-    # Boundary layer mixing length
-    # Near surface: l = κz (von Kármán length scale)
-    mixing_length_surface = von_karman * distance_from_surface
-    
-    # Within PBL: limit by boundary layer height
-    pbl_height_expanded = boundary_layer_height[:, None]
-    mixing_length_pbl = jnp.minimum(
-        mixing_length_surface,
-        0.1 * pbl_height_expanded
-    )
-    
-    # Combine surface and free atmosphere contributions
-    mixing_length = jnp.minimum(mixing_length_pbl, mixing_length_free)
-    
-    # Apply stability correction based on Richardson number
-    # Extend Richardson number to full levels (pad with boundary values)
-    # Richardson number is defined at interfaces (nlev-1), need to interpolate to full levels (nlev)
-    ri_extended = jnp.concatenate([
-        richardson_number[:, :1],    # Extend top value
-        richardson_number           # Interior values - this gives (nlev-1) more
-    ], axis=1)
-    # ri_extended now has shape (ncol, nlev) which matches mixing_length
-    
-    # Stability function: reduce mixing length for stable conditions.
-    #
-    # The natural form ``(1 - Ri/Ri_crit)²`` is only physically meaningful
-    # for ``0 ≤ Ri < Ri_crit``. The previous version applied it without
-    # capping ``Ri`` at zero, which let negative (unstable) Richardson
-    # numbers drive the squared factor unboundedly upward — Ri = -100
-    # gives ``(1 - (-400))² = 160 000``, scaling the mixing length to
-    # ~10¹⁴ m, propagating into Km/Kh and the implicit matrix solve, and
-    # NaN'ing the atmosphere within a couple of timesteps in averaged
-    # mode (the snapshot path happened to dodge the worst columns).
-    #
-    # Bounded form: clip Ri to [0, Ri_crit] before squaring. Unstable
-    # columns get neutral-strength mixing (factor = 1); stable columns
-    # smoothly reduce toward 0.1; super-critical Ri gets background
-    # mixing. A future improvement would be a proper Louis/Monin-Obukhov
-    # stability function with an unstable-enhancement branch, but this
-    # is the minimal change that's physically defensible.
-    ri_in_band = jnp.clip(ri_extended, 0.0, ri_critical)
-    stability_factor = jnp.where(
-        ri_extended < ri_critical,
-        jnp.maximum(0.1, (1.0 - ri_in_band / ri_critical) ** 2),
-        0.1,
-    )
-
-    mixing_length = mixing_length * stability_factor
-
-    return jnp.maximum(mixing_length, 1.0)  # Minimum mixing length
-
-
-@jax.jit
-def compute_exchange_coefficients(
-    state: VDiffState,
-    params: VDiffParameters,
-    mixing_length: jnp.ndarray,
-    richardson_number: jnp.ndarray
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Compute exchange coefficients for momentum, heat, and moisture.
-
-    Uses the Mellor-Yamada level 2.5 / TTE-TKE closure that ECHAM also
-    implements (``vdiff.f90`` lines around the ``zsm``/``zsh``/``ztkesq``
-    block):
-
-        K_m = c_m · l · √TKE
-        K_h = c_h · l · √TKE
-        K_q = K_h
-
-    The ``√TKE`` factor is the key piece — it gives the closure a
-    closed negative-feedback loop. Increased shear pumps TKE, which
-    raises K, which damps the shear that drove the TKE up. Without
-    this coupling (the Smagorinsky form ``K = l²·|S|`` that this
-    function previously used), shear production goes as ``K·S² =
-    l²·|S|³`` — cubic in shear — and any sustained shear forcing
-    produces unbounded TKE growth. We saw this in the moist ICON
-    integration: TKE went from the 0.01 floor to ~10⁷ m²/s² in seven
-    timesteps once convection started actually stirring the column.
-
-    Args:
-        state: Atmospheric state
-        params: Vertical diffusion parameters
-        mixing_length: Mixing length [m] (ncol, nlev) — already
-            stability-corrected via the Richardson factor inside
-            ``compute_mixing_length``.
-        richardson_number: Richardson number [-] (ncol, nlev-1).
-            Currently unused here but kept in the signature for
-            symmetry with downstream callers; future work could fold
-            ECHAM-style ``sm(Ri)``/``sh(Ri)`` stability functions in.
-
-    Returns:
-        Tuple of:
-        - Momentum exchange coefficient [m²/s] (ncol, nlev)
-        - Heat exchange coefficient [m²/s] (ncol, nlev)
-        - Moisture exchange coefficient [m²/s] (ncol, nlev)
-
-    """
-    # Mellor-Yamada level 2.5 closure constants (ECHAM ``zh1``/``zh2``/
-    # ``zm1``/``zm2`` collapse to roughly these in the neutral limit).
-    c_m = 0.4
-    c_h = 0.5
-    c_q = c_h
-
-    sqrt_tke = jnp.sqrt(jnp.maximum(state.tke, 1e-8))
-
-    exchange_coeff_momentum = c_m * mixing_length * sqrt_tke
-    exchange_coeff_heat = c_h * mixing_length * sqrt_tke
-    exchange_coeff_moisture = c_q * mixing_length * sqrt_tke
-
-    # Floor matches ECHAM's free-troposphere background diffusivity
-    # (``cmin_kh = 0.01 m²/s``) — large enough to keep the implicit
-    # tridiagonal solver well-conditioned (8 orders of magnitude above
-    # machine epsilon) but small enough that background mixing does
-    # not drag the free-troposphere temperature profile away from the
-    # ECHAM reference. The ceiling is defence-in-depth against
-    # pathological √TKE values; the cap on the TKE update should
-    # already prevent them.
-    min_exchange = 0.01
-    max_exchange = 1000.0
-    exchange_coeff_momentum = jnp.clip(exchange_coeff_momentum, min_exchange, max_exchange)
-    exchange_coeff_heat = jnp.clip(exchange_coeff_heat, min_exchange, max_exchange)
-    exchange_coeff_moisture = jnp.clip(exchange_coeff_moisture, min_exchange, max_exchange)
-
-    return exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture
-
-
 #: Businger-Dyer roughness tables [water, ice, land] — this scheme ignores
 #: ``state.roughness_length``, so its neutral drag must be built from these.
 #: Tuples of Python floats, materialised with ``jnp.asarray`` where used: a
@@ -214,13 +73,14 @@ def businger_dyer_neutral_drag(state, wind_speed):
     ``stability_momentum`` rather than a re-derivation of it. Sliced to the
     state's tile count, as the scheme's per-tile loop is.
     """
-    z_ref = state.height_full[:, -1] - state.height_half[:, -1]
+    z_ref = _lowest_level_reference_height(state)
     z0 = jnp.asarray(_BD_Z0_MOMENTUM[:state.roughness_length.shape[1]])
     bn = jnp.log(jnp.maximum(z_ref, 1.0)[:, None]
                  / jnp.maximum(z0, 1e-5)[None, :])
+    wind_tile = tile_wind_speed(wind_speed, bn.shape[1])
     # 0.4, not c.karman_const: it must match the von_karman this scheme
     # hard-codes, or a set_constants override desyncs the pair.
-    return bn, wind_speed[:, None] * 0.4 ** 2 / bn ** 2
+    return bn, wind_tile * 0.4 ** 2 / bn ** 2
 
 
 @jax.jit
@@ -258,13 +118,18 @@ def compute_surface_exchange_coefficients(
     z0_moisture = z0_heat
     # Momentum: one definition, shared with the 10 m reduction (below).
     _, cfn_m_all = businger_dyer_neutral_drag(state, wind_speed_surface)
-    
-    # Reference height (lowest model level)
-    z_ref = state.height_full[:, -1] - state.height_half[:, -1]
-    
+    # Per tile: water/ice relative to the ocean current, land absolute (or
+    # a per-column scalar broadcast unchanged to every tile) — see
+    # ``tile_wind_speed``/``tile_effective_wind`` (jax-gcm#915).
+    wind_tile = tile_wind_speed(wind_speed_surface, nsfc_type)
+
+    # Reference height (lowest model level): ECHAM's pgeom1(klev)/g
+    # (jax-gcm#1171), not half the gap between the two lowest full levels.
+    z_ref = _lowest_level_reference_height(state)
+
     # von Kármán constant
     von_karman = 0.4
-    
+
     # Compute exchange coefficients for each surface type
     surface_exchange_heat = jnp.zeros((ncol, nsfc_type))
     surface_exchange_moisture = jnp.zeros((ncol, nsfc_type))
@@ -274,12 +139,13 @@ def compute_surface_exchange_coefficients(
         # Stability correction (simplified)
         theta_surface = temperature_surface[:, isfc]
         theta_air = temperature_air
-        
+        wind_isfc = wind_tile[:, isfc]
+
         # Bulk Richardson number for surface layer
         ri_surface = (c.grav * z_ref *
-                     (theta_air - theta_surface) / 
-                     (0.5 * (theta_air + theta_surface) * 
-                      jnp.maximum(wind_speed_surface**2, 0.01)))
+                     (theta_air - theta_surface) /
+                     (0.5 * (theta_air + theta_surface) *
+                      jnp.maximum(wind_isfc**2, 0.01)))
         
         # Surface-layer stability multiplier on the heat exchange
         # coefficient CH, derived from Businger-Dyer. CH scales as the
@@ -327,9 +193,9 @@ def compute_surface_exchange_coefficients(
                                  / jnp.maximum(z0_heat[isfc], 1e-5))
         log_ratio_moisture = jnp.log(jnp.maximum(z_ref, 1.0)
                                      / jnp.maximum(z0_moisture[isfc], 1e-5))
-        exchange_heat = (von_karman**2 * wind_speed_surface *
+        exchange_heat = (von_karman**2 * wind_isfc *
                         stability_heat / log_ratio_heat**2)
-        exchange_moisture = (von_karman**2 * wind_speed_surface *
+        exchange_moisture = (von_karman**2 * wind_isfc *
                            stability_heat / log_ratio_moisture**2)
         # CM·|U| = CM_n·|U| · (1/Φm): the neutral factor is the shared one, so
         # f_m in the 10 m reduction recovers stability_momentum exactly.
@@ -349,49 +215,32 @@ def compute_surface_exchange_coefficients(
             surface_exchange_momentum)
 
 
-@jax.jit
-def compute_boundary_layer_height(
-    state: VDiffState,
-    exchange_coeff_heat: jnp.ndarray,
-    threshold: float = 1.0
-) -> jnp.ndarray:
-    """Compute boundary layer height based on exchange coefficient profile.
-    
-    Args:
-        state: Atmospheric state
-        exchange_coeff_heat: Heat exchange coefficient [m²/s] (ncol, nlev)
-        threshold: Threshold value for defining PBL top [m²/s]
-        
-    Returns:
-        Boundary layer height [m] (ncol,)
+def tile_effective_wind(state: VDiffState) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-tile effective lowest-level wind (u, v), each (ncol, nsfc_type).
 
+    ECHAM's ``precalc_ocean``/``precalc_ice`` both take the ocean current
+    (``pocu``/``pocv``) and subtract it from the lowest-level wind before
+    forming the Richardson number, the (stability-corrected) exchange
+    coefficients and the surface TKE source — ``mo_surface.f90``'s calls to
+    both routines pass ``ocean_u(:)``/``ocean_v(:)`` (l.544-568, l.584-621);
+    ``precalc_land`` (l.500-543) does not, and has no current to subtract.
+    So water and sea ice are relative to the current, land is not
+    (jax-gcm#915).
+
+    Tile order is water=0/ice=1/land=2 (or a single water tile when
+    ``nsfc_type == 1`` — a column fixture with no ice/land); land is tile
+    index 2 only when ``nsfc_type == 3``, the convention this package uses
+    throughout (``matrix_solver.LAND_TILE``).
     """
-    ncol, nlev = state.height_full.shape
-    
-    # Find level where exchange coefficient drops below threshold
-    # Start from surface (highest index) and work upward
-    below_threshold = exchange_coeff_heat < threshold
-    
-    # Find first level from bottom where condition is met
-    # Use cumulative sum to find first occurrence
-    pbl_mask = jnp.cumsum(below_threshold[:, ::-1], axis=1)
-    first_occurrence = jnp.argmax(pbl_mask > 0, axis=1)
-    
-    # Convert to height
-    # If no level found, use top of atmosphere
-    height_from_bottom = state.height_full[:, ::-1]
-    surface_height = state.height_half[:, -1]
-    
-    pbl_height = jnp.where(
-        jnp.any(below_threshold, axis=1),
-        height_from_bottom[jnp.arange(ncol), first_occurrence] - surface_height,
-        height_from_bottom[:, 0] - surface_height  # Use top level
-    )
-    
-    # Ensure minimum PBL height
-    pbl_height = jnp.maximum(pbl_height, 50.0)
-    
-    return pbl_height
+    ncol, nsfc_type = state.surface_fraction.shape
+    u_abs, v_abs = state.u[:, -1], state.v[:, -1]
+    u_rel = u_abs - state.ocean_u
+    v_rel = v_abs - state.ocean_v
+    # Static: nsfc_type is a shape, not a traced value.
+    is_land = jnp.asarray([isfc == 2 for isfc in range(nsfc_type)])
+    u_tile = jnp.where(is_land[None, :], u_abs[:, None], u_rel[:, None])
+    v_tile = jnp.where(is_land[None, :], v_abs[:, None], v_rel[:, None])
+    return u_tile, v_tile
 
 
 @jax.jit
@@ -429,32 +278,36 @@ def compute_turbulence_diagnostics(
     params: VDiffParameters,
     exchange_coeff_momentum: jnp.ndarray,
     exchange_coeff_heat: jnp.ndarray,
-    exchange_coeff_moisture: jnp.ndarray
+    exchange_coeff_moisture: jnp.ndarray,
+    boundary_layer_height: jnp.ndarray,
+    richardson_number: jnp.ndarray,
+    mixing_length: jnp.ndarray,
 ) -> VDiffDiagnostics:
-    """Compute complete set of turbulence diagnostics.
-    
+    """Compute the surface exchange and collect the turbulence diagnostics.
+
+    The interior quantities come from the closure (:mod:`.closure`) and are
+    passed through; this computes the per-tile surface exchange velocities,
+    the friction velocities and the 10 m wind.
+
     Args:
         state: Atmospheric state
         params: Vertical diffusion parameters
-        exchange_coeff_momentum: Momentum exchange coefficient [m²/s]
-        exchange_coeff_heat: Heat exchange coefficient [m²/s]
-        exchange_coeff_moisture: Moisture exchange coefficient [m²/s]
-        
+        exchange_coeff_momentum: Momentum exchange coefficient of the
+            interfaces [m²/s] (ncol, nlev), see :class:`VDiffDiagnostics`.
+        exchange_coeff_heat: Heat exchange coefficient [m²/s] (ncol, nlev)
+        exchange_coeff_moisture: Moisture exchange coefficient [m²/s] (ncol, nlev)
+        boundary_layer_height: Height of the PBL extension [m] (ncol,)
+        richardson_number: ``zri`` of the interior interfaces (ncol, nlev - 1)
+        mixing_length: ``zmix`` of the interior interfaces [m] (ncol, nlev - 1)
+
     Returns:
         Complete diagnostics structure
 
     """
     ncol = state.u.shape[0]
-    
-    # Compute Richardson number
-    ri = compute_richardson_number(state)
-    
-    # Compute mixing length
-    pbl_height = compute_boundary_layer_height(state, exchange_coeff_heat)
-    mixing_length = compute_mixing_length(
-        state.height_full, state.height_half, ri, pbl_height
-    )
-    
+    ri = richardson_number
+    pbl_height = boundary_layer_height
+
     # Surface diagnostics — dispatch to the configured scheme via
     # lax.cond. Both branches are JIT-able and return identically
     # shaped (ncol, nsfc_type) tensors, so the false-branch tracing
@@ -463,12 +316,27 @@ def compute_turbulence_diagnostics(
     from .surface_layer import (
         compute_surface_exchange_coefficients_echam_louis,
         echam_louis_neutral_drag,
+        echam_louis_neutral_heat,
+        heat_2m_reduction,
         wind_10m_reduction,
     )
 
     wind_speed_surface = jnp.sqrt(
         jnp.maximum(state.u[:, -1]**2 + state.v[:, -1]**2, 1.0e-30))
-    z_ref_sfc = state.height_full[:, -1] - state.height_half[:, -1]
+    z_ref_sfc = _lowest_level_reference_height(state)
+
+    # Per-tile effective wind (jax-gcm#915): water/ice relative to the ocean
+    # current, land absolute (``tile_effective_wind``). This is DISTINCT
+    # from ``wind_speed_surface`` above, which stays the grid's absolute
+    # lowest-level speed — ECHAM's published 10 m wind (``zu10w = zred·pum1``,
+    # ``wind_10m``/``wind_10m_u/v``/``wind_10m_tile`` below) is relative to a
+    # surface AT REST, not to the current; only the stability/exchange
+    # coefficients and the delivered per-tile momentum flux are current-
+    # relative for water/ice (``mo_surface.f90``'s ``precalc_ocean``/``_ice``
+    # calls, which take ``ocean_u``/``ocean_v``; ``precalc_land`` does not).
+    u_tile_eff, v_tile_eff = tile_effective_wind(state)
+    wind_speed_tile_eff = jnp.sqrt(jnp.maximum(
+        u_tile_eff ** 2 + v_tile_eff ** 2, 1.0e-30))
 
     # The 10 m reduction is computed INSIDE each branch, from that scheme's own
     # neutral drag: the two schemes differ in roughness, in the bound on z/z0
@@ -476,48 +344,75 @@ def compute_turbulence_diagnostics(
     # read stability where there is none (~13 % on the sea-salt wind term).
     def _louis():
         cfh, cfe, cfm = compute_surface_exchange_coefficients_echam_louis(
-            state, params, wind_speed_surface,
+            state, params, wind_speed_tile_eff,
             state.surface_temperature, state.temperature[:, -1],
         )
-        bn, cfnc = echam_louis_neutral_drag(state, params, wind_speed_surface)
-        return cfh, cfe, cfm, wind_10m_reduction(cfm, cfnc, bn, z_ref_sfc)
+        bn, cfnc = echam_louis_neutral_drag(state, params, wind_speed_tile_eff)
+        cfn_h = echam_louis_neutral_heat(state, params, wind_speed_tile_eff)
+        return (cfh, cfe, cfm, wind_10m_reduction(cfm, cfnc, bn, z_ref_sfc),
+                heat_2m_reduction(cfh, cfm, cfn_h, cfnc, bn, z_ref_sfc))
 
     def _businger_dyer():
         cfh, cfe, cfm = compute_surface_exchange_coefficients(
-            state, params, wind_speed_surface,
+            state, params, wind_speed_tile_eff,
             state.surface_temperature, state.temperature[:, -1],
         )
-        bn, cfnc = businger_dyer_neutral_drag(state, wind_speed_surface)
-        return cfh, cfe, cfm, wind_10m_reduction(cfm, cfnc, bn, z_ref_sfc)
+        bn, cfnc = businger_dyer_neutral_drag(state, wind_speed_tile_eff)
+        log_heat = jnp.log(jnp.maximum(z_ref_sfc, 1.0)[:, None]
+                          / jnp.asarray(_BD_Z0_HEAT[:bn.shape[1]])[None, :])
+        cfn_h = wind_speed_tile_eff * 0.4**2 / log_heat**2
+        return (cfh, cfe, cfm, wind_10m_reduction(cfm, cfnc, bn, z_ref_sfc),
+                heat_2m_reduction(cfh, cfm, cfn_h, cfnc, bn, z_ref_sfc))
 
     (surface_exchange_heat, surface_exchange_moisture,
-     surface_exchange_momentum, wind_10m_tile) = jax.lax.cond(
+     surface_exchange_momentum, wind_10m_tile, heat_2m_tile) = jax.lax.cond(
         params.surface_layer_scheme == VDiffParameters.SCHEME_ECHAM_LOUIS,
         _louis, _businger_dyer,
     )
-    
+
     # Air density at surface
     air_density = (state.pressure_full[:, -1] /
                    (c.rd * state.temperature[:, -1]))
 
-    # Friction velocity from the SAME per-tile surface momentum exchange
-    # coefficient (CM·|U|, m/s) that drives the surface stress and the vdiff
-    # implicit damping — a single ECHAM-style ``sfc_exchange_coeff``, not a
-    # separate bulk-Richardson solve. Collapse the per-tile CM·|U| to a grid
-    # value with the surface-type fractions (the same area weighting the
-    # EchamSurface term applies to form its grid-mean momentum stress
-    # ``tau = rho·⟨CM·|U|⟩·U``), so u*² = |U|·⟨CM·|U|⟩ is exactly the friction
-    # velocity implied by that stress. This keeps the u* consumed downstream by
-    # aerosol dry deposition and wind-driven dust/sea-salt emission consistent
-    # with the surface momentum exchange rather than a parallel bulk estimate.
-    exchange_momentum_grid = jnp.sum(
-        state.surface_fraction * surface_exchange_momentum, axis=1
-    )  # ⟨CM·|U|⟩ [m/s] (ncol,)
-    surface_momentum_flux_u = (
-        air_density * exchange_momentum_grid * state.u[:, -1]
+    # Per-tile momentum flux [N/m²] (ncol, nsfc_type): each tile's OWN
+    # ``surface_exchange_momentum`` (CM·|U|, m/s) against the SAME tile's
+    # own effective wind (relative for water/ice, absolute for land) — the
+    # one definition of this flux, consumed two ways below. ECHAM's
+    # ``update_stress_ocean``/``_ice`` form ``pustrw/i = zcfmw/i·zudif``
+    # with that current-relative ``zudif`` (``mo_surface.f90`` l.800-826).
+    air_density_tile = air_density[:, None]
+    surface_momentum_flux_u_tile = (
+        air_density_tile * surface_exchange_momentum * u_tile_eff
     )
-    surface_momentum_flux_v = (
-        air_density * exchange_momentum_grid * state.v[:, -1]
+    surface_momentum_flux_v_tile = (
+        air_density_tile * surface_exchange_momentum * v_tile_eff
+    )
+    # Per-tile friction velocity. Needed so the water tile's Charnock
+    # roughness update (jax-gcm#1118, ``ocean.py::compute_ocean_roughness``)
+    # reads the open-water u* alone; the grid-mean ``friction_velocity``
+    # below would let a coastal cell's land/ice stress leak into the water
+    # tile's own roughness, the same class of error already fixed for the
+    # land tile's roughness itself (see ``vertical_diffusion.py``'s comment
+    # on the public ``roughness_length`` field).
+    surface_friction_velocity_tile = compute_friction_velocity(
+        surface_momentum_flux_u_tile, surface_momentum_flux_v_tile, air_density_tile
+    )
+
+    # Grid-mean friction velocity: the SAME per-tile momentum flux above,
+    # fraction-weighted down to one grid value — a single ECHAM-style
+    # ``sfc_exchange_coeff``, not a separate bulk-Richardson solve, and the
+    # same area weighting ``EchamSurface`` applies to form its own grid-mean
+    # momentum stress (``tau = rho·⟨CM·|U|⟩·U``), so this reproduces that
+    # stress exactly rather than re-deriving it from a separately
+    # fraction-weighted CM·|U|. This keeps the u* consumed downstream by
+    # aerosol dry deposition and wind-driven dust/sea-salt emission
+    # consistent with the surface momentum exchange rather than a parallel
+    # bulk estimate.
+    surface_momentum_flux_u = jnp.sum(
+        state.surface_fraction * surface_momentum_flux_u_tile, axis=1
+    )
+    surface_momentum_flux_v = jnp.sum(
+        state.surface_fraction * surface_momentum_flux_v_tile, axis=1
     )
     friction_velocity = compute_friction_velocity(
         surface_momentum_flux_u, surface_momentum_flux_v, air_density
@@ -544,7 +439,21 @@ def compute_turbulence_diagnostics(
     speed_10m_tile = wind_10m_tile * wind_speed_surface[:, None]
     u_10m_tile = wind_10m_tile * state.u[:, -1:]
     v_10m_tile = wind_10m_tile * state.v[:, -1:]
-    
+
+    # Open-water 10 m speed RELATIVE to the ocean surface current (ECHAM
+    # ``wind10w``, ``mo_surface_ocean.f90::postproc_ocean`` l.699-713):
+    # ``zred_water·sqrt((u_low−ocu)² + (v_low−ocv)²)``, the water tile's own
+    # reduction factor (tile index 0 of the water/ice/land ordering) applied
+    # to the water tile's own effective (current-relative) wind — already
+    # computed above as ``wind_speed_tile_eff``, the SAME value the water
+    # tile's exchange coefficients and reduction factor were built from, so
+    # this is internally consistent by construction (not a second,
+    # independently-current-corrected wind). A distinct diagnostic from
+    # ``speed_10m_tile[:, 0]`` above (which stays absolute, matching ECHAM's
+    # separately-reported ``u10``/``v10``); they coincide only when
+    # ``state.ocean_u/v`` are zero.
+    wind_10m_current_relative = wind_10m_tile[:, 0] * wind_speed_tile_eff[:, 0]
+
     # Convective velocity scale (simplified)
     convective_velocity = jnp.maximum(friction_velocity, 0.1)
     
@@ -558,13 +467,16 @@ def compute_turbulence_diagnostics(
         boundary_layer_height=pbl_height,
         friction_velocity=friction_velocity,
         convective_velocity=convective_velocity,
+        surface_friction_velocity_tile=surface_friction_velocity_tile,
         wind_10m=wind_10m,
         wind_10m_u=wind_10m_u,
         wind_10m_v=wind_10m_v,
         wind_10m_reduction=reduction_10m,
+        heat_2m_reduction=heat_2m_tile,
         wind_10m_tile=speed_10m_tile,
         wind_10m_u_tile=u_10m_tile,
         wind_10m_v_tile=v_10m_tile,
+        wind_10m_current_relative=wind_10m_current_relative,
         richardson_number=ri,
         mixing_length=mixing_length,
         kinetic_energy_dissipation=jnp.zeros(ncol)  # Will be computed by TKE budget

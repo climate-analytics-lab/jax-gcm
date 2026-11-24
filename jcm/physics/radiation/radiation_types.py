@@ -10,8 +10,9 @@ from typing import NamedTuple, Optional
 import tree_math
 
 from .constants import (
-    SW_BAND_LIMITS, LW_BAND_LIMITS,
+    LW_BAND_LIMITS,
 )
+from .echam_cloud_optics_defaults import echam_cloud_optics_defaults
 
 
 @tree_math.struct
@@ -37,8 +38,17 @@ class RadiationParameters:
     # constants (grey ``N_SW_BANDS``/``N_LW_BANDS``, RRTMGP its k-table), not
     # a runtime tunable, so a stored count could only drift from the truth
     # (#674).
+    #
+    # LW-only: the grey scheme's Planck integration (``planck_bands_lw``)
+    # genuinely consumes the edge VALUES as a continuous, differentiable
+    # function of them, so a stored field is real plumbing. There is no SW
+    # analogue (jax-gcm#999, removed): the grey scheme's shortwave path
+    # splits the TOA flux evenly across ``N_SW_BANDS`` bands (no band-edge-
+    # weighted partition) and its cloud/gas optics derive their per-band
+    # wavelengths from the raw ``constants.SW_BAND_LIMITS`` at IMPORT time,
+    # before any ``RadiationParameters`` exists — a stored
+    # ``sw_band_limits`` could never reach either.
     lw_band_limits: tuple    # LW bands
-    sw_band_limits: tuple    # SW bands
 
     # NB: greenhouse-gas concentrations (CO2/CH4/N2O) are NOT stored here.
     # CO2 and N2O come from ``ForcingData`` and CH4/O3 from the chemistry
@@ -92,55 +102,133 @@ class RadiationParameters:
     #   ktype == 4            -> zinhoml2 (shallow convection whose liquid sits
     #                            mostly below the cloud top; the 1M cloud scheme
     #                            sets it, ECHAM ``mo_cloud.f90`` ``clwprat``)
-    # Defaults are ECHAM's T63 values (``setup_cloud_optics``, nn == 63). They
-    # scale optical depth only: the effective radii and (on the grey backend)
-    # the tau-weighted ssa/asymmetry come from the physical condensate. Set all
+    # Defaults are ECHAM's per-truncation table
+    # (``jcm.physics.radiation.echam_cloud_optics_defaults``, ``nn ==
+    # truncation``), resolved at construction by :meth:`default`'s
+    # ``truncation`` keyword -- the same construction-time hook
+    # ``CloudParameters.default(truncation=...)`` uses (#974). Without a
+    # truncation (or built via the bare class default, as every call site
+    # predating #974 does) they fall back to the T63 row. They scale optical
+    # depth only: the effective radii and (on the grey backend) the
+    # tau-weighted ssa/asymmetry come from the physical condensate. Set all
     # four to 1.0 to disable. Differentiable leaves.
     cloud_inhomogeneity_liquid: jnp.ndarray = 0.8             # zinhoml1
     cloud_inhomogeneity_liquid_convective: jnp.ndarray = 0.8  # zinhoml3
     cloud_inhomogeneity_liquid_shallow: jnp.ndarray = 0.4     # zinhoml2
     cloud_inhomogeneity_ice: jnp.ndarray = 0.8                # zinhomi
 
+    # Column cloud optical depth (550 nm, in-cloud liquid + ice, summed over
+    # the layers a McICA sub-column marks cloudy) above which the sub-column
+    # counts toward ``RadiationData.total_cloud_cover_tau``. 0.3 is the
+    # ISCCP/CALIPSO-simulator detection limit used for CMIP cloud-cover
+    # diagnostics; the ESA-CCI AVHRR (CLARA) mask detects down to about 0.2
+    # (Karlsson & Hakansson 2018, AMT 11, 633). 0.3 is the standard model-side
+    # convention and is slightly conservative against AVHRR. Diagnostic only:
+    # it feeds no flux. The cover is a hard step in it, so it is a leaf for
+    # bookkeeping, not a calibration lever with a gradient.
+    tau_threshold: jnp.ndarray = 0.3
+
     # Neural-network emulator (only used when radiation_scheme="emulated")
     emulator_weights: Optional[object] = None  # EmulatorWeights pytree
     sw_scaling: Optional[object] = None        # InputScaling for SW network
     lw_scaling: Optional[object] = None        # InputScaling for LW network
 
+    # The truncation :meth:`default` built the cloud-optics inhomogeneity
+    # factors for (``None`` for a non-spectral grid or for a struct built
+    # without the ``truncation`` keyword). A plain Python value, not an
+    # ``nnx``/jax array: ``tree_math.struct`` has no ``pytree_node=False``
+    # mechanism (unlike ``flax.struct.dataclass``, which the cloud scheme's
+    # ``CloudParameters`` uses for the analogous field), so this is, like
+    # ``emulator_weights`` above, a plain pytree leaf rather than static aux
+    # data. It is read only by :func:`jcm.physics.resolution_defaults.
+    # check_defaults_grid`-style warnings, never inside a jitted compute, so
+    # it never needs to be concrete under trace.
+    defaults_truncation: Optional[int] = None
+
     @classmethod
     def default(cls, radiation_interval=7200.0,
                  solar_constant=1361.0,
                  lw_band_limits=LW_BAND_LIMITS,
-                 sw_band_limits=SW_BAND_LIMITS,
                  min_cos_zenith=0.035, cld_frac_min=1e-3,
                  cloud_overlap=1, cloud_decorrelation_km=2.0,
-                 mcica_freeze_step=0.0,
-                 cloud_inhomogeneity_liquid=0.8,
-                 cloud_inhomogeneity_liquid_convective=0.8,
-                 cloud_inhomogeneity_liquid_shallow=0.4,
-                 cloud_inhomogeneity_ice=0.8,
+                 mcica_freeze_step=0.0, tau_threshold=0.3,
+                 truncation: int | None = 63,
+                 cloud_inhomogeneity_liquid=None,
+                 cloud_inhomogeneity_liquid_convective=None,
+                 cloud_inhomogeneity_liquid_shallow=None,
+                 cloud_inhomogeneity_ice=None,
                  emulator_weights=None, sw_scaling=None,
                  lw_scaling=None) -> 'RadiationParameters':
-        """Return default radiation parameters"""
+        """Return default radiation parameters.
+
+        Args:
+            truncation: the run's triangular truncation; resolves the
+                ``cloud_inhomogeneity_*`` defaults through
+                :func:`~jcm.physics.radiation.echam_cloud_optics_defaults.
+                echam_cloud_optics_defaults` (ECHAM's T31/T63/T127/T255
+                table, interpolated between rows; ``None`` means a grid that
+                is not spectral, T63 defaults with a warning). Any of the
+                four ``cloud_inhomogeneity_*`` keywords passed explicitly
+                overrides the table's value for that field only.
+            cloud_inhomogeneity_liquid / _convective / _shallow / ice:
+                explicit overrides of the per-truncation table (``None``
+                takes the table's value for ``truncation``).
+            tau_threshold: detection threshold of the thresholded cloud
+                cover diagnostic (see the field comment).
+
+        """
+        table = echam_cloud_optics_defaults(truncation)
+        liquid = (table["cloud_inhomogeneity_liquid"]
+                  if cloud_inhomogeneity_liquid is None
+                  else cloud_inhomogeneity_liquid)
+        convective = (table["cloud_inhomogeneity_liquid_convective"]
+                      if cloud_inhomogeneity_liquid_convective is None
+                      else cloud_inhomogeneity_liquid_convective)
+        shallow = (table["cloud_inhomogeneity_liquid_shallow"]
+                  if cloud_inhomogeneity_liquid_shallow is None
+                  else cloud_inhomogeneity_liquid_shallow)
+        ice = (table["cloud_inhomogeneity_ice"] if cloud_inhomogeneity_ice is None
+              else cloud_inhomogeneity_ice)
         return cls(
             radiation_interval=jnp.array(radiation_interval),
             solar_constant=jnp.array(solar_constant),
             lw_band_limits=jnp.asarray(lw_band_limits),
-            sw_band_limits=jnp.asarray(sw_band_limits),
             min_cos_zenith=jnp.array(min_cos_zenith),
             cld_frac_min=jnp.array(cld_frac_min),
             cloud_overlap=jnp.asarray(cloud_overlap),
             cloud_decorrelation_km=jnp.asarray(cloud_decorrelation_km),
             mcica_freeze_step=jnp.asarray(mcica_freeze_step),
-            cloud_inhomogeneity_liquid=jnp.asarray(cloud_inhomogeneity_liquid),
-            cloud_inhomogeneity_liquid_convective=jnp.asarray(
-                cloud_inhomogeneity_liquid_convective),
-            cloud_inhomogeneity_liquid_shallow=jnp.asarray(
-                cloud_inhomogeneity_liquid_shallow),
-            cloud_inhomogeneity_ice=jnp.asarray(cloud_inhomogeneity_ice),
+            cloud_inhomogeneity_liquid=jnp.asarray(liquid),
+            cloud_inhomogeneity_liquid_convective=jnp.asarray(convective),
+            cloud_inhomogeneity_liquid_shallow=jnp.asarray(shallow),
+            cloud_inhomogeneity_ice=jnp.asarray(ice),
+            tau_threshold=jnp.asarray(tau_threshold),
             emulator_weights=emulator_weights,
             sw_scaling=sw_scaling,
             lw_scaling=lw_scaling,
+            defaults_truncation=truncation,
         )
+
+
+def radiation_parameters_of(term) -> Optional["RadiationParameters"]:
+    """Read a term's held ``RadiationParameters``, or ``None`` if it has none.
+
+    Every in-tree radiation term (grey two-stream, RRTMGP, the NN emulator)
+    holds its configuration as ``self.params``, an ``nnx.Param`` wrapping a
+    ``RadiationParameters``. Siblings that must track the *active* radiation
+    term's settings rather than their own constructor defaults — the JAM
+    optics cadence (``JamOpticsTerm.configure_radiation_gate``, read by
+    ``echam_physics`` at compose time and re-derived by
+    ``ComposablePhysics.replace``/``remove``/``__add__`` for jax-gcm#926) —
+    go through this one accessor instead of each re-deriving the
+    ``nnx.Param`` unwrap, so a term that is NOT a radiation term (or is one
+    but chose not to expose its parameters) is handled the same, explicit
+    way everywhere: the caller gets ``None`` and decides whether that is an
+    error.
+    """
+    held = getattr(term, "params", None)
+    held = held.get_value() if hasattr(held, "get_value") else held
+    return held if isinstance(held, RadiationParameters) else None
 
 
 # Cloud-overlap rule integer codes (JAX-friendly; see ``RadiationParameters``).
@@ -236,8 +324,10 @@ CLEAR_SKY_KEYS = (
 class RadiationData:
     """Radiation diagnostics shared by every radiation scheme.
 
-    Written by the radiation term on its compute step (and re-used,
-    unchanged, on cached steps apart from the shortwave zenith rescale).
+    The longwave and the ``*_trans`` shortwave transmissivities are written
+    by the radiation term on its compute step and held on cached steps; the
+    shortwave fluxes themselves are re-derived every step from the
+    transmissivities and the current sun (``apply_insolation``).
     The surface optical properties are the ones that solve used: a
     boundary-condition term publishes the current step's under
     ``jcm.physics.radiation.SURFACE_OPTICS_KEY`` and the radiation reads
@@ -245,19 +335,30 @@ class RadiationData:
     schemes (grey two-stream, RRTMGP, NN emulator) share one home.
     """
 
-    # Cosine solar zenith angle, refreshed on EVERY call including cached
-    # steps -- consumers outside radiation read it as the current solar
-    # geometry (JAM oxidant photolysis, ``aerosol/jam/chemistry/oxidants.py``).
-    #
-    # It doubles as the rescaling reference for the shortwave cache: the
-    # stored shortwave always corresponds to THIS zenith, both after a solve
-    # and after a rescale, so no second field is needed (#671).
+    # Cosine solar zenith angle NOW (clipped at 0), refreshed on EVERY call
+    # including cached steps -- consumers outside radiation read it as the
+    # current solar geometry (JAM oxidant photolysis,
+    # ``aerosol/jam/chemistry/oxidants.py``). It is not a cache reference:
+    # the shortwave cache is the ``*_trans`` transmissivities below.
     cos_zenith: jnp.ndarray           # Cosine solar zenith angle [1] (ncols,)
 
     # Surface properties
     surface_albedo_vis: jnp.ndarray    # Surface albedo visible [1] (ncols,)
     surface_albedo_nir: jnp.ndarray    # Surface albedo near-infrared [1] (ncols,)
     surface_emissivity: jnp.ndarray    # Surface emissivity [1] (ncols,)
+    # Per-band DIRECT/DIFFUSE surface albedo quartet (jax-gcm#959): the
+    # values RRTMGP actually solved with (jax-rrtmgp 0.5.0's
+    # ``sfc_alb_dir``/``sfc_alb_dif``, mapped to vis/nir by SW-band
+    # wavelength, ``rrtmgp.py::_sw_band_is_nir``). ``surface_albedo_vis``/
+    # ``_nir`` above remain the BROADBAND values (the direct/diffuse
+    # average), kept for backward-compatible readers and for the grey
+    # two-stream / NN-emulator backends, which have no direct/diffuse
+    # distinction and fill these four with their broadband value twice
+    # (dir == dif == broadband) -- see ``docs/source/science/radiation.md``.
+    surface_albedo_vis_dir: jnp.ndarray  # Vis direct-beam albedo [1] (ncols,)
+    surface_albedo_vis_dif: jnp.ndarray  # Vis diffuse albedo [1] (ncols,)
+    surface_albedo_nir_dir: jnp.ndarray  # NIR direct-beam albedo [1] (ncols,)
+    surface_albedo_nir_dif: jnp.ndarray  # NIR diffuse albedo [1] (ncols,)
 
     # Shortwave fluxes
     sw_flux_up: jnp.ndarray          # Upward SW flux [W/m²] (nlev+1, ncols)
@@ -298,9 +399,9 @@ class RadiationData:
     # onto the ``"clouds"`` diagnostic key for downstream consumers.
     toa_sw_up_clear: jnp.ndarray     # Clear-sky TOA upward SW [W/m²] (ncols,)
     toa_lw_up_clear: jnp.ndarray     # Clear-sky TOA OLR [W/m²] (ncols,)
-    # Aerosol-free TOA fluxes (AeroCom *noa / *_na, jax-gcm#583): a second
-    # radiation call with the aerosol OPTICS zeroed but the cloud state
-    # untouched (cdnc_factor kept, so ERFari is isolated from ERFaci).
+    # Aerosol-free TOA fluxes (AeroCom *noa / *_na, jax-gcm#583): the same
+    # radiation call's twins with no aerosol optics mixed in and the cloud
+    # state untouched (cdnc_factor kept, so ERFari is isolated from ERFaci).
     # Populated only when RRTMGPRadiation(aerosol_free_interval=N) is
     # set; otherwise the term withholds them from output entirely rather
     # than publishing this zero default, which a consumer could not tell
@@ -336,6 +437,16 @@ class RadiationData:
     # the analytic expectation of the McICA draw (``expected_total_cover``).
     total_cloud_cover: jnp.ndarray   # McICA cloud cover [1] (ncols,)
 
+    # Detection-thresholded McICA cover: the fraction of the same sub-columns
+    # whose column-integrated visible (550 nm) cloud optical depth exceeds
+    # ``RadiationParameters.tau_threshold``; the quantity comparable with an
+    # imager's cloud mask (``mcica.optically_thick_cover``). RRTMGP only. The
+    # grey two-stream and NN-emulator schemes draw no sub-columns and publish
+    # 0 (not computed; consumers treat an identically-zero field as absent,
+    # as for ``total_cloud_cover`` of older grey output) -- NaN would trip
+    # the NaN gates on output that is merely missing a diagnostic.
+    total_cloud_cover_tau: jnp.ndarray   # thresholded cover [1] (ncols,)
+
     # Internal step counter incremented by the radiation term on every
     # call (both compute and cached paths). Drives the sub-stepping gate
     # (see ``radiation_should_compute``) and seeds the McICA RNG so its
@@ -345,6 +456,61 @@ class RadiationData:
     # from one ``dt`` to the next.
     step: jnp.ndarray                # Radiation step counter [int32] scalar
 
+    # Droplet / crystal effective radii (um) of the LAST SOLVE, held across
+    # cached sub-steps exactly as ``surface.land_albedo_at_solve`` holds the
+    # land albedo (``hold_land_albedo`` in this package's ``__init__``):
+    # written fresh on every solve, left untouched on every cached step.
+    #
+    # This is the ONLY reliable "last solve" source once a host can write to
+    # ``clouds.r_eff_liq``/``r_eff_ice`` directly (``RRTMGPRadiation
+    # (use_host_effective_radii=True)``, jax-gcm#1135): that field is BOTH
+    # the published diagnostic the radiation term writes on every call AND,
+    # in host mode, the host's own live INPUT channel, republished every
+    # step whether or not the radiation term actually solved. Reading it
+    # back as "the radii of the last solve" (the original design, before a
+    # second writer existed) would silently publish an un-clamped,
+    # un-masked, CURRENT-step host radius on a cached step -- a radius that
+    # never fed the heating being replayed, and does not even carry the
+    # table clamp. These two fields are instead owned SOLELY by the
+    # radiation term's own carry (``RadiationData``, never written by a
+    # host or any other term), so they survive a host's writes to
+    # ``clouds.r_eff_liq``/``r_eff_ice`` intact.
+    #
+    # In the DEFAULT (non-host) path these are redundant with
+    # ``clouds.r_eff_liq``/``r_eff_ice`` -- nothing else ever writes that
+    # field there, so the two always hold the same value -- but using this
+    # pair unconditionally (rather than only when the host flag is set)
+    # fixes the general class of the bug: a cached step's published radius
+    # now always comes from the radiation term's own carry, never from a
+    # diagnostic key anything else might also write to.
+    r_eff_liq_at_solve: jnp.ndarray  # um (nlev, ncols)
+    r_eff_ice_at_solve: jnp.ndarray  # um (nlev, ncols)
+
+    # SHORTWAVE TRANSMISSIVITIES of the last solve: each shortwave flux /
+    # heating rate above divided by the TOA incoming flux that solve saw
+    # (ECHAM ``trsol``/``trsof``, ``mo_radiation.f90::radiation``
+    # ``flux_factor``). The solve is made for every column at a floored,
+    # interval-midpoint zenith (``echam_solve_cos_zenith``), so a column
+    # that is dark when the solve runs still carries a finite value. They
+    # are the only shortwave state the radiation carries across steps: the
+    # shortwave fluxes above are rebuilt from them every step as
+    # ``trans * S(t) * max(cos_zenith(t), 0)``
+    # (:func:`jcm.physics.radiation.apply_insolation`; ECHAM
+    # ``radheat.f90``: ``pi0 * trsol``). ``None`` only on the per-column
+    # diagnostics a scheme builds inside its vmap; the host-level struct
+    # always has them. Carry plumbing, excluded from output.
+    sw_flux_up_trans: Optional[jnp.ndarray] = None
+    sw_flux_down_trans: Optional[jnp.ndarray] = None
+    sw_heating_rate_trans: Optional[jnp.ndarray] = None
+    sw_flux_up_clear_trans: Optional[jnp.ndarray] = None
+    sw_flux_down_clear_trans: Optional[jnp.ndarray] = None
+    surface_sw_down_trans: Optional[jnp.ndarray] = None
+    surface_sw_up_trans: Optional[jnp.ndarray] = None
+    toa_sw_up_trans: Optional[jnp.ndarray] = None
+    toa_sw_up_clear_trans: Optional[jnp.ndarray] = None
+    toa_sw_up_noa_trans: Optional[jnp.ndarray] = None
+    toa_sw_up_clear_noa_trans: Optional[jnp.ndarray] = None
+
     @classmethod
     def zeros(cls, nodal_shape, nlev):
         return cls(
@@ -352,6 +518,10 @@ class RadiationData:
             surface_albedo_vis=jnp.zeros(nodal_shape),
             surface_albedo_nir=jnp.zeros(nodal_shape),
             surface_emissivity=jnp.zeros(nodal_shape),
+            surface_albedo_vis_dir=jnp.zeros(nodal_shape),
+            surface_albedo_vis_dif=jnp.zeros(nodal_shape),
+            surface_albedo_nir_dir=jnp.zeros(nodal_shape),
+            surface_albedo_nir_dif=jnp.zeros(nodal_shape),
             sw_flux_up=jnp.zeros((nlev + 1,) + nodal_shape),
             sw_flux_down=jnp.zeros((nlev + 1,) + nodal_shape),
             sw_heating_rate=jnp.zeros((nlev,) + nodal_shape),
@@ -380,7 +550,21 @@ class RadiationData:
             noa_frac_toa_sw_up_clear=jnp.zeros(nodal_shape),
             noa_frac_toa_lw_up_clear=jnp.zeros(nodal_shape),
             total_cloud_cover=jnp.zeros(nodal_shape),
+            total_cloud_cover_tau=jnp.zeros(nodal_shape),
             step=jnp.int32(0),
+            r_eff_liq_at_solve=jnp.zeros((nlev,) + nodal_shape),
+            r_eff_ice_at_solve=jnp.zeros((nlev,) + nodal_shape),
+            sw_flux_up_trans=jnp.zeros((nlev + 1,) + nodal_shape),
+            sw_flux_down_trans=jnp.zeros((nlev + 1,) + nodal_shape),
+            sw_heating_rate_trans=jnp.zeros((nlev,) + nodal_shape),
+            sw_flux_up_clear_trans=jnp.zeros((nlev + 1,) + nodal_shape),
+            sw_flux_down_clear_trans=jnp.zeros((nlev + 1,) + nodal_shape),
+            surface_sw_down_trans=jnp.zeros(nodal_shape),
+            surface_sw_up_trans=jnp.zeros(nodal_shape),
+            toa_sw_up_trans=jnp.zeros(nodal_shape),
+            toa_sw_up_clear_trans=jnp.zeros(nodal_shape),
+            toa_sw_up_noa_trans=jnp.zeros(nodal_shape),
+            toa_sw_up_clear_noa_trans=jnp.zeros(nodal_shape),
         )
 
     def copy(self, **kwargs):
@@ -389,6 +573,10 @@ class RadiationData:
             'surface_albedo_vis': self.surface_albedo_vis,
             'surface_albedo_nir': self.surface_albedo_nir,
             'surface_emissivity': self.surface_emissivity,
+            'surface_albedo_vis_dir': self.surface_albedo_vis_dir,
+            'surface_albedo_vis_dif': self.surface_albedo_vis_dif,
+            'surface_albedo_nir_dir': self.surface_albedo_nir_dir,
+            'surface_albedo_nir_dif': self.surface_albedo_nir_dif,
             'sw_flux_up': self.sw_flux_up,
             'sw_flux_down': self.sw_flux_down,
             'sw_heating_rate': self.sw_heating_rate,
@@ -417,7 +605,21 @@ class RadiationData:
             'noa_frac_toa_sw_up_clear': self.noa_frac_toa_sw_up_clear,
             'noa_frac_toa_lw_up_clear': self.noa_frac_toa_lw_up_clear,
             'total_cloud_cover': self.total_cloud_cover,
+            'total_cloud_cover_tau': self.total_cloud_cover_tau,
             'step': self.step,
+            'r_eff_liq_at_solve': self.r_eff_liq_at_solve,
+            'r_eff_ice_at_solve': self.r_eff_ice_at_solve,
+            'sw_flux_up_trans': self.sw_flux_up_trans,
+            'sw_flux_down_trans': self.sw_flux_down_trans,
+            'sw_heating_rate_trans': self.sw_heating_rate_trans,
+            'sw_flux_up_clear_trans': self.sw_flux_up_clear_trans,
+            'sw_flux_down_clear_trans': self.sw_flux_down_clear_trans,
+            'surface_sw_down_trans': self.surface_sw_down_trans,
+            'surface_sw_up_trans': self.surface_sw_up_trans,
+            'toa_sw_up_trans': self.toa_sw_up_trans,
+            'toa_sw_up_clear_trans': self.toa_sw_up_clear_trans,
+            'toa_sw_up_noa_trans': self.toa_sw_up_noa_trans,
+            'toa_sw_up_clear_noa_trans': self.toa_sw_up_clear_noa_trans,
         }
         new_data.update(kwargs)
         return RadiationData(**new_data)
@@ -444,6 +646,18 @@ RADIATION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
         "units": "1", "long_name": "surface albedo (near-infrared)"},
     "radiation.surface_emissivity": {
         "units": "1", "long_name": "surface longwave emissivity"},
+    "radiation.surface_albedo_vis_dir": {
+        "units": "1",
+        "long_name": "surface albedo, visible, direct beam"},
+    "radiation.surface_albedo_vis_dif": {
+        "units": "1",
+        "long_name": "surface albedo, visible, diffuse"},
+    "radiation.surface_albedo_nir_dir": {
+        "units": "1",
+        "long_name": "surface albedo, near-infrared, direct beam"},
+    "radiation.surface_albedo_nir_dif": {
+        "units": "1",
+        "long_name": "surface albedo, near-infrared, diffuse"},
     # Shortwave / longwave flux profiles on layer interfaces (W m-2).
     "radiation.sw_flux_up": {
         "standard_name": "upwelling_shortwave_flux_in_air",
@@ -511,9 +725,25 @@ RADIATION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "radiation.total_cloud_cover": {
         "standard_name": "cloud_area_fraction",
         "units": "1", "long_name": "total cloud cover seen by radiation"},
+    # Detection-thresholded McICA cover (RRTMGP; 0 = not computed elsewhere).
+    "radiation.total_cloud_cover_tau": {
+        "standard_name": "cloud_area_fraction",
+        "units": "1",
+        "long_name": "total cloud cover above the optical-depth detection threshold"},
     # Internal sub-stepping counter, dimensionless.
     "radiation.step": {
         "units": "1", "long_name": "radiation sub-stepping counter"},
+    # Radii of the LAST SOLVE (um), held across cached sub-steps; see the
+    # field comments above ``RadiationData.r_eff_liq_at_solve``. Normally
+    # redundant with ``clouds.r_eff_liq``/``r_eff_ice`` -- distinct only
+    # under ``RRTMGPRadiation(use_host_effective_radii=True)``, where a host
+    # also writes to the ``clouds`` fields every step.
+    "radiation.r_eff_liq_at_solve": {
+        "units": "um",
+        "long_name": "cloud droplet effective radius of the last radiation solve"},
+    "radiation.r_eff_ice_at_solve": {
+        "units": "um",
+        "long_name": "cloud ice effective radius of the last radiation solve"},
 }
 
 

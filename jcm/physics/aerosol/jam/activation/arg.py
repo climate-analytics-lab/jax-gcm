@@ -26,6 +26,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax.scipy.special import erf
 
+from jcm.filters import stable_quotient
+
 # Constants are read through the module alias and never bound with
 # ``from jcm.constants import grav``: a from-import captures the float at
 # import time, so a later ``set_constants`` override (another planet, a
@@ -123,18 +125,13 @@ def _shape_coefficients(
         p = jnp.asarray(1.5)
         return f, g, p
     if variant == "ghosh2025":
-        # NOTE: these coefficients are *reconstructed* by fitting the
-        # closed forms to Ghosh et al. (2025) Table 3 (σ_acc, f, g, p):
-        #   (1.4, 0.0109, 0.6608, 0.0462) … (2.1, 0.0172, 0.4368, 0.7226).
-        # They reproduce that table (f,g exact-ish; p to ~0.01) but were
-        # NOT taken from the paper's equation text — verify against the
-        # published PDF before any scientific use. Gated off by default.
+        # Coefficients from Ghosh et al. (2025) Eq. 5 / Table 3; the
+        # width is clamped to the paper's fitted range [1.4, 2.1].
         s = min(max(sigma_acc, _SIGMA_ACC_LO), _SIGMA_ACC_HI)
-        f = 0.004377 * jnp.exp(0.6517 * s)
-        g = 1.1088 - 0.32 * s
-        p_lim = -3.4966 + 3.5734 * s - 0.74488 * s ** 2
-        # Kinetic-limit branch: p = p_lim for ζ/η ≤ 1, else 1.5 (smooth where).
-        p = jnp.where(zeta_over_eta <= 1.0, p_lim, 1.5)
+        f = 0.0135 * jnp.exp(2.367 * s)
+        g = 1.1058 - 0.315 * s
+        p_lim = -0.5073 + 1.5088 * s - 0.3699 * s ** 2
+        p = jnp.where(zeta_over_eta > 1.0, p_lim, 1.5)
         return jnp.asarray(f), jnp.asarray(g), p
     raise ValueError(f"Unknown ARG variant {variant!r}.")
 
@@ -210,14 +207,36 @@ def arg_activation(
     aw_over_g = alpha * w / g_growth                     # (nlev, ncols)
     zeta = (2.0 / 3.0) * a_kelvin * jnp.sqrt(aw_over_g)  # (nlev, ncols)
 
-    # Per-mode critical supersaturation Sm_i = sqrt(4 A³ / (27 κ r³)).
+    # Per-mode critical supersaturation Sm_i = sqrt(4 A³ / (27 κ r³)), written
+    # as the algebraically-identical 2/sqrt(27κ)·(A/r)^1.5 (#1109): the plain
+    # form's reverse pass carries 1/(27·κ·r³)², and for ordinary aerosol
+    # (κ=1.1, r=0.1 µm) 27·κ·r³ ~ 3e-20, whose square underflows float32 to
+    # 0 — so ∂sm/∂κ and ∂sm/∂r_dry are `inf` at every such point, not just an
+    # edge case. The rewritten form's only division is by sqrt(27κ), whose
+    # square is κ itself (never near the float32 underflow band for the
+    # κ ≥ 1e-10 this function already floors to), so both derivatives stay
+    # finite. Equal to the plain form in exact arithmetic; differs only at
+    # float32 rounding (~1e-7 relative, within the goldens' tolerance).
     kappa_s = jnp.maximum(kappa, 1.0e-10)
     r_s = jnp.maximum(r_dry, 1.0e-10)
-    sm = jnp.sqrt(
-        4.0 * a_kelvin ** 3 / (27.0 * kappa_s * r_s ** 3)
-    )                                                    # (M, nlev, ncols)
+    sm = (2.0 / jnp.sqrt(27.0 * kappa_s)) * (a_kelvin / r_s) ** 1.5
+                                                         # (M, nlev, ncols)
 
-    n_s = jnp.maximum(number_vol, _TINY)
+    # Number floor for a denominator (#1109): below, `n_s` feeds `eta`'s own
+    # denominator and `n_total` (the activated-fraction denominator) is a
+    # column sum of this same floored quantity. `_TINY` (1e-30) is far below
+    # float32's derivative-safe range (`JAX_gotchas.md` class 4: a quotient's
+    # reverse pass needs the denominator's SQUARE to stay normal, i.e.
+    # denominator > ~1.08e-19) — at N = 0 (an empty mode, the ordinary
+    # cold-start/clear-sky state) the zero cotangent of the floor's own
+    # `maximum` branch times that `inf` gradient is `nan` in every derivative
+    # of the scheme. 1e-12 m⁻³ (one particle per 1000 km³) sits comfortably
+    # above the float32 bound and far below any aerosol population this
+    # scheme is evaluated on, so every output here differs from the `_TINY`
+    # floor's only below N = 1e-12 m⁻³, where the activated number is zero to
+    # the same precision anyway.
+    _N_MIN = 1.0e-12
+    n_s = jnp.maximum(number_vol, _N_MIN)
     eta = (aw_over_g ** 1.5) / (2.0 * jnp.pi * _RHOW * gamma * n_s)
 
     ln_sigma = jnp.log(sigma_g)                          # (M, 1, 1)
@@ -253,7 +272,25 @@ def arg_activation(
     n_act = jnp.sum(can_activate * number_vol * f_act, axis=0)
 
     n_total = jnp.sum(can_activate * number_vol, axis=0)
-    activated_fraction = n_act / jnp.maximum(n_total, _TINY)
+    # `n_act / max(n_total, _TINY)` has an overflowing reverse-mode
+    # denominator at N_total = 0 (#971). A first fix raised the floor to
+    # `_N_MIN` (1e-12 m⁻³, matching `n_s` above) -- correct for `n_s`
+    # (there, flooring a genuinely tiny number concentration only changes
+    # an ALREADY-unphysical `s_max`, since the population is so dilute the
+    # closed-form supersaturation is enormous either way), but WRONG here:
+    # for a single dilute mode this fraction is just `f_act` (`n_act =
+    # n_total * f_act`, so `n_total` cancels for ANY `n_total > 0`), and
+    # `f_act -> 1` continuously as `N -> 0` is this scheme's correct
+    # physical answer at vanishing population (negligible competition for
+    # water vapour) -- flooring `n_total` to `_N_MIN` instead returns
+    # `n_total/_N_MIN < 1`, silently diluting a fully-activated population
+    # (e.g. N=1e-13 m⁻³ read back as 10% activated instead of 100%; caught
+    # in review, PR #1113). `stable_quotient` keeps the reverse pass finite
+    # without needing `n_total**2`, so the ORIGINAL `_TINY` floor (1e-30)
+    # is kept for the value -- bit-identical to pre-#1109, and already
+    # effectively zero for any physical N -- while only the gradient
+    # computation changes.
+    activated_fraction = stable_quotient(n_act, jnp.maximum(n_total, _TINY))
     return n_act, activated_fraction, s_max, can_activate * f_act, (
         can_activate * f_mass
     )

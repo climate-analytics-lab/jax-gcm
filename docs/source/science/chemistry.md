@@ -78,9 +78,11 @@ electroneutrality pH including NH₃/HNO₃/CO₂).
 
 **Why we differ.**
 - `science` (adaptations) — gas-phase SO₂+OH and the DMS branch route to
-  **gas-phase H₂SO₄** (not directly to particulate SO₄) so the MAM4 core does the
-  gas→particle step. Aqueous product sulfate goes to the **cloud-borne**
-  accumulation/coarse split by cloud-borne number fraction; H₂O₂ is a prescribed
+  **gas-phase H₂SO₄** (not directly to particulate SO₄) so the microphysics core (MAM4 or
+  M7) does the gas→particle step. Aqueous product sulfate goes, with MAM4, to
+  the **cloud-borne** accumulation/coarse split by cloud-borne number fraction
+  and, with M7 (no explicit cloud-borne phase), to the interstitial soluble
+  accumulation/coarse modes by HAM's number fraction; H₂O₂ is a prescribed
   oxidant depleted within the sub-stepping and reset each step (matching HAM's
   offline-oxidant discard).
 - `science` (explicit CAM rejection) — the aqueous header records that CAM
@@ -89,7 +91,8 @@ electroneutrality pH including NH₃/HNO₃/CO₂).
   **reduced scheme, not a CAM port**.
 
 **Status & known limitations.** Oxidants default to interim cos-zenith proxies
-until a climatology is supplied; H₂O₂ is not persisted across steps (a coupled
+until a climatology is supplied (the shipped ``forcing=from_file``
+configurations resolve one automatically, ``oxidants_file: auto``); H₂O₂ is not persisted across steps (a coupled
 prognostic budget is out of scope). SOAG production in sulfur chemistry
 defaults to zero; its source is supplied separately through prescribed emissions.
 

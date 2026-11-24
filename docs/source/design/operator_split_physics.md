@@ -120,15 +120,17 @@ state is the state the dynamics advanced from, so the next step's
 ECHAM's `ptte`/`pqte` hold at `cloud`
 (see [coupling within physics](#coupling-within-physics)). Reconstructing the
 same state as `x_{n-1} + dt·P` would count the projected-out part of the
-physics tendency as dynamics: at T63L47 that residual is 2.0–2.1 g/kg/day rms
-in humidity, against 0.9–1.1 g/kg/day of true dynamics. The same projection
-means that on Dinosaur the anchor is not exactly the state the cloud scheme
-left saturated: the part of the scheme's own latent heating and drying that
-the truncation discards (about 22 % of each physics increment of T and q,
-#954) is not treated as an increment, so the anchor's cloudy part carries
-that residual super- or subsaturation, which only the section-5.4 whole-box
-check reaches (in overcast boxes). It is exact for a backend that adds on
-the physics grid and for Dinosaur's semi-Lagrangian gridpoint tracers.
+physics tendency as dynamics: at T63L47 that residual is 6.0–6.4 K/day rms
+in temperature, against 7.6–7.7 K/day of true dynamics (and, with humidity
+stored spectrally, ``dycore.nodal_humidity: false``, 2.0–2.1 g/kg/day in
+humidity against 0.9–1.1 g/kg/day). The same projection means that on
+Dinosaur the anchor's temperature is not exactly the state the cloud scheme
+left saturated: the part of the scheme's own latent heating that the
+truncation discards is not treated as an increment, so the anchor's cloudy
+part carries that residual super- or subsaturation, which only the
+section-5.4 whole-box check reaches (in overcast boxes). It is exact for a
+backend that adds on the physics grid and for Dinosaur's semi-Lagrangian
+gridpoint fields: humidity (by default) and the tracers.
 
 ### `compute_physics_step_gridpoint` (`jcm/physics_interface.py`)
 
@@ -215,12 +217,32 @@ dycore elapsed time does not define the date.
 
 ### Initial physics carry
 
-`Model.initial_physics_carry` unions:
+The seed/template union below lives in the dycore-agnostic
+`jcm.physics_interface.build_initial_physics_carry`, not in `Model` itself:
+`Model.initial_physics_carry` is a thin wrapper that adds the
+cross-precision cast dycores like pySES CAM-SE need. The same helper seeds
+`jcm.prescribed_state_model.PrescribedStateModel`'s `lax.scan` when it
+re-diagnoses a saved trajectory and the composed physics declares carry
+slots (#623): the scan threads the carry SEQUENTIALLY across the prescribed
+states exactly as the live `lax.scan` here threads it across dycore steps,
+cold-starting from this same seed unless the caller supplies a donor carry
+(e.g. from `jcm.initial_states.checkpoint_state`). The one place the two
+scans differ is forced by the input: a live step is always one `dt` after
+the previous one, a saved state usually is not, and the two host-written
+slots that are one-`dt` state anchors rather than values
+(`ComposablePhysics.step_lagged_carry_slots()`: `_prev_step` and the
+post-physics anchor) are reset to this same seed's template at every saved
+state not exactly `dt` after its predecessor. See
+{doc}`../running_at_scale` for that mode's semantics. A
+composition with no carry slots is unaffected either way — a `vmap`
+evaluates the saved states independently, exactly as cheaply as before.
+
+`build_initial_physics_carry` unions:
 
 - `Physics.initial_carry_state(coords)` — per-term deterministic seed.
   Each `PhysicsTerm` that has cross-step state overrides this with a
-  sensible non-zero value (e.g. `TTETKEVerticalDiffusion` seeds TKE at
-  the 0.01 m²/s² ECHAM floor; radiation slots use `RadiationData.zeros`
+  sensible non-zero value (e.g. `TteTkeVerticalDiffusion` seeds
+  `thv_sigma` at ECHAM's initial 1e-2 K; radiation slots use `RadiationData.zeros`
   for fluxes — the first compute step writes real values before any
   consumer reads them).
 - `Physics.get_empty_data(coords)` — a *structural template* obtained

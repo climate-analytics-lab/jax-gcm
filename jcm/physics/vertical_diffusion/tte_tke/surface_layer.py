@@ -10,14 +10,17 @@ Two schemes live here as peers, selectable via
   module too, mostly for symmetry; the dispatcher in
   ``turbulence_coefficients.py`` still imports the original.
 
-- ``"echam_louis"``: faithful port of ECHAM/ICON
-  ``mo_turbulence_diag::sfc_exchange_coeff``. Bulk Richardson uses
-  potential temperatures (with Exner ``(p₀/p)^(R/cₚ)`` referenced to
+- ``"echam_louis"``: faithful port of ECHAM6.3's own surface-layer
+  stability functions — ``mo_surface_land.f90::precalc_land`` and the
+  matching ``precalc_ocean``/``precalc_ice`` (not ICON/Mauritsen's
+  ``mo_turbulence_diag::sfc_exchange_coeff``, whose *stable* branch this
+  module used until #982; see that function's docstring). Bulk Richardson
+  uses potential temperatures (with Exner ``(p₀/p)^(R/cₚ)`` referenced to
   ``p₀=10⁵ Pa``) plus a moisture-buoyancy term, weighted by the lowest
   level's cloud cover (:func:`surface_bulk_richardson`). Stability functions are
-  Louis (1979) — momentum and heat have separate forms in both stable
-  and unstable branches. Per-tile heat roughness ``z0h`` and the
-  humidity factors come from ``state.roughness_heat`` and
+  Louis (1979) as ECHAM implements it — momentum and heat have separate
+  forms in both stable and unstable branches. Per-tile heat roughness
+  ``z0h`` and the humidity factors come from ``state.roughness_heat`` and
   ``state.surface_cair``/``surface_csat`` (open water / ice are fully
   saturated; land uses JSBACH's factors, see
   ``jcm.physics.surface.echam.jsbach_land.humidity_factors``).
@@ -28,11 +31,16 @@ shaped ``(ncol, nsfc_type)`` in m/s — i.e. CH·|U|, CE·|U|, CM·|U| in the
 bulk-aerodynamic sense, ready to be multiplied by ρ for a flux. These per-tile
 exchange velocities are the single source the ``echam_surface`` term uses for
 both the surface-flux magnitude and its implicit-damping factor, so heat,
-moisture and momentum stay mutually consistent (one ECHAM ``sfc_exchange_coeff``,
-not a separate momentum proxy).
+moisture and momentum stay mutually consistent (one ECHAM exchange
+coefficient, not a separate momentum proxy).
 
-The Louis form matches ECHAM/ICON ~order-of-magnitude across the full
-``Ri`` range; the Businger-Dyer form matches well near neutral but
+The Louis form matches ECHAM6.3's land/ice tiles to round-off on both
+branches (#982's 324-column land reference set) and ocean's *stable* branch
+the same way (identical form across all three tiles in the reference
+Fortran). Ocean's *unstable* heat coefficient is ECHAM's free-convection form
+instead (``precalc_ocean``: the neutral coefficient times
+``(1 + zcr**cgam)**(1/cgam)``), selected by the water-tile index
+``params.iwtr``. The Businger-Dyer form matches well near neutral but
 diverges a few× in strongly unstable conditions (``(1−16Ri)^(1/2)``
 grows linearly in |Ri| while Louis asymptotes). See
 ``fortran_harness/PLAN.md`` (on the ``origin/fortran-harness-vdiff``
@@ -46,9 +54,70 @@ import jax
 import jax.numpy as jnp
 
 import jcm.constants as c
-from jcm.physics.thermodynamics import saturation_specific_humidity
+from jcm.physics.thermodynamics import (
+    jsbach_surface_humidity_boundary, saturation_specific_humidity,
+)
+from jcm.physics.surrogate_gradient import with_surrogate_gradient
+from .closure import lowest_level_height_above_surface
 from .moist_buoyancy import cloud_weighted_buoyancy_multipliers
 from .vertical_diffusion_types import VDiffParameters, VDiffState
+
+
+#: Width [K] of the smooth surrogate whose derivative stands in for that of
+#: ``|zbuoy|**(1/3)`` in the free-convection term: the cube root's slope is
+#: infinite at neutral buoyancy, where the unstable branch meets the stable one.
+_FREE_CONVECTION_BUOYANCY_WIDTH = 1.0e-2
+
+
+def _abs_cube_root_exact(b):
+    return jnp.abs(b) ** (1.0 / 3.0)
+
+
+def _abs_cube_root_smooth(b):
+    w = _FREE_CONVECTION_BUOYANCY_WIDTH
+    return (b * b + w * w) ** (1.0 / 6.0)
+
+
+#: ``|b|**(1/3)``: the reference value, the derivative of ``(b² + w²)**(1/6)``
+#: (``docs/source/design/surrogate_gradients.md``).
+_abs_cube_root = with_surrogate_gradient(_abs_cube_root_exact, _abs_cube_root_smooth)
+
+
+def _reference_height(state: VDiffState, temperature_air: jnp.ndarray = None) -> jnp.ndarray:
+    """ECHAM's surface-layer reference height ``pgeom1(klev)/g`` [m] (ncol,).
+
+    One evaluation shared by every function in this module, so the bulk
+    Richardson number, the Louis stability functions and the neutral drag
+    all read the SAME lowest-level height
+    (:func:`~.closure.lowest_level_height_above_surface`) rather than each
+    re-deriving it; ``temperature_air`` lets a caller that already sliced
+    ``state.temperature[:, -1]`` (e.g. :func:`surface_bulk_richardson`'s
+    ``T_air``) pass it straight through instead of re-slicing.
+    """
+    t_air = state.temperature[:, -1] if temperature_air is None else temperature_air
+    tv_air = t_air * (1.0 + c.vtmpc1 * state.qv[:, -1]
+                       - state.qc[:, -1] - state.qi[:, -1])
+    return lowest_level_height_above_surface(
+        tv_air, state.pressure_half[:, -2], state.pressure_half[:, -1])
+
+
+def tile_wind_speed(wind_speed, nsfc_type: int) -> jnp.ndarray:
+    """Broadcast a per-column wind speed to per-tile, or pass one through.
+
+    Every surface-layer function below took a single ``(ncol,)`` wind speed
+    and broadcast it to every tile — correct only while no tile's wind
+    differs from the box value. Since #915 the water and sea-ice tiles are
+    relative to the ocean current while land stays absolute
+    (:func:`~.turbulence_coefficients.tile_effective_wind`), so the caller
+    may now pass an already per-tile ``(ncol, nsfc_type)`` array instead.
+    Accepting both keeps every existing ``(ncol,)`` call site (no current
+    input) numerically unchanged.
+    """
+    wind_speed = jnp.asarray(wind_speed)
+    if wind_speed.ndim == 1:
+        return jnp.broadcast_to(wind_speed[:, None],
+                                (wind_speed.shape[0], nsfc_type))
+    return wind_speed
 
 
 @jax.jit
@@ -60,6 +129,22 @@ def surface_bulk_richardson(
     temperature_air: jnp.ndarray,
 ) -> jnp.ndarray:
     """Bulk Richardson number of the surface layer, per tile (ncol, nsfc_type).
+
+    The Richardson half of :func:`surface_layer_buoyancy`; see there.
+    """
+    return surface_layer_buoyancy(state, params, wind_speed_surface,
+                                  temperature_surface, temperature_air)[0]
+
+
+@jax.jit
+def surface_layer_buoyancy(
+    state: VDiffState,
+    params: VDiffParameters,
+    wind_speed_surface: jnp.ndarray,
+    temperature_surface: jnp.ndarray,
+    temperature_air: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Surface-layer bulk Richardson number and buoyancy jump, per tile.
 
     ECHAM's ``zril``/``zriw``/``zrii`` (``mo_surface_land.f90::precalc_land``
     l.200-236 and the ocean and ice analogues), with the layer-mean
@@ -85,12 +170,20 @@ def surface_bulk_richardson(
             humidity factors from ``state.surface_cair``/``surface_csat``
             (``state.surface_wetness`` when they are ``None``).
         params: Vertical diffusion parameters.
-        wind_speed_surface: Lowest-level wind speed [m/s] (ncol,).
+        wind_speed_surface: Lowest-level wind speed [m/s], either a single
+            per-column value (ncol,), broadcast to every tile, or an
+            already per-tile (ncol, nsfc_type) value (:func:`tile_wind_speed`,
+            jax-gcm#915: the water/sea-ice tiles are relative to the ocean
+            current, ``mo_surface_ocean.f90``/``mo_surface_ice.f90``'s own
+            ``zdu2oc``/``zdu2i``, while land stays absolute, ``zdu2``).
         temperature_surface: Tile skin temperature [K] (ncol, nsfc_type).
         temperature_air: Lowest-level air temperature [K] (ncol,).
 
     Returns:
-        Bulk Richardson number [-], (ncol, nsfc_type).
+        ``(Ri, zbuoy)``: the bulk Richardson number [-] and ECHAM's buoyancy
+        jump ``zbuoy`` [K] across the surface layer (negative when unstable;
+        the open-water free-convection term reads its magnitude), each
+        (ncol, nsfc_type).
 
     """
     # Read shared physical constants by attribute access on the
@@ -109,7 +202,12 @@ def surface_bulk_richardson(
     qv_air = state.qv[:, -1]                       # (ncol,)
     qx_air = state.qc[:, -1] + state.qi[:, -1]    # total cloud water
     cover = state.cloud_fraction[:, -1]           # paclc(klev)
-    z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
+    # ECHAM's surface layer uses pgeom1(klev)/g, the lowest level's own
+    # hydrostatic height above the surface (jax-gcm#1171) — not
+    # height_full[:,-1] - height_half[:,-1], which would give half the gap
+    # between the two lowest full levels (height_half[-1] is an extrapolated
+    # bottom half-level for OTHER diagnostics, see _reference_height).
+    z_ref = jnp.maximum(_reference_height(state, T_air), 1.0)
 
     # Phase of the latent heat in the surface-layer buoyancy: vdiff.f90's
     # ``zfaxe = FSEL(T - tmelt, alv, als)`` on the lowest-level air
@@ -131,10 +229,12 @@ def surface_bulk_richardson(
     # blend (``phase="auto"`` of jcm.physics.thermodynamics).
     qsat_air = saturation_specific_humidity(T_air, p_air)
     qtl = qv_air + qx_air                                          # zqtl
-    zdu2 = jnp.maximum(wind_speed_surface ** 2, 1.0)               # zepdu2 = 1.0
+    wind_tile = tile_wind_speed(wind_speed_surface, nsfc_type)
+    zdu2_tile = jnp.maximum(wind_tile ** 2, 1.0)                   # zepdu2 = 1.0
 
-    ri_tiles = []
+    ri_tiles, buoy_tiles = [], []
     for isfc in range(nsfc_type):
+        zdu2 = zdu2_tile[:, isfc]
         T_s = temperature_surface[:, isfc]
         cair_all = (state.surface_cair if state.surface_cair is not None
                     else state.surface_wetness)
@@ -148,9 +248,12 @@ def surface_bulk_richardson(
         # ``zqddif``, mo_surface_land.f90:200-232): open water / ice are fully
         # saturated (cair = csat = 1), land carries JSBACH's factors. Ice
         # saturation below tmelt (the sea ice tile always, frozen land),
-        # water above.
+        # water above. ``jsbach_surface_humidity_boundary`` is the ONE
+        # definition of this boundary value (jax-gcm#1151 review): the
+        # published 2 m diagnostics (``surface/echam/turbulent_fluxes.py``)
+        # call the SAME function rather than re-deriving this formula.
         qsat_s = saturation_specific_humidity(T_s, p_sfc)
-        qts = csat * qsat_s + (1.0 - cair) * qv_air
+        qts = jsbach_surface_humidity_boundary(qsat_s, qv_air, cair, csat)
 
         exner_sfc = (p0 / jnp.maximum(p_sfc, 1.0)) ** (rd / cp)
         theta_s = T_s * exner_sfc
@@ -172,7 +275,8 @@ def surface_bulk_richardson(
         zdqt = qtl - qts
         zbuoy = zdus1 * zdthetal + zdus2 * theta_mid * zdqt
         ri_tiles.append(z_ref * c.grav * zbuoy / (thetav_mid * zdu2))
-    return jnp.stack(ri_tiles, axis=1)
+        buoy_tiles.append(zbuoy)
+    return jnp.stack(ri_tiles, axis=1), jnp.stack(buoy_tiles, axis=1)
 
 
 @jax.jit
@@ -185,25 +289,37 @@ def compute_surface_exchange_coefficients_echam_louis(
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """ECHAM-faithful per-tile surface exchange coefficient.
 
-    Mirrors ``mo_turbulence_diag::sfc_exchange_coeff``. For each surface tile
-    (water/ice/land) it takes
+    Mirrors ``mo_surface_land.f90::precalc_land`` (and the matching
+    ``precalc_ocean``/``precalc_ice``), not ICON/Mauritsen's
+    ``mo_turbulence_diag::sfc_exchange_coeff`` (whose *stable* branch this
+    function used until #982 — see the module docstring). For each surface
+    tile (water/ice/land) it takes
 
       1. the bulk Richardson number of :func:`surface_bulk_richardson`: the
          θ_l difference plus the moisture buoyancy, weighted by the
          lowest level's cloud cover, with the tile's surface humidity
          ``csat·q_s + (1 − cair)·q_a`` (``state.surface_cair``/
          ``surface_csat``: 1 = fully saturated open water/ice);
-      2. Louis (1979) stability functions on top of a log-law neutral drag
-         computed from the per-tile momentum roughness
-         ``state.roughness_length`` and heat roughness
-         ``state.roughness_heat``.
+      2. Louis (1979) stability functions, as ECHAM implements them, on top
+         of a log-law neutral drag computed from the per-tile momentum
+         roughness ``state.roughness_length`` and heat roughness
+         ``state.roughness_heat`` — except the open-water tile's unstable
+         heat coefficient, which is ``precalc_ocean``'s free-convection
+         enhancement of the neutral one (``params.free_convection_*``).
 
     Returns ``(surface_exchange_heat, surface_exchange_moisture,
     surface_exchange_momentum)`` = (CH·|U|, CE·|U|, CM·|U|) in m/s, per tile
     (heat and moisture are equal in this scheme). The caller multiplies by ρ to
-    get the flux factor. The momentum coefficient ``cfm`` is the Louis (1979) /
-    Mauritsen (2007) drag, so the surface momentum stress is built from a real
-    CM·|U| rather than the interior diffusivity.
+    get the flux factor. The momentum coefficient ``cfm`` is the Louis (1979)
+    drag ECHAM itself uses, so the surface momentum stress is built from a
+    real CM·|U| rather than the interior diffusivity.
+
+    ``wind_speed_surface`` may be a single per-column value (broadcast to
+    every tile, as before) or an already per-tile ``(ncol, nsfc_type)``
+    effective wind (:func:`tile_wind_speed`; jax-gcm#915) — the caller
+    passes the latter so the water/sea-ice tiles see the current-relative
+    wind ECHAM's own ``precalc_ocean``/``precalc_ice`` use, while land sees
+    the absolute one, exactly as ``precalc_land`` does.
     """
     # Read shared physical constants by attribute access on the
     # ``jcm.constants`` module so any ``set_constants`` override is
@@ -219,10 +335,13 @@ def compute_surface_exchange_coefficients_echam_louis(
     # uses (so the reduction's stability factor is this scheme's own).
     bn_all, cfn_m_all = echam_louis_neutral_drag(state, params,
                                                  wind_speed_surface)
+    cfn_h_all = echam_louis_neutral_heat(state, params, wind_speed_surface)
 
-    z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
-    zdu2 = jnp.maximum(wind_speed_surface ** 2, 1.0)               # zepdu2 = 1.0
-    ri_all = surface_bulk_richardson(
+    # Same reference height as surface_bulk_richardson's z_ref (jax-gcm#1171).
+    z_ref = jnp.maximum(_reference_height(state, temperature_air), 1.0)
+    wind_tile = tile_wind_speed(wind_speed_surface, nsfc_type)
+    zdu2_tile = jnp.maximum(wind_tile ** 2, 1.0)                   # zepdu2 = 1.0
+    ri_all, buoy_all = surface_layer_buoyancy(
         state, params, wind_speed_surface, temperature_surface, temperature_air)
 
     # --- Per-tile loop -------------------------------------------------
@@ -234,32 +353,62 @@ def compute_surface_exchange_coefficients_echam_louis(
         z0 = jnp.maximum(state.roughness_length[:, isfc], params.z0m_min)
         z0h = jnp.maximum(state.roughness_heat[:, isfc], params.z0m_min)
         ri = ri_all[:, isfc]
+        zdu2 = zdu2_tile[:, isfc]
 
         # ---- Louis (1979) stability + log-law neutral ----------------
-        # Effective roughness lengths capped to ½·z_ref via
-        # ``MAX(2, z/z0)`` per ECHAM's lmix-bounded form. The momentum pair
-        # comes from ``echam_louis_neutral_drag`` so the 10 m reduction shares
-        # this scheme's own neutral reference rather than re-deriving it.
+        # ``ln(1 + z/z0)``, unfloored, per ECHAM6.3's own tiles (#1056):
+        # land ``mo_surface_land.f90:238`` (``zcdnl``), ocean
+        # ``mo_surface_ocean.f90:378-380`` (``zalo``/``zcdnw``) and sea ice
+        # ``mo_surface_ice.f90:639,642`` (``zalo``/``zcdni``) all build the
+        # neutral log term this way with no cap on ``z/z0``. An earlier
+        # version of this code capped it at ``MAX(z/z0, e^2)`` and attributed
+        # that to "ECHAM's lmix-bounded form" — no such floor exists on any
+        # of the three tiles' *drag* coefficient in this reference; the one
+        # ``e^2``-flavoured constant that does appear (ice's ``zepz0o = 2``)
+        # bounds the roughness length itself for a separate 2 m-diagnostic
+        # reduction, not the neutral log here. The momentum pair comes from
+        # ``echam_louis_neutral_drag`` so the 10 m reduction shares this
+        # scheme's own neutral reference rather than re-deriving it.
         log_zm = bn_all[:, isfc]
-        log_zh = jnp.log(jnp.maximum(z_ref / z0h, jnp.exp(2.0)))
+        log_zh = jnp.log1p(z_ref / z0h)
         cdn = (karman * karman) / (log_zm * log_zm)             # neutral drag
         chn = (karman * karman) / (log_zm * log_zh)             # neutral CHN
 
         cfn_m = cfn_m_all[:, isfc]                                # κ²·U/log²
-        cfn_h = jnp.sqrt(jnp.maximum(zdu2, 1.0e-30)) * chn
+        cfn_h = cfn_h_all[:, isfc]
 
-        # Stable branch (Ri > 0): ECHAM Mauritsen-2007 stable form
-        # f_tau/f_tau0   = 0.25 + 0.75/(1+4Ri)
-        # f_theta/f_theta0 = 1/(1+4Ri)
-        denom_stable = 1.0 + 4.0 * jnp.maximum(ri, 0.0)
-        stable_cfm = cfn_m * (0.25 + 0.75 / denom_stable)
-        stable_cfh = cfn_h * (1.0 / denom_stable) * jnp.sqrt(
-            0.25 + 0.75 / denom_stable)
-
-        # Unstable branch (Ri ≤ 0): Louis 1979 functions
         z2b = 2.0 * cb              # ECHAM constant ``2·cb``
         z3b = 3.0 * cb              # ``3·cb``
         z3bc = 3.0 * cb * cc        # ``3·cb·cc``
+
+        # Stable branch (Ri > 0): Louis (1979) as ECHAM6.3 actually implements
+        # it — ``mo_surface_land.f90::precalc_land`` l.263-266 (``zcfml``/
+        # ``zcfhl``), confirmed byte-identical in form in ``precalc_ocean``
+        # (``mo_surface_ocean.f90``) and ``precalc_ice`` (``mo_surface_ice.
+        # f90``): all three tiles share this one stable form, so one branch
+        # here (shared across tiles, like the unstable branch below) is
+        # faithful rather than a simplification.
+        #   zscf = sqrt(1 + Ri)
+        #   cfm  = cfn_m / (1 + 2·cb·Ri / zscf)
+        #   cfh  = cfn_h / (1 + 2·cb·Ri · zscf)
+        # This replaces the ICON/Mauritsen (2007) stable form (``f_tau =
+        # 0.25 + 0.75/(1+4Ri)``, ``f_theta = sqrt(f_tau)/(1+4Ri)``) this
+        # module previously used: Mauritsen's f_theta decays like 1/Ri^1.5
+        # and f_tau only asymptotes to 0.25 rather than Louis's 1/Ri (cfh)
+        # and ~1/Ri (cfm) decay, so Mauritsen stayed systematically more
+        # strongly coupled — measured at ECHAM6.3's own 324-column land
+        # reference set (#982, `jcm/data/test/echam_land_reference/
+        # land_T63L47.npz`) as ~1.5x the heat and ~2.1x the drag exchange of
+        # `precalc_land` at bulk Richardson ~0.3; both ratios are ~1.0 (to
+        # round-off) with this form (`surface_layer_test.py`
+        # ``TestAgainstFortranStableBranch``).
+        ri_pos = jnp.maximum(ri, 0.0)
+        zscf = jnp.sqrt(1.0 + ri_pos)
+        stable_cfm = cfn_m / (1.0 + z2b * ri_pos / zscf)
+        stable_cfh = cfn_h / (1.0 + z2b * ri_pos * zscf)
+
+        # Unstable branch (Ri ≤ 0): Louis 1979 functions, ECHAM's own land/ice
+        # form (matched to 0.1%, #982) and the open-water momentum form.
         ri_neg = jnp.minimum(ri, 0.0)
         zucfm = jnp.sqrt(jnp.maximum(-ri_neg * (1.0 + z_ref / z0), 1.0e-30))
         zucfm = 1.0 / (1.0 + z3bc * cdn * zucfm)
@@ -268,6 +417,21 @@ def compute_surface_exchange_coefficients_echam_louis(
         zucfh = jnp.sqrt(jnp.maximum(-ri_neg * (1.0 + z_ref / z0h), 1.0e-30))
         zucfh = 1.0 / (1.0 + z3bc * chn * zucfh)
         unstable_cfh = cfn_h * (1.0 - z3b * ri_neg * zucfh)
+        # Open water's unstable HEAT coefficient is not Louis's: ECHAM6.3's
+        # precalc_ocean (mo_surface_ocean.f90) enhances the neutral one by
+        # free convection, zcfhw = zcfnchw·(1 + zcr**cgam)**(1/cgam) with
+        # zcr = cfreec/(zchnw·|U|)·|zbuoy|**(1/3): the convective velocity
+        # scale keeps a warm sea exchanging heat and moisture when the mean
+        # wind is too weak to, which a Louis factor on the shear-driven
+        # neutral exchange does not (it saturates at small z0h).
+        zcr = (params.free_convection_coefficient
+               / (chn * jnp.sqrt(jnp.maximum(zdu2, 1.0e-30)))
+               * _abs_cube_root(buoy_all[:, isfc]))
+        free_convection_cfh = cfn_h * (
+            1.0 + zcr ** params.free_convection_exponent
+        ) ** (1.0 / params.free_convection_exponent)
+        unstable_cfh = jnp.where(isfc == params.iwtr, free_convection_cfh,
+                                 unstable_cfh)
 
         cfm = jnp.where(ri > 0.0, stable_cfm, unstable_cfm)
         cfh = jnp.where(ri > 0.0, stable_cfh, unstable_cfh)
@@ -349,15 +513,64 @@ def wind_10m_reduction(
 
 
 def echam_louis_neutral_drag(state, params, wind_speed):
-    """``(ln(z/z0), CM_n·|U|)`` of the ECHAM-Louis scheme, per tile.
+    """``(ln(1 + z/z0), CM_n·|U|)`` of the ECHAM-Louis scheme, per tile.
 
     THE definition, not a copy of one:
     :func:`compute_surface_exchange_coefficients_echam_louis` calls this for
     the ``log_zm``/``cfn_m`` its own drag is built on, so ``bn = κ/√CDN``
     holds for the pair by construction and the two cannot drift.
+
+    The neutral log term is ``ln(1 + z/z0)`` with no cap on ``z/z0`` — the
+    form every ECHAM6.3 tile uses for its own neutral drag (#1056; see the
+    reference lines cited beside ``log_zh`` above). ``z0`` itself is still
+    floored to ``params.z0m_min`` (a few mm) a few lines up, which is what
+    keeps this finite over an ocean/sea-ice tile's near-zero roughness —
+    that floor is on the roughness length, not on ``z/z0``, so it does not
+    reintroduce the cap this function used to apply.
     """
-    z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
+    # Same reference height as surface_bulk_richardson's z_ref (jax-gcm#1171).
+    z_ref = jnp.maximum(_reference_height(state), 1.0)
     z0 = jnp.maximum(state.roughness_length, params.z0m_min)
-    bn = jnp.log(jnp.maximum(z_ref[:, None] / z0, jnp.exp(2.0)))
-    floored = jnp.sqrt(jnp.maximum(wind_speed ** 2, 1.0))[:, None]
+    bn = jnp.log1p(z_ref[:, None] / z0)
+    wind_tile = tile_wind_speed(wind_speed, z0.shape[1])
+    floored = jnp.sqrt(jnp.maximum(wind_tile ** 2, 1.0))
     return bn, floored * c.karman_const ** 2 / bn ** 2
+
+
+def heat_2m_reduction(exchange_heat, exchange_momentum, neutral_heat,
+                      neutral_momentum, log_momentum, z_ref):
+    """Tile heat-profile reduction from ECHAM6.3 r7492 ``postproc_*``.
+
+    ``bh = kappa sqrt(CM) / CH`` includes the friction-velocity response;
+    replacing momentum exchange by heat exchange in the wind reduction
+    would miss it. Neutral velocities share the live scheme's wind floor.
+    ECHAM ``vdiff.f90``'s surface ``precalc_*``/``postproc_*`` routines
+    use ``kappa/sqrt(CHN)`` over land (tile 2) and the momentum neutral
+    factor over water/ice. ICON ``nsurf_diag`` is a cross-check only.
+    """
+    fm = (jnp.maximum(exchange_momentum, 1e-12)
+          / jnp.maximum(neutral_momentum, 1e-12))
+    fh = jnp.maximum(exchange_heat, 1e-12) / jnp.maximum(neutral_heat, 1e-12)
+    # CHN/CDN = log_momentum**2 / bhn**2, with the common wind cancelling.
+    bhn = log_momentum * jnp.sqrt(
+        jnp.maximum(neutral_momentum, 1e-12) / jnp.maximum(neutral_heat, 1e-12))
+    bh = bhn**2 / log_momentum * jnp.sqrt(fm) / fh
+    bn = jnp.where(jnp.arange(log_momentum.shape[-1]) == 2, bhn, log_momentum)
+    zrat = 2.0 / jnp.maximum(jnp.atleast_1d(z_ref), 2.0)[:, None]
+    cbn = jnp.log1p(jnp.expm1(jnp.clip(bn, 0.0, 30.0)) * zrat)
+    cbs = -(bn - bh) * zrat
+    # Mask before log1p: the inactive stable branch can hit log1p(-1) in float32.
+    unstable_delta = jnp.where(fm < 1.0, 0.0, bn - bh)
+    cbu = -jnp.log1p(jnp.expm1(jnp.clip(unstable_delta, -30.0, 30.0)) * zrat)
+    return jnp.clip((cbn + jnp.where(fm < 1.0, cbs, cbu)) / bh, 0.0, 1.0)
+
+
+def echam_louis_neutral_heat(state, params, wind_speed):
+    """Neutral CHN·|U|, sharing the Louis exchange solve's roughness/floor."""
+    bn, _ = echam_louis_neutral_drag(state, params, wind_speed)
+    z_ref = jnp.maximum(_reference_height(state), 1.0)
+    log_heat = jnp.log1p(
+        z_ref[:, None] / jnp.maximum(state.roughness_heat, params.z0m_min))
+    chn = c.karman_const ** 2 / (bn * log_heat)
+    wind_tile = tile_wind_speed(wind_speed, bn.shape[1])
+    return jnp.sqrt(jnp.maximum(wind_tile**2, 1.0)) * chn

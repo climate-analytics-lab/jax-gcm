@@ -11,8 +11,10 @@
 
 JAX-GCM is a differentiable atmospheric general circulation model written
 entirely in JAX. A pluggable dynamical-core interface couples the
-[Dinosaur](https://github.com/neuralgcm/dinosaur) spectral backend to modular
-SPEEDY, Held-Suarez, and ECHAM-style physics packages.
+[Dinosaur](https://github.com/neuralgcm/dinosaur) spectral backend (and an
+optional pySES CAM-SE spectral-element backend, `jcm[pyses]`) to modular
+SPEEDY, Held-Suarez, and ECHAM-style physics packages, including the JAM
+prognostic aerosol module.
 
 ## Why JCM
 

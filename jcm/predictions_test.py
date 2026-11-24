@@ -336,6 +336,39 @@ class ModelPredictionsWithContextTest(unittest.TestCase):
         self.assertNotIn("live_parameters_differ_from_compiled",
                          restored.params)
 
+    def test_with_primal_times_preserves_with_context_provenance_marker(self):
+        """Codex review, PR #1124 thread on ``predictions.py``: calling
+        ``with_primal_times`` AFTER ``with_context`` must not silently
+        re-derive (and so un-mark) the live-context params record.
+        ``ModelPredictions.__init__`` re-reads params fresh from whatever
+        physics it is handed, with no marker -- without the fix,
+        ``with_primal_times`` would reconstruct through ``__init__`` and
+        present ``with_context``'s explicitly "not a trace-time record"
+        params as if they were authoritative.
+        """
+        primal = jax.tree.map(lambda value: value, self.original)
+        marked = self.original.with_context(self.model)
+        self.assertIn("parameters_rederived_from_live_context", marked.params)
+
+        restored = marked.with_primal_times(primal)
+        self.assertEqual(restored.params, marked.params)
+        self.assertIn("parameters_rederived_from_live_context",
+                      restored.params)
+
+    def test_with_primal_times_falls_back_to_primals_provenance(self):
+        """The reverse order (``with_primal_times`` before ``with_context``,
+        the recipe this method's docstring recommends) has nothing of
+        ``self``'s to preserve (a bare jvp/linearize tangent carries no
+        context, hence no params) -- falls back to ``primal``'s record
+        rather than fabricating a fresh live read.
+        """
+        bare_tangent = ModelPredictions(_predictions(), None, None)
+        primal_with_params = self.original.with_context(self.model)
+
+        restored = bare_tangent.with_primal_times(primal_with_params)
+
+        self.assertEqual(restored.params, primal_with_params.params)
+
     def test_explicit_coords_physics_form_preserves_present_metadata(self):
         restored = self.original.with_context(
             self.coords,

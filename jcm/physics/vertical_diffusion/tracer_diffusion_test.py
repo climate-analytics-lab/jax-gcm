@@ -61,13 +61,15 @@ class DiffuseImplicitTest(unittest.TestCase):
         # rho_int, dz_int or dm — is invisible to conservation and
         # direction checks). Two equal layers exchanging through one
         # interface, backward Euler:
-        #   d' = d / (1 + 2·dt·g/dm),  g = rho_int·K_int/dz_int.
+        #   d' = d / (1 + 2·dt·g/dm),  g = rho_int·K_int/dz_int,
+        # with K_int the interface row below the upper layer (kh[0]); the
+        # surface row kh[1] is not read.
         rho = jnp.full((2, 1), 0.8)
         dz = jnp.full((2, 1), 250.0)
         kh = jnp.array([[10.0], [30.0]])
         q = jnp.array([[[4.0e-9], [1.0e-9]]])
         dt = 900.0
-        g = 0.8 * 20.0 / 250.0
+        g = 0.8 * 10.0 / 250.0
         dm = 0.8 * 250.0
         expected_diff = (4.0e-9 - 1.0e-9) / (1.0 + 2.0 * dt * g / dm)
         q_new = diffuse_tracers_implicit(q, kh, rho, dz, dt)

@@ -40,9 +40,10 @@ for the design.
 
 - [x] ``REMAINING_ISSUES.md`` — deleted. All items it listed were already
       resolved in the tree except the TKE source-term question (VD-2),
-      which is tracked by the FIXME in
-      ``jcm/physics/vertical_diffusion/tte_tke/tke_budget.py`` (TKE
-      source terms summed but transport handled by the matrix solver).
+      which ECHAM6.3's closure resolves: the implicit TKE source of
+      ``vdiff.f90`` l.837-848 (``closure.py::tke_source_update``) followed
+      by the transport on the interface rows in the matrix solver
+      (``docs/source/design/tte_tke_closure.md``).
 
 ## Done
 

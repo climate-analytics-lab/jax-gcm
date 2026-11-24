@@ -1,6 +1,1137 @@
 Release Notes
 =============
 
+v3.1.0 (2026-11-24)
+-------------------
+
+v3.1 makes the ECHAM-HAM M7 aerosol the default JAM configuration. It
+recalibrates the T63 ECHAM hosts (#1164), makes SLIM the land of the T63 ECHAM
+presets, and refits the M7 preset on that land, the corrected open-water and
+sea-ice surfaces and gridpoint humidity. It adds the MACv2 natural aerosol
+background to the non-JAM ECHAM packages and volcanic SO₂ to both JAM
+presets, recalibrates SPEEDY with its slab land restored, and hosts a spun-up
+initial state for every release configuration on the data mirror. Several of
+these change the climate a configuration produces. All eight release-matrix
+members pass their gates on ``3.1.0rc1``: each JAM member's cold year fails
+only the six-month burden-drift line, which reads the seasonal biomass-burning
+and dust sources as drift, and its warm-started second year passes every gate
+(:doc:`design/jam_regression`).
+
+Changed behaviour
+^^^^^^^^^^^^^^^^^
+
+- **The default JAM configuration now runs M7.** ``t63-echam-jam`` is the
+  ECHAM-HAM M7 population (``physics=echam-jam-m7``); the MAM4 configuration
+  it was in 3.0 is now ``t63-echam-jam-mam4``, unchanged. So
+  ``+configuration=t63-echam-jam`` needs the ``jcm[m7]`` extra (m7-jax is not
+  on PyPI yet: ``pip install "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e"``
+  first). Without it, building the configuration says exactly that, and names
+  ``t63-echam-jam-mam4`` as the configuration whose extra installs from PyPI;
+  a missing ``jcm[mam4]`` names its install line the same way. The
+  ``physics=echam-jam`` preset, the ``ma-*`` sweep and the AeroCom variants
+  stay MAM4. The benchmark preset ``t63-echam-jam`` follows the
+  configuration, so compare a 3.0 ``t63-echam-jam`` number with
+  ``t63-echam-jam-mam4``. On one A100-40GB at T63L47 (f32, 30 days,
+  converged), M7 costs 31.8 s per simulated day (7.4 simulated years per
+  day) against MAM4's 22.6 (10.5), 1.41x. The extra cost is in the M7
+  physics, not tracer transport: both populations advect 25 aerosol
+  tracers, and MAM4 also keeps 25 cloud-borne fields in the physics
+  carry. The configuration runs 1-day chunks: ``run=longrun`` keeps a
+  chunk's daily saves on the device, and five of them exhaust a 40 GB card
+  with M7. Chunk length left MAM4's throughput unchanged (22.55 vs 22.60 s
+  per simulated day at 5- and 1-day chunks).
+
+New capabilities
+^^^^^^^^^^^^^^^^
+
+- **The v3.1 calibration of the T63 ECHAM hosts** (#1164). The 2M
+  scheme's cloud-base and convective-detrainment droplet number (#1160), the
+  TTE-TKE closure (#1172) and the surface-layer height (#1178) moved the
+  climate the v3.0 values were fitted on: with them the JAM-MAM4 year had a net
+  TOA flux of -16.5 W/m² and 100 g/m² of liquid water path. Each T63 host is
+  refitted by derivative-free Gauss-Newton on 30-day January and July windows
+  against CERES-EBAF, ESA-CCI cloud and aerosol, GPCP and the AeroCom dust and
+  sea-salt burdens. The shipped values:
+
+  - prescribed-droplet cover (1M, 2M; ``JCM_CALIBRATED_COVER_T63``) ``crt``,
+    ``crs``, ``nex``, ``csatsc``, ``cinv`` = 0.677, 0.908, 1.01, 0.737, 0.275,
+    with ``ccraut`` 12.5 and the 40 cm⁻³ droplet floor for a prescribed
+    droplet number (``PRESCRIBED_DROPLET_WARM_RAIN_2M``: the simple-plume 2M
+    presets, and ``echam_physics(cloud_scheme="2m")`` without JAM, which picks
+    the pair by droplet source as it does the cover);
+  - a separate JAM cover set, ``JCM_CALIBRATED_COVER_T63_JAM`` = 0.727, 0.930,
+    1.14, 0.848, 0.265, which ``echam_physics(aerosol_module="jam")`` selects
+    (``CloudParameters.default(jam_aerosol=True)``,
+    ``echam_cloud_defaults(truncation, jam_aerosol=True)``), and the
+    ``CloudParams2M`` defaults ``ccraut`` 30 and ``cdnc_min_fixed`` 10 cm⁻³
+    (HAM's lower floor); the M7 preset overrides the cover set and ``ccraut``
+    with its own (below);
+  - JAM-MAM4: ARG ``tke_factor`` 0.246, dust threshold scale 0.720
+    (``NDUSCALE_JCM_T63_SCALE``, raised to 0.85 for the SLIM land under
+    "Changed physics"), sea-salt scale 1.53
+    (``SEASALT_SCALE_DEFAULT``) and one wet-removal scale of 1.22 on
+    ``wetdep.incloud_scale``, ``wetdep.impact_scale`` and
+    ``conv_transport.conv_scav_scale``, set in ``physics/echam-jam.yaml`` (an
+    override names them without Hydra's ``+``);
+  - JAM-M7 (``physics/echam-jam-m7.yaml``): this fit's sea-salt scale 2.0,
+    dust threshold scale 0.983, ``w_sigma_min`` 0.0552, wet-removal scale
+    1.10 and ``ccraut`` 13 are replaced by the structural refit's values (the
+    M7 entry under "Changed physics").
+
+  On the tree it was fitted on, 365-day years of all four hosts pass every
+  release health gate, with annual net TOA fluxes of -1.6 (JAM-MAM4), +2.2
+  (JAM-M7), +3.3 (2M) and -2.7 W/m² (1M; CERES +1.0); the release's years, on
+  the SLIM land and the surface and humidity changes, are in the M7 entry
+  under "Changed physics". JAM-MAM4 activates more droplets than JAM-M7 at
+  the same cloud levers, which holds its ``ccraut`` on the fit's upper bound
+  (#1184).
+  T106 and the cubed sphere take the new T63 sets as in
+  :doc:`design/resolution_defaults`; the fits, years and reproduction are in
+  :doc:`design/jam_aerosol_retune`.
+
+- **SLIM land is the ECHAM presets' land** (``physics.land_model``, default
+  ``slim``). SLIM, the Simple Land Interface Model (Laguë, Bonan and Swann
+  2019), replaces the prescribed-moisture land tile with a water bucket, a snow
+  bucket and a ten-layer soil temperature column under prescribed monthly
+  surface properties (albedos, evaporative resistance and vegetation height
+  from CLM5; bucket capacity; soil thermal properties; glacier mask), read from
+  ``forcing.slim_file`` (``auto``: the mirror's ``bundles/<grid>/slim.nc``,
+  published for T63, T106, T127 and T255). Its
+  surface is solved with the lowest model level as the prescribed tile's is;
+  the buckets take the step's rain and snow, which the convection now also
+  splits by phase (``convection.precip_conv_snow``;
+  ``surface_exchange.precip_rain``/``precip_snow`` are filled); the land
+  roughness becomes a tenth of the vegetation height; and the JAM dust gates
+  read the buckets. ``physics.slim_land.evap_res_scale`` and
+  ``bucket_depth_scale`` are calibration levers. ``physics.land_model=prescribed``
+  keeps the previous land, and the T106, T119 and ne30 configurations select
+  it: the T106 ones because their cloud settings, warm states and regression
+  bands are that land's, the T119 and ne30 ones because the mirror has no
+  SLIM dataset for their grids. A hand-composed ECHAM run on a grid without
+  one (``physics=echam grid=echam_t42_...``, a pySES mesh, the default T31
+  grid) has no SLIM dataset to resolve and is refused
+  until it names one in ``forcing.slim_file`` or adds
+  ``physics.land_model=prescribed``. ``echam_physics()`` called from Python
+  keeps ``land_model="prescribed"`` as its default (a bare ``ForcingData`` has
+  no SLIM properties). A state without the SLIM land is seeded from the
+  forcing. **This changes the climate of every T63 ECHAM configuration.** See
+  :doc:`science/surface` ("The SLIM land") and
+  :doc:`design/land_skin_energy_balance`.
+
+- **Natural aerosol background under the MACv2-SP plumes.** The non-JAM ECHAM
+  packages on RRTMGP (``echam``, ``echam-rrtmgp-2m``, ``echam-rrtmgp-2m-cosp``
+  and ``echam_physics()`` with the simple plumes) now compose
+  ``Macv2NaturalAerosol``, which adds the coarse mode (dust, sea salt) and
+  pre-industrial fine mode of the MACv2 climatology (Kinne 2019) to the
+  radiation's aerosol optics, shortwave and longwave. The data are a new mirror
+  product, ``bundles/<grid>/macv2_natural_aerosol.nc`` (``--stage macv2``), on
+  the four Gaussian grids and on T31 and T42, resolved by
+  ``forcing.natural_aerosol_file`` (``auto`` by default; ``null`` restores the
+  plumes alone). **This changes the radiation budget of those packages**: on
+  ``t63-echam-1m`` and ``t63-echam-2m`` clear-sky reflected shortwave rises by
+  3.3 W m⁻², all-sky by 1.5 and 1.4, and net top-of-atmosphere radiation falls
+  by 1.4 and 1.3 W m⁻² (days 5-10 of 30-day January A/Bs; about 1 W m⁻² over
+  the month), with cloud cover and precipitation unchanged beyond noise. The
+  packages' cloud calibration and the Twomey factor are unchanged. See the
+  aerosol section of the model description.
+
+- **Volcanic SO₂ in both JAM presets** (#1190). ``echam-jam`` and
+  ``echam-jam-m7`` now emit two volcanic sources (``jam_volcanic``):
+
+  - **Continuous degassing.** The AeroCom inventory as CESM2 builds it for
+    CMIP6, 12.6 Tg S/yr (25.2 Tg SO₂/yr) on its own altitude profile, 2.5 % of
+    it as primary sulfate.
+  - **Eruptions.** The CMIP7 ``utsvolcemis`` list, 1750–2023, injected over
+    each eruption's day. AeroCom AP4 asks for these in place of prescribed
+    stratospheric aerosol.
+
+  Both come from one grid-free product, ``products/volcanic_so2_cmip.nc``
+  (data-mirror revision ``90b40ab7``). It is read through the new
+  ``forcing.volcanic_file`` (``auto``) and mapped onto any grid, pySES
+  included; ``forcing.volcanic_eruption_year`` replays one year's eruptions
+  every model year. **This changes the climate of every JAM configuration.**
+  In the nudged M7 AP4 pair:
+
+  - pre-industrial sulfate rises by two-thirds;
+  - ERFaci weakens by about 0.1 W/m², the size of one month's noise;
+  - present-day net TOA falls by 0.3–0.5 W/m².
+
+  JAM-MAM4's v3.1 calibration was fitted without volcanic sulfur; the M7
+  preset's structural refit (under "Changed physics") was fitted with it. See
+  :doc:`design/jam_volcanic_so2`.
+
+- **SPEEDY recalibrated for coupled use; its slab land is back.** SPEEDY
+  runs its own slab land (``land_model.f90``, the reference default; the
+  prescribed land absorbed 2.4 W/m² of the global mean) from every door --
+  ``physics=speedy``, ``speedy-t31`` and the Python ``speedy_physics()`` build
+  one composition, the slab being ``SpeedySurfaceFlux``'s default.
+  ``speedy-t31`` also computes clear-sky fluxes, reads the shared solar constant, adds a
+  clear-sky backscatter reflectance (``refclr``) and carries SPEEDY parameters
+  calibrated at T31 with JEM-Cal, at a 30-minute step (the Python ``Model``'s
+  own for this physics): the clear-sky longwave fitted to RRTMGP, and 29
+  cloud, shortwave, convection, condensation and surface-flux parameters
+  fitted around it against CERES, GPCP, ERA5, ESA-CCI and MERRA-2. Against
+  those observations its net TOA flux is -0.6 W/m², OLR -1.4, reflected
+  shortwave +1.8, surface downward shortwave -0.5 and precipitable water
+  +0.3 kg/m² (reference SPEEDY: +4.1, -8.4, +5.9, +13.2, +4.3). SPEEDY now publishes the ``radiation.*`` TOA/surface fields, the
+  cloud cover its shortwave sees, and ``pressure_full``/``pressure_thickness``.
+  **This changes every SPEEDY climate over land, and every ``speedy-t31``
+  climate.** ``land_model="prescribed"``
+  (``+physics.terms.speedy_surface_flux.land_model=prescribed``) holds the
+  land at the climatology as before. ``physics=speedy`` and
+  ``speedy_physics()`` keep SPEEDY's reference parameters; the calibrated
+  values are the ``speedy-t31`` configuration's. See
+  :doc:`design/speedy_retune`.
+
+- **SPEEDY's clear-sky longwave can be fitted to a reference.** The band
+  fractions (``ModRadConParameters.fbco2_*``, ``fbwv1_*``, ``fbwv2_*``), the
+  CO2-band absorptivity (``ablco2_ref``) and a new water-vapour continuum
+  term in the window band (``ShortwaveRadiationParameters.ablwvc``) are
+  differentiable parameters; every default is SPEEDY's value (the continuum
+  off). Against RRTMGP on the columns of a ``speedy-t31`` calibrated with
+  SPEEDY's own longwave form, that scheme's
+  clear-sky OLR is 6.6 W/m² low and its clear-sky surface downward flux 18.6
+  low; a joint fit brings both within 0.3 W/m² in the mean and about 3 W/m²
+  RMS. ``speedy-t31`` carries the fitted values, with its other parameters
+  calibrated around them. See :doc:`design/speedy_longwave_fit`.
+
+- **Spun-up initial states for every release configuration** (#762). The
+  data mirror hosts ``<member>_v31_warm.msgpack`` under
+  ``bundles/<grid>_<levels>/init_states/`` for each of the eight
+  release-matrix configurations (SPEEDY T31; ECHAM 1M and 2M at T63 and T106;
+  JAM-MAM4 at T63L47 and T63L95; JAM-M7 at T63L47), each with a provenance
+  record. ``+configuration=<preset> init=from_state
+  init.file=hf://bundles/<grid>_<levels>/init_states/<member>_v31_warm.msgpack``
+  starts a run from one instead of a months-long spin-up. Each of the seven
+  ECHAM states is the end of a 365-day year of its release preset on this
+  release's physics, started from the member's previous hosted state (the JAM
+  members' second such year or later), written at mirror revision
+  ``53803a0b``; the four 1M and 2M states predate the MACv2 natural aerosol
+  background (above), which their presets compose. They ship as they are, by
+  maintainer decision: a run started from one adjusts to the added aerosol,
+  the regression bands are drawn from these same states, and rerunning them
+  would move the mirror pin and with it every band. SPEEDY's is the end of a
+  year at SPEEDY's reference parameters and prescribed land, from before the
+  ``speedy-t31`` recalibration (above). A state file is replaced in place
+  when its member's year is rerun, so an earlier pin still reads the earlier
+  state. A state written before the SLIM land seeds its buckets from
+  the forcing and spends most of its first year filling them, with a dust
+  emission to match, so start a T63 ECHAM run from the hosted state rather
+  than from an earlier one. The release-matrix regression bands of all eight
+  (#943) start from fixture states spun up from these at ``53803a0b`` and are
+  drawn at mirror revision ``d1b5e09e`` on jax-rrtmgp 0.8.0 (under
+  "Dependencies"). The JAM-MAM4 bands carry the cloud-borne Aitken-mode masses
+  as column burdens (``jam_cloud_borne.mc_<species>_ait_column``) instead of
+  level by level: above the boundary layer those levels hold a handful of
+  activation events and differ between identical runs by more than a band
+  drawn from seven windows. For the same reason the regression bands the
+  fringe levels of cloud water, cloud ice and the cloud-borne aerosol masses
+  (those holding under 1 % of the profile peak) at 1 % of that peak. See
+  :doc:`design/data_mirror` ("Hosted initial states").
+
+- **The surface-exchange contract carries land/sea flux tiles and what a
+  coupled sea ice reads.** SPEEDY now publishes its sea and land fluxes as the
+  ``*_tile`` fields of ``SurfaceExchange`` (tile axis ``("sea", "land")``,
+  fractions ``1 - fmask`` and ``fmask``; their weighted sum is the delivered
+  grid mean), so a coupled land or ocean model on a partly-land cell can be
+  forced with its own surface's flux, and the sea and land air those fluxes
+  were computed against. Every publisher also fills five new guaranteed
+  fields: ``downward_shortwave_flux`` and ``downward_longwave_flux``
+  (incident), ``air_temperature`` and ``air_specific_humidity`` (at the new
+  static ``air_reference``: SPEEDY's surface-layer air, ECHAM's lowest model
+  level) and ``surface_pressure`` (jax-esm#141). The static ``tile_names``
+  names each struct's tile axis, ``SurfaceExchange.tile(field, name)`` reads a
+  tile by name, and ``validate()`` holds a tile sum to the rounding of its
+  terms. SPEEDY's ``surface_flux`` gains ``q0``. A coupled sea-ice model hands
+  SPEEDY its skin temperature through the optional
+  ``ForcingData.sea_ice_temperature``, the field a forcing file's
+  ``sea_ice_temperature`` variable fills (see the entry below).
+  **Breaking** for code that builds a ``SurfaceExchange`` itself: the
+  five fields and the ``air_reference`` keyword are required. See
+  :doc:`design/surface_exchange`.
+
+- **Virtual observers from the command line**: the top-level ``observers``
+  config key attaches :mod:`jcm.observers` stations (inline or from a
+  ``name, latitude, longitude[, altitude|pressure]`` CSV), tracks and
+  solar-time swaths to a ``python -m jcm.main`` run, and each observer's
+  per-timestep samples are written to ``<prefix>_day<N>_obs_<name>.nc`` per
+  chunk (``<output stem>_obs_<name>.nc`` for a single-window run).
+  ``TrackObserver.stations(names=...)`` labels the point axis with a
+  ``station`` coordinate. See :doc:`design/observers`.
+
+- **Water-tile stress and 10 m wind relative to the ocean current** (#915):
+  ``ForcingData.ocean_u``/``ocean_v`` (reserved by #914) are now consumed by
+  the ECHAM ``TteTkeVerticalDiffusion`` term — the momentum Robin row's
+  surface target scales the current by the non-land fraction, matching
+  ECHAM's own box-averaged ``vdiff.f90`` l.1355-1358, and a new
+  ``surface_exchange.wind_speed_relative_to_current`` field publishes the
+  water-tile-only current-relative 10 m speed (ECHAM's ``wind10w``). Wired
+  via a new ``forcing.ocean_current`` Hydra block (``file`` or ``constants``,
+  mirroring ``forcing.prescribed_surface_flux``) or directly by a Python
+  coupler; a current supplied to a composition with no consuming term now
+  raises at run start rather than being silently ignored. Inert by default
+  (``None`` current, bit-identical to a run that never sets the fields). See
+  :doc:`design/surface_exchange`.
+
+- **EchamSurface publishes its 2 m diagnostics** (#1140):
+  ``surface.temperature_2m`` / ``humidity_2m`` / ``dewpoint_2m`` /
+  ``richardson_number`` / ``energy_balance_residual`` and the per-tile
+  ``temperature_2m_tile`` / ``humidity_2m_tile`` — computed every step by
+  ``compute_surface_diagnostics`` and previously discarded entirely (the
+  sibling finding to #1118's ``surface.bulk_*``). The 2 m dew point's
+  placeholder formula (``temp_2m - 20*(1 - q/0.01)``, no saturation-physics
+  basis) is replaced by
+  ``jcm.physics.convection.saturation.dewpoint_temperature``, the exact analytic inverse of the Tetens
+  saturation law that module's constants are ECHAM's own (documented there
+  as used "only to invert the 2 m dew point"), tested by round-tripping it
+  through the forward saturation law over both the water and ice branches.
+  Three fields of the underlying bundle (a second friction velocity, a
+  hardcoded "100 m" PBL height, and an exact net-radiation duplicate) stay
+  unpublished because a better or the only real version of each is already
+  public elsewhere — see :doc:`science/surface`'s *Surface-layer
+  diagnostics* section for which and why.
+
+- **Opt-in, host-only progress bar** (#320): ``run.progress_bar=true``
+  (CLI) ticks once per chunk, right after it returns; the same
+  ``progress=True`` keyword on a direct ``Model.run``/``resume`` call
+  shows the whole call as a single unit (0 -> 1). Uses ``tqdm`` if
+  importable, else a plain fallback printer, never a hard dependency. Off
+  by default and, when off, adds nothing to the compiled integration (see
+  :mod:`jcm.progress`), so it cannot change a run's compilation or timing.
+  Nothing reports from inside the jitted integration itself — that was
+  tried and, across three rounds of review, found broken a different way
+  each time, which is why it is host-only instead. See
+  :doc:`running_at_scale`.
+
+- **ECHAM-JAM M7 aerosol** (#1017): ``+configuration=t63-echam-jam``
+  (``physics=echam-jam-m7``) runs the ECHAM6.3-HAM2.3 M7 population on the
+  same harness, with the M7-JAX microphysics core as the ``jcm[m7]`` extra
+  and HAM's own process variants, each validated against compiled HAM
+  numbers: Kazil-Lovejoy ion-mediated nucleation driven by host-side GCR
+  ionisation, Koehler A/B + ARG activation over the 20-bin updraft PDF, HAM's
+  Mie-table optics, Long + Sofiev sea salt, HAM's per-sector emission sizing
+  and its AeroCom-II biogenic OC source, the full
+  ``nwetdep = 3`` wet deposition, M7 contact/immersion freezing,
+  Kaercher-Lohmann cirrus (``nic_cirrus = 2``), and dust emission's
+  ``ndust = 5`` (HAM's own reference-run choice: ``ndust = 4``'s Zobler/
+  East-Asian mixture plus the MSG-SEVIRI Saharan dust-source-activation
+  override, ``forcing.dust_msg``, from the mirror). The mirror's emissions
+  bundles carry the residential/energy channels the sizing splits out and the
+  ``emis_biogenic_oc`` channel (#1188, under "Bug fixes").
+  Every variant is a new
+  selector whose default leaves the MAM4 configurations bit for bit
+  unchanged. Four settings deviate from the r7492 reference by maintainer
+  decision: the updraft PDF (``nactivpdf = 1``), the corrected
+  ``cdroprad(6) = 30`` µm in-cloud impaction axis, the warm-rain pair (a
+  10 cm⁻³ droplet floor with its own ``ccraut`` of 19.8, where HAM pairs
+  40 cm⁻³ with 10.6), and ``ccsaut``, which stays the generic 95 where HAM
+  pairs its convection settings (``cprcon``, ``entrpen``, both adopted) with
+  900. Its sea-salt source (1.85) and dust thresholds (1.16)
+  are scaled for jcm's surface winds and land, fitted with the rest of its
+  structural refit (the M7 entry under "Changed physics"). Its HAM inputs (the
+  Kazil-Lovejoy and GCR nucleation tables, the MSG-SEVIRI dust map, the
+  biogenic OC) are on the data mirror. The release statistics close its
+  sulfur family in M7's own sulfate (SO4, 96.06 g/mol, where MAM4's ``so4``
+  is ammonium bisulfate at 115 g/mol), read per chunk from the run's tracers,
+  and close its ``oc`` on its own ledger. ``tools/jam_burden_report.py``'s
+  sulfate lifetime converts the SO₂ source the same way, so a MAM4 run's
+  reported ``so4`` lifetime is 16.5 % shorter than before (the tool converted
+  at 96/64 for every population). See
+  :doc:`design/jam_m7_configuration` and :doc:`design/jam_regression`.
+
+- **The JAM dust door, closing #995**: ``+physics.dust.<field>=`` (e.g.
+  ``+physics.dust.r_dust_umin=18.0``) on the factory-built JAM presets, the
+  last of the twelve JAM process schemes to reach one. Its base object
+  depends on the ``jam_dust_preset``/``jam_dust_nudged``/
+  ``jam_dust_nduscale_scale`` flags and the run's own spectral truncation,
+  not a bare class default like every other JAM door, so a mapping is
+  layered on ``DustParameters.preset(...)`` built from those flags —
+  they still choose the preset the mapping sits on top of. An explicit
+  ``DustParameters`` object (the ``dust=`` argument of ``echam_physics``)
+  is used as given, same as
+  :class:`~jcm.physics.aerosol.jam.emissions.dust.DustEmissions` itself.
+
+- **Monthly output no longer needs a hand-aligned run** (#903).
+  ``run.monthly_means=true`` used to refuse any ``run.start_time`` /
+  ``run.save_interval`` combination that did not already tile the calendar
+  — a non-midnight start, or a save interval that does not evenly divide
+  every month (5 days, say). The chunked runner now schedules such a run as
+  a sequence of sub-runs instead: the configured ``save_interval`` for most
+  of each month, and a single shorter *edge* sub-run (exactly one output
+  interval) wherever a regular interval would otherwise cross the next
+  midnight, a month start, or the run's end.
+  :func:`jcm.temporal_aggregation.schedule_monthly_segments` builds (and
+  validates) that schedule and is usable directly, without the chunked
+  runner, by any other driver. Only a request with no valid schedule — an
+  edge whose duration is not a whole number of model steps — is refused,
+  still before any integration. This also fixes the ``run=longrun`` /
+  ``run=pyses_year`` presets' ``run.monthly_means=true`` resuming on a
+  5-day grid from a checkpoint that landed on, e.g., 31 December. See
+  :ref:`monthly-means-cli`.
+
+- **Output on constant pressure surfaces** (#258). ``run.pressure_levels``
+  (null by default; sigma output unaffected) log-pressure linearly
+  interpolates every ``level``-dimensioned field from the model's own
+  ``pressure_full`` onto a fixed list of pressures (hPa) at save time —
+  the plain run, each chunk, each monthly file and the snapshot stream
+  alike. A point below that column's surface or above the model lid comes
+  back ``NaN`` rather than extrapolated.
+  :func:`jcm.analysis.to_pressure_levels` is the same conversion as a plain
+  function on an already-saved or in-memory Dataset, so a sigma-level run
+  does not need to be re-run to get pressure-level output. See
+  :doc:`running_at_scale`'s "Constant pressure-surface output",
+  :doc:`advanced_features` and
+  ``docs/source/design/output_vertical_conventions.md``.
+
+- **RRTMGP takes a per-band direct and diffuse surface albedo** (#959),
+  rather than collapsing the surface scheme's visible/near-IR pair to one
+  broadband value used for both the direct beam and diffuse light.
+  ``EchamBoundaryConditions`` now publishes the real open-water Fresnel
+  direct albedo alongside its diffuse albedo (previously averaged together
+  as a stopgap); land and sea ice are unaffected (broadband, same value in
+  both slots). ``RRTMGPRadiation`` maps the quartet to jax-rrtmgp 0.5.0's
+  ``sfc_alb_dir``/``sfc_alb_dif`` by SW-band wavelength (ECHAM's
+  ``mo_surface`` 0.7 um visible/near-IR split), read off jax-rrtmgp's own
+  band table. **Changes the shortwave surface balance in every RRTMGP
+  configuration**, most over ocean at low sun; the grey two-stream backend
+  (one SW band) and the NN radiation emulator (trained on the broadband
+  feature) are unaffected and keep publishing one value in every slot. See
+  :doc:`science/radiation` and :doc:`science/surface`.
+
+- **RRTMGP can take a host's own cloud effective radii** (#1135):
+  ``RRTMGPRadiation(use_host_effective_radii=True)`` (or
+  ``physics.radiation_use_host_effective_radii=true`` on a factory-built
+  ``echam_physics()`` preset) reads ``clouds.r_eff_liq``/``r_eff_ice`` from
+  the host instead of forming them from ``qnc``/``qni`` or ECHAM's
+  prescribed profile — for a host (jax-les) that already has its own law
+  for one or both radii, most commonly because it carries a droplet number
+  but no ice-number tracer to drive jcm's own ``qnc``/``qni`` path. The
+  radius is clamped to jax-rrtmgp's table range and zeroed where there is
+  no in-cloud condensate, exactly as jcm's own radius is, so the two paths
+  are interchangeable from the solve's point of view; the ice-radius law
+  itself is entirely the host's choice. Default False, bit-identical to
+  every prior release. See :doc:`science/radiation`.
+
+- **Liquid and ice water paths as a satellite imager retrieves them.** With
+  ``cosp_modis`` the COSP term publishes ``lwpcci`` and ``iwpcci``: the MODIS
+  simulator's subcolumn retrievals under ESA Cloud_cci's definition (column
+  optical depth times cloud-top effective radius, McGarragh et al. 2018,
+  with every detected subcolumn booked to its cloud-top phase, so liquid
+  beneath an ice top counts as ice), as all-sky means. Both are zero without
+  daylight; divide a time mean by that of ``cosp_sunlit_cci`` for the mean
+  over the daylight hours (the product's overpass-time sampling is not
+  modelled). They are the fields to compare with satellite ``lwp`` and
+  ``clivi``; the grid-mean ``clouds`` paths are not. Needs a ``jax-cosp``
+  with ``jcosp.modis.imager``. See :doc:`science/clouds_microphysics`.
+
+- **Faster RRTMGP radiation on GPUs (needs jax-rrtmgp >= 0.6.0).**
+  ``t63-echam-rrtmgp`` on an A100 goes from 16.05 to about 9.1 s/sim-day (about
+  43 %), and the RRTMGP call from 739 to 139 ms: the clear-sky (CRE) fluxes now
+  share the all-sky solve's gas optics, the unrolled recurrences are fenced from
+  XLA fusion (both in the library), and ``RRTMGPRadiation`` evaluates the gas
+  optics of all g-points ahead of the spectral loop and runs the vertical
+  recurrences as a ``lax.scan`` inside 64-g-point chunks. The first two leave the fluxes unchanged
+  (longwave bit-identical, shortwave clear-sky within two float32 ulp); the
+  last two agree to a few ulp (at most 12). Three new options with these
+  defaults, ``gas_optics_mode="all_gpts"``, ``gpt_chunk=64`` and
+  ``use_scan=True``, cost +4 GiB (T63L47) / +8 GiB (T63L95) of peak memory over
+  the unrolled form and set from Hydra, on the term-composed presets as
+  ``physics.terms.rrtmgp_radiation.gas_optics_mode=per_gpt`` and on the
+  factory-built ones (``echam-jam``, ``echam-jam-m7``, ``echam-forced-flux``) as
+  ``physics.radiation_gas_optics_mode=per_gpt``. A TPU user of the matmul table
+  lookup should set ``per_gpt``. A new ``lw_solver=noscat`` option
+  (``physics.terms.rrtmgp_radiation.lw_solver`` or
+  ``physics.radiation_lw_solver``) selects RTE's no-scattering longwave solver,
+  as ECHAM6 uses; it is not the default because it shifts the tuned energy
+  balance. See :doc:`design/rrtmgp_gpu_performance`.
+
+- **Convection type and depth survive time averaging.** The integer
+  ``convection.ktype``/``cloud_top``/``cloud_base`` are dropped from
+  interval-mean output, so the Tiedtke term now also publishes
+  ``convection.deep_frequency``, ``shallow_frequency`` and
+  ``midlevel_frequency`` (0/1 per step; the time mean is the frequency) and a
+  deep plume's ``deep_top_pressure``/``deep_base_pressure`` [Pa] times the
+  deep indicator (the time mean over that of ``deep_frequency`` is the mean
+  deep cloud-top/base pressure). Five more 2-D fields in every ECHAM output
+  file. See :doc:`science/convection` ("In-plume precipitation and the
+  condensate reaching the anvil").
+
+- **The AeroCom aerosol-free fluxes come out of the one radiation call (needs
+  jax-rrtmgp >= 0.7.0).** ``aerosol_free_interval`` no longer runs a second
+  RRTMGP solve with the aerosol optics zeroed: the library solves the
+  aerosol-free twin of the all-sky and clear-sky problems inside the same
+  g-point loop on the shared gas optics, so the exact diagnostic (``1``)
+  costs +48 % per radiation call instead of +88 %
+  (T63L47 ``echam-jam-aerocom``, A100). The twins are now the problem with no
+  aerosol at all rather than with zeroed optics mixed in, which moves the
+  ``*noa`` fluxes at float rounding; the simulation itself is unchanged. See
+  :doc:`design/aerocom_erfari_sampling`.
+
+- **Optional prescribed sea-ice surface temperature for the SPEEDY sea
+  flux.** A surface forcing file may carry a ``sea_ice_temperature`` [K]
+  variable (SPEEDY's ``tice_am``). The spectral and pySES readers load it,
+  and the SPEEDY sea-surface flux blends it into the effective temperature
+  ``tsea = SST + sice·(T_ice − SST)``. Its valid range is 180–275 K. A file
+  without it, which is every packaged and data-mirror file, still uses
+  ``T_ice = min(SST, 273.2 − 1.8 K)``, so existing runs are bit-identical.
+  ``ForcingData.zeros``/``ones`` leave the field ``None``. See
+  :doc:`science/surface`.
+
+Corrected physics
+^^^^^^^^^^^^^^^^^
+
+- **SPEEDY's vertical-diffusion surrogate no longer destabilises a
+  multi-day tangent** (#1167). With
+  ``vertical_diffusion.mse_gate_smoothing > 0``, a column just below the
+  shallow-convection switch (``dmse < 0``) with ``drh < 0`` took the
+  derivative of a reversed shallow-convection flux, one the scheme never
+  produces: each regime's flux was gated decision by decision
+  (``smoothing.chain_gates``), and the shallow-convection flux ``∝ drh`` has
+  the wrong sign where its own ``drh >= 0`` test fails. In the
+  tangent-linear model that is a positive feedback on the bottom humidity.
+  At 200 J/kg (T30 L8, parameters at the midpoint of a calibration's
+  bounds) a 14-day whitened tangent grew 4–220× in one of six members, and
+  52× over 7 days in another, while the forecast stayed bit-identical; at
+  50–100 J/kg up to 7×10⁴-fold. Every 7- to 14-day tangent now stays
+  within 4 % of the width-0 one: at 200–2000 J/kg in all seven members
+  tested, and at 50–100 J/kg in those two.
+  The lowest interface's moisture flux is now one surrogate
+  (``speedy_vdiff._pbl_moisture_flux``): the two regimes crossfaded by a
+  sigmoid in ``dmse``, so the derivative across the switch is the jump the
+  flux makes, zero where neither regime carries a flux. Shallow
+  convection's ``max(drh, 0)`` is a kink and takes a softplus under
+  ``rh_gate_smoothing``; a sigmoid gate times ``drh`` reversed the flux
+  below ``drh = 0`` the same way. Forward values are bit-identical at any
+  width, and every width still defaults to 0. See
+  :doc:`design/surrogate_gradients`.
+
+- **The TTE-TKE vertical diffusion is ECHAM6.3's closure** (#996): Louis
+  (1979) stability functions of the moist Richardson number in place of
+  constant ``c_m = 0.4``/``c_h = 0.5``; Blackadar's mixing length with the
+  Holtslag-Boville asymptote under a diagnosed boundary-layer extension
+  (dynamic ``0.3·u*/f`` or convective) in place of ``0.1×`` a fixed 1000 m;
+  the dissipation constant ``zsmn³ = 0.167`` (was 0.19); ECHAM's TKE
+  transport coefficient and the Mailhot-Benoit surface TKE; TKE, the θᵥ
+  variance and ``km``/``kh`` on the interfaces; heat diffused as the dry
+  static energy (it was the temperature) with the dissipated kinetic energy
+  returned as heat; ECHAM's ``ztkemin = 1e-10`` as the TKE floor
+  (``VDiffParameters.totte_min``, was 0.01) and no clip on the exchange
+  coefficients. Pinned against the compiled ``vdiff.f90`` to 7e-14
+  (:doc:`design/tte_tke_closure`). New differentiable ``VDiffParameters``
+  leaves: ``closure_h1``/``h2``/``m1``/``m2``/``m4``,
+  ``mixing_length_asymptote``, ``pbl_dynamic_height_factor``,
+  ``surface_tke_convective_factor``; and ECHAM's RCE switch
+  ``VDiffParameters.lrce`` (default off; the RCE testbed turns it on).
+  ``totte_min`` must be positive. ``vertical_diffusion.pbl_height`` is the
+  boundary-layer extension's height. Checkpoint schema 4: an older file's
+  TKE carry is moved onto the interface rows on load
+  (:doc:`design/checkpoint_compatibility`).
+
+- **SPEEDY's parameter plateaux get surrogate derivatives, and the
+  convective-precipitation onset takes its derivative per unit mass flux.**
+  Three more switches of the SPEEDY physics keep their reference values
+  and take, at a positive width, the derivative of a named smooth function
+  (``jcm.physics.speedy.smoothing``, the 3.0.0 convention; every default
+  stays 0): the bottom-level condensation threshold ``max(rhref[-1],
+  rhblsc)`` under ``condensation.bl_threshold_smoothing`` (an RH fraction)
+  — below the profile's own value ``rhlsc − drhlsc·(1 − σ²)`` the parameter
+  ``rhblsc`` has no effect on the model and its gradient is exactly zero, so
+  a calibration that stepped it there was never pulled back; the ``±dtheta``
+  clip of the bulk stability correction under
+  ``surface_flux.stability_smoothing`` (K), whose clipped columns have
+  exactly zero derivative in ``dtheta``; and the ``psa > psmin`` convection
+  switch with its clipped mass-flux ramp under ``convection.psmin_smoothing``
+  (normalised surface pressure), zero in ``psmin`` below the switch and
+  above the cap (everywhere the surface pressure exceeds 900 hPa at the
+  default). ``convection.precnv_smoothing`` is now a cloud-top moisture
+  excess per unit cloud-base mass flux [g/kg], not a flux: the onset's
+  smooth function is ``cbmf·softplus(unit_excess)``, because a switched-off
+  plume sits exactly on the hinge's corner, where AD's tie rule gave its
+  tangent half the plume's rain (in either sign of the excess); at width 0
+  the corner now takes the plume's own rain yield, the reference's
+  right-hand derivative, and a running plume keeps the reference
+  derivative. Forward values are bit-identical to 3.0.0 at any width. See
+  :doc:`design/surrogate_gradients`.
+
+- **Water-tile momentum roughness is now wind-dependent (Charnock), not a
+  fixed 0.1 mm (1e-4 m) constant** (#1118). ``TteTkeVerticalDiffusion``'s live water
+  tile reads ``z0m = cchar·u*²/g`` (ECHAM's ``mo_surface_ocean.f90::
+  update_z0_ocean``), with the differentiable ``VDiffParameters.cchar``
+  leaf (a field with no consumer in 3.0.0) and ECHAM's 1.5e-5 m floor, from the
+  PREVIOUS step's carried water-tile friction velocity — a one-step-lagged
+  fixed point, since this step's roughness is itself an input to the
+  exchange coefficients that produce this step's ``u*``. The water tile's
+  heat roughness (the existing kB⁻¹ relation) is now wind-dependent through
+  this live momentum roughness too; the ice and land tiles are unaffected
+  (ECHAM fixes those too). The EchamSurface bulk-aerodynamic reference flux
+  — computed every step and previously discarded entirely — is now
+  published as the grid-mean diagnostics ``surface.bulk_sensible_heat_flux``
+  / ``bulk_latent_heat_flux`` / ``bulk_evaporation`` / ``bulk_momentum_flux_u/v``.
+  See :doc:`science/vertical_diffusion`'s *Water-tile momentum roughness*
+  section.
+
+- **The ECHAM-Louis surface layer's stable branch is now ECHAM6.3's own
+  Louis (1979) form, not ICON/Mauritsen's** (#982).
+  ``compute_surface_exchange_coefficients_echam_louis``'s ``Ri > 0`` branch
+  previously used ICON's ``mo_turbulence_diag::sfc_exchange_coeff`` stable
+  functions (Mauritsen et al. 2007); it now matches
+  ``mo_surface_land.f90::precalc_land`` (confirmed identical in form in
+  ``precalc_ocean``/``precalc_ice``) — ``cfm = cfn_m/(1 + 2cb·Ri/√(1+Ri))``,
+  ``cfh = cfn_h/(1 + 2cb·Ri·√(1+Ri))``. Against ECHAM6.3's compiled
+  ``precalc_land`` on 324 land columns, the stable branch previously gave
+  ~1.5× the heat and ~2.1× the drag exchange at Ri ≈ 0.3; both now agree to
+  round-off. Stable land/ice/water surface layers (nights, snow, high
+  latitudes) are therefore less strongly coupled to the atmosphere than
+  before this fix. The unstable branch is unchanged (already ECHAM's land/
+  ice form to 0.1 %; the open-water tile takes ECHAM's own
+  free-convection form, #1147, under "Bug fixes"). See
+  :doc:`science/vertical_diffusion`.
+
+- **ECHAM mid-month interpolation anchors for climatology forcing, default
+  changed** (#902). Every 12-record ``wrap_year`` surface climatology
+  (SST, sea ice, snow, soil) and the ozone / oxidant climatologies now
+  reconstruct their annual cycle the way ECHAM does
+  (``mo_time_control.f90::time_weights``): each record is the instant at
+  its OWN month's mid-point, linearly blended with the previous or next
+  month's record using the actual lengths of the months involved (leap
+  February included), rather than held constant from the 1st of the
+  month. The pre-#902 held-from-the-1st reconstruction moved the annual
+  cycle about half a month early relative to both ECHAM and the
+  monthly-mean meaning of the records. **This changes the climate of
+  every run forced by one of these climatologies** — see
+  :doc:`design/forcing_time_semantics`. The new ``forcing.monthly_anchors``
+  knob (``mid_month``, the new default, or ``month_start``, the pre-#902
+  behaviour) selects between them; AMIP transient bundles
+  (``tosbcs``/``siconcbcs``/``ozone_amip``, already interpolated between
+  their own mid-month stamps) are unaffected, and the interval-total
+  emissions and Fortran-stepped Tegen dust-source/roughness climatologies
+  stay held from the 1st regardless of the switch (interpolating an
+  interval total would not preserve it; the dust scheme's own reference
+  steps by calendar month).
+
+- **The large-scale vertical velocity now reaches the cloud microphysics**
+  (#705). ECHAM's host-supplied pressure velocity (``ω``, the dycore's
+  ``omega`` field) previously reached neither the 1M nor the 2M scheme, so
+  three ECHAM mechanisms ran on the turbulent updraft alone: the 2M's
+  ``zvervx`` updraft for the Wegener-Bergeron-Findeisen and phase-choice
+  gates, the heterogeneous mixed-phase freezing's immersion-cooling rate
+  (``het_mxphase_freezing``), and the ``knvb``/``lonacc`` inversion-level
+  exception that zeroes ``zauloc`` under subsidence (1M and 2M alike).
+  ``ω`` now reaches all three, read opportunistically from
+  ``diagnostics["_dycore_fields"]`` — live whenever the composition already
+  requires it for another reason (chiefly ``physics.cu_lmfmid``, on by
+  default), zero otherwise rather than refusing to construct, so the two
+  existing 2M-on-pySES configurations (``ma-ne30-l47``/``ma-ne30-l95``,
+  which already disable ``cu_lmfmid`` for lack of an omega provider,
+  jax-gcm#698) are unaffected. **Changes the 2M scheme's default climate**:
+  unlike the 1M, where ECHAM6.3 fixes ``cauloc = 0`` and the ``lonacc``
+  exception is therefore inert, the 2M's own ``cauloc`` default is
+  ECHAM-HAM's 3.0, so the exception is live in every 2M configuration (JAM,
+  M7, MAM4 alike). See :doc:`science/clouds_microphysics`.
+
+- **The Lohmann 2M scheme now activates droplets at cloud base and gives
+  detrained convective liquid a droplet number** (#955). Previously CDNC
+  was replenished only once it had already decayed to ``cdnc_min``
+  (``update_in_cloud_water``'s ``cdnc <= cdnc_min`` re-trigger); a column
+  whose CDNC was already above that floor could not respond to a larger
+  aerosol-activated number at all — the gap behind a marine
+  cloud-brightening sensitivity test seeing a very weak CDNC response to
+  large sea-salt perturbations. ``stratiform_activation_at_cloud_base``
+  (``mo_cloud_micro_2m.f90`` 742-782) now raises CDNC at the base of each
+  cloud on four parcel-theory triggers (CDNC at the floor, growing liquid,
+  growing cover, or water supersaturation) and copies the result up
+  through the cloud; ``convective_detrainment_droplet_number`` (lines
+  889-941) gives the convective detrained liquid a droplet number, the
+  lesser of the activated number here and at the convective base,
+  LWC-weighted into CDNC and never decreasing. **Changes the 2M scheme's
+  default climate** wherever a cloud's CDNC sat above ``cdnc_min`` and one
+  of the four triggers held — expected to raise CDNC (and so lower LWP
+  through the KK2000 autoconversion's ``Nc^-1.79`` sensitivity) in
+  freshly-forming and growing clouds specifically, which the pre-#955
+  scheme could not reactivate. Cirrus nucleation (``zninucl``,
+  ``nic_cirrus = 1``) remains absent, split out to its own, focused issue
+  (#1159). See :doc:`science/clouds_microphysics` and
+  :doc:`design/lohmann_2m_column_processes`.
+
+Changed physics
+^^^^^^^^^^^^^^^
+
+- **Humidity is a gridpoint field on the semi-Lagrangian Dinosaur core**
+  (``dycore.nodal_humidity``, default ``true``; closes #954). As in ECHAM,
+  whose ``qm1`` is moved on the grid by ``tpcore`` and never hyperdiffused,
+  ``specific_humidity`` is now a nodal semi-Lagrangian tracer under the nodal
+  tracers' local and global mass fixers, and each physics increment of it is
+  added whole instead of through its T63 projection. The projection dropped
+  about half the grid-scale variance of every humidity increment, including
+  the drying under raining columns, which painted a stationary checkerboard
+  into the tropical precipitation, condensate and clouds. Over a January of
+  ``t63-echam-jam`` (M7) the precipitation's share of zonal power beyond the
+  truncation falls from 0.038 to 0.010 and its pattern correlation with GPCP
+  rises from 0.67 to 0.70, but the cloud climate shifts (shortwave cloud
+  forcing −53 → −63 W/m²): configurations calibrated with spectral humidity
+  need recalibrating, and of the release presets only M7 is refitted (next
+  entry). Checkpoints of either kind restore under both settings
+  (converted on load); ``dycore.nodal_humidity=false`` restores the previous
+  arrangement. The Eulerian core (SPEEDY) is unchanged. See
+  :doc:`design/tracer_mass_conservation`.
+
+- **The ECHAM-JAM M7 preset is refitted on this tree, with ECHAM-HAM's
+  convection constants.** The SLIM land, the open-water and sea-ice surface
+  changes and gridpoint humidity move the climate the v3.1 values were fitted
+  on: the ``t63-echam-jam`` (M7) year at them has a shortwave cloud forcing of
+  −57.6 W/m² (CERES −45.7), 70 g/m² of liquid water path and a dust burden of
+  85 mg/m². ``physics/echam-jam-m7.yaml`` now sets the pair ECHAM-HAM uses
+  for a prognostic droplet number at T63 L47 with Abdul-Razzak & Ghan
+  activation, ``cprcon`` 9e-4 and ``entrpen`` 2e-4 (the other presets keep
+  ECHAM6's 2.5e-4 and 1e-4), which dries the tropical upper troposphere from
+  1.4-1.5 to 0.8-1.1 times ERA5, and thirteen levers fitted jointly around it
+  on four seasonal 30-day windows with net TOA as a target: its own cover set
+  (``clouds:`` ``crt``, ``crs``, ``nex``, ``csatsc``, ``cinv`` = 0.780, 0.915,
+  1.02, 0.816, 0.173), ``ccraut`` 19.8, ``w_sigma_min`` 0.0499, dust threshold
+  scale 1.16, sea-salt scale 1.85, wet-removal scale 1.59, DMS flux scale
+  1.15, and SLIM's ``evap_res_scale`` 1.01 and ``bucket_depth_scale`` 1.18.
+  The confirmation year of the shipped preset passes every release health
+  gate, with a net TOA flux of +3.4 W/m² (CERES +1.0), a shortwave cloud
+  forcing of −51.1 W/m² and a longwave one of 27.3 (27.9), 63 g/m² of liquid
+  water path, an AOD of 0.161 on the retrieval's coverage (0.145), a dust
+  burden of 22 mg/m² and a dust emission of 864 Tg/yr.
+  The 2M, 1M and JAM-MAM4 presets keep the v3.1 values (JAM-MAM4 with the
+  dust threshold scale below) and are not refitted for these changes: their
+  years on this tree pass every release health gate, with net TOA fluxes of
+  +4.1 (2M T63), +5.8 (2M T106), −2.1 (1M T63), −0.6 (1M T106) and −1.8 and
+  −1.9 W/m² (JAM-MAM4 L47 and L95); the 1M and 2M years are without the
+  MACv2 natural aerosol background, which lowers their net TOA by about
+  1 W/m² (under "New capabilities"). See
+  :doc:`design/jam_aerosol_retune` ("The structural refit") and
+  :doc:`science/convection`.
+
+- **JAM-MAM4's dust threshold scale is 0.85** (``NDUSCALE_JCM_T63_SCALE``;
+  0.720 in the v3.1 calibration). SLIM's roughness and bucket-based dust
+  gates raise the emission: an equilibrated ``echam-jam-t63-l47`` year at
+  0.720 emits 2703 Tg/yr and carries 98 mg/m², outside both release bands. At 0.85 the release
+  years emit 1614 Tg/yr with 55.5 mg/m² (L47) and 1019 Tg/yr with 32.7 mg/m²
+  (L95; AeroCom 1640 and 37.6). The host's other levers are unchanged. See
+  :doc:`science/aerosol` (the dust emission entry).
+
+Performance
+^^^^^^^^^^^
+
+- **Per-step forcing lookup no longer scales with a dated axis's length**
+  (#904). The installed ``jax_datetime`` 0.1.x ``searchsorted`` compared a
+  query against every record of a dated (``by_date``/``by_date_interp``)
+  time axis, so a multi-decade hourly forcing archive cost measurably more
+  per step than a ~500-record monthly/yearly bundle. The lookup is now an
+  exact O(log N) lexicographic ``(day, second-of-day)`` binary search (no
+  ``jax_enable_x64`` dependency) — benchmarked within noise of the old
+  ~500-record case even at 350,400 records with 10 forcing leaves. No
+  change to any shipped configuration's results. (Sharing one lookup
+  across leaves that carry an identical axis was attempted too, but does
+  not survive ``forcing`` crossing the real ``jax.jit`` boundary as a
+  dynamic argument — see ``docs/source/design/forcing_time_semantics.md``
+  — and the search fix alone already meets the target.)
+
+- **A chunked nudged run holds one chunk's nudging targets on the device,
+  not the run's.** The ERA5 target (about 15 GB for a 6-hourly year at
+  T63L47) went to the GPU whole and was carried through every chunk's
+  compiled loop, which roughly doubled it in device memory: a year of
+  6-hourly nudging could not fit a 40 GB A100 beside JAM with the AeroCom
+  diagnostics. The target now stays in host memory and each chunk gets
+  the samples that bracket it (:func:`jcm.nudging.window_target`), a fixed
+  number per chunk so the compiled program is reused. The selected targets,
+  and so the run, are unchanged.
+
+Bug fixes
+^^^^^^^^^
+
+- **The model receives the full insolation (RRTMGP, grey and NN-emulator
+  radiation).** With the default 2-hour radiation interval a column that was
+  dark when radiation ran stayed dark until the next solve, so the monthly-mean
+  incoming shortwave was 6 W/m² (1.8 %) low everywhere, with ~12 longitude
+  stripes of the solve spacing, and the absorbed shortwave 3 to 4 W/m² low. The
+  shortwave is now carried as ECHAM's transmissivities and rebuilt every step
+  from the instantaneous sun, the solve being made at the interval midpoint at
+  ECHAM's floored zenith. The tuned energy balance moves accordingly. Existing
+  checkpoints load: the new ``radiation.<field>_trans`` leaves are derived from
+  the stored shortwave (a column dark in the file gets a transmissivity at the
+  next solve). See :doc:`science/radiation`.
+
+- **Open water exchanges heat and moisture by free convection under light
+  wind, as ECHAM6.3 does** (#1147). The ECHAM surface layer's unstable heat and
+  moisture coefficient over open water is now ``precalc_ocean``'s own: the
+  neutral coefficient times ``(1 + zcr^cgam)^(1/cgam)``, with ``zcr`` built
+  from the surface-layer buoyancy (``cfreec = 1e-3``, ``cgam = 1.25``; the new
+  ``VDiffParameters`` leaves ``free_convection_coefficient`` and
+  ``free_convection_exponent``). Land and sea ice keep the Louis form. In a
+  30-day January A/B of ``t63-echam-jam`` (M7) from the v3.1 warm state the
+  open-water exchange coefficient rises by 4–8 % (most in the deep tropics),
+  ocean evaporation by 2.4 % and the global liquid water path by 2.7 %.
+  **This changes the climate of every ECHAM configuration.** See
+  :doc:`science/vertical_diffusion`.
+
+- **The sea-ice surface temperature is prognostic, as in ECHAM6.3.** The ECHAM
+  hosts had pinned the ice tile at ``min(SST, ctfreez)`` = 271.38 K, so a cold
+  winter atmosphere over the Arctic ice drew sensible and latent heat from a
+  surface that could not cool. The ice surface now integrates ``s_sicetemp``'s
+  balance (``mo_surface_ice.f90``): the net radiation, sensible and latent
+  fluxes the ice tile exchanged this step, conduction through the ice
+  (``alice/siced``, 2 m north and 1 m south of the equator, ``clsst.f90``) to
+  the freezing water below, the heat capacity of a 5 cm ice layer, and a cap
+  at 273.15 K. The temperature is carried in ``surface.ice_surface_temperature``
+  (with ``ice_net_heat_flux``, ``ice_conductive_heat_flux`` and
+  ``ice_melt_residual_flux``) and read by the ice albedo and the tile-weighted
+  radiative temperature. There is no snow on the ice yet. Existing checkpoints
+  load: the field starts at ``min(SST, ctfreez)``. See :doc:`science/surface`.
+
+- **SPEEDY's upward longwave reflects the downward longwave off the surface.**
+  The downward pass did not hand its band fluxes to the upward pass, which
+  reflected ``1 - emisfc`` of whatever the shared array last held (the
+  shortwave fluxes on a radiation step, the previous step's outgoing longwave
+  otherwise). It now reflects the downward band fluxes, as ``speedy.f90`` does,
+  and the column longwave budget closes. **This changes every SPEEDY
+  climate:** in ``speedy-t31`` the clear-sky OLR falls by 0.7 W/m², the OLR by
+  0.5 and the net TOA flux rises by 1.1 (one-year means; the weather noise is
+  0.1).
+
+- **The mirror's emissions bundles carry M7's biogenic OC and its
+  residential/energy channels** (#1188). Every PD, PI and AMIP emissions
+  bundle, on every grid, now has ``emis_biogenic_oc`` (HAM's AeroCom-II
+  climatology, 19.06 Tg/yr) and ``emis_residential_*``/``emis_energy_*`` for
+  SO2, BC and OC (mirror revision ``8a613eb2`` onward).
+  Until now an M7 run on the mirror's inputs had no biogenic OC unless a
+  separate product was listed in ``forcing.emissions_file``, and sized the
+  residential and energy sectors as their super-sectors' parent class. The
+  existing channels match the previous files to 7e-15. MAM4 reads none of the new channels.
+  ``products/ceds_anthro.zarr`` carries the two sectors as well, so a bundle
+  rebuilt from the mirror keeps them.
+
+- **The JAM years with the new inputs** (#1188, #1190). On the v3.1 physics,
+  a further year of each JAM release preset with volcanic SO₂ on (and, for
+  M7, the bundles' new channels) has an annual net TOA flux, against the v3.1
+  year before it, of −2.26 against −1.56 W/m² (JAM L47), −4.37 against
+  −2.05 W/m² (JAM L95) and +0.70 against +2.18 W/m² (M7); these include
+  year-to-year variability. Mirror revision ``8f31f1ef`` holds those years'
+  end states; the release's warm states and bands are later ones (the
+  spun-up initial states entry under "New capabilities"). In a same-start M7
+  pair without volcanic SO₂, the biogenic OC raises the OC burden by a third
+  and moves the net TOA flux by −0.2 W/m², within the fit's noise.
+
+- **A JAM emissions file without the SOA precursor now warns.**
+  MAM4's ``g_soag`` has no source but the emissions file, so a file without
+  ``aero_emis_g_soag`` (an older bundle build, which has no pre-speciated
+  field at all, or a hand-made subset) ran with no secondary organic aerosol
+  and no message; the pre-speciated emission term now warns when the carried
+  tracer has no field.
+
+- **JAM's stratiform nucleation scavenging adopts ECHAM-HAM's mode-wise
+  fraction in place of ARG's bare activated fraction** (#1080). The
+  explicit cloud-borne reservoir (``spec.cloud_borne``) and the implicit
+  activated-fraction treatment used without one previously rained out at
+  the bare per-step liquid/ice conversion rate (weight 1) once aerosol
+  activated into it; HAM's own reference formulation
+  (``mo_ham_wetdep.f90::ic_scav``) always weights that conversion by a
+  further scavenging fraction strictly less than 1. The new default,
+  ``physics.jam_stratiform_nucleation="ham"``, reads ECHAM-HAM's
+  mode-wise, temperature-regime fraction table
+  (``get_icscavfrac``'s ``kscavICtype = 2``, ``mo_ham_m7ctl.f90:515-518``,
+  ``jcm.physics.aerosol.jam.wetdep.stratiform_fractions``) as that weight,
+  mapping MAM4's four modes onto the M7 class they correspond to (the same
+  mapping already used for the convective fraction ``csr_conv``) and
+  applying unconditionally to a non-activating mode's interstitial
+  aerosol (MAM4's primary carbon, M7's KI/AI/CI), which has no activated
+  fraction to weight in the first place. The previous, uncapped behaviour
+  is kept as ``stratiform_nucleation="activated_fraction"`` for
+  comparison; the M7 ``scheme="ham"`` wet-deposition path (ECHAM-HAM's
+  own size-dependent ``ic_scav_nuc``) is unaffected. A 30-day January A/B
+  moves the black-carbon lifetime by +2.4 % (days 5-10, 7.67 to 7.85 d) and
+  +2.0 % (30-day mean, 6.43 to 6.56 d), with LWP +4.7 %, cloud droplet
+  burden +5.3 % and SW CRE -1.6 W/m² over the same window; this
+  is the right treatment on its own terms (HAM's own
+  reference formulation, not a tuning choice), and is not expected to
+  close JAM's gap to the AeroCom phase-I black-carbon lifetime median by
+  itself, since the MAM4 core this change composes with does not
+  represent mixing-state and ageing the way HAM's M7 does — that question
+  is revisited once the HAM (M7) configuration (#1017) is tuned. See
+  :doc:`design/jam_aerosol_removal`'s "Mode-wise stratiform nucleation
+  fractions" section for the diagnostic, the mode mapping and the
+  measured A/B.
+
+- **The chunked-run health gate now catches an unforced core drifting to
+  unphysical wind speeds or temperatures, not just a NaN** (#1145).
+  ``jcm.diagnostics.check_health`` previously bounded temperature only at
+  the absolute-blowup scale (``T_max > 500`` K) and had no wind-speed bound
+  at all, so a dry core with no physics (or physics, such as SSO drag, that
+  only ever removes energy/momentum) could drift arbitrarily far from any
+  physical regime and still report every chunk ``OK`` — observed reaching
+  ~520 m/s top-level winds (max 672) and ~467 K over two years at T63L95
+  while Held-Suarez on the same core stays at 78 m/s / 314 K. Two new
+  configurable ceilings, ``run.health.max_wind_speed`` (default 250 m/s)
+  and ``run.health.max_temperature`` (default 400 K), fail the chunk the
+  same way a NaN does; either may be set to ``null`` for a deliberately
+  hot/windy experiment. See :doc:`running_at_scale`.
+
+- **A sporadic netCDF ``PermissionError`` no longer truncates a chunked
+  run outright** (#736). Derecho scratch filesystems occasionally refuse a
+  chunk's netCDF write with ``EACCES``/``EPERM`` for no reproducible
+  reason (observed three times across an August 2026 benchmark campaign,
+  on different nodes and days); the write is now retried a few times with
+  a short backoff before giving up, which would have saved all three runs.
+  A permission failure that persists past the retry budget still raises,
+  so a genuine permission problem is never masked.
+
+- **The liquid droplet effective-radius law no longer overflows the
+  float32 reverse pass for a trace of liquid over a near-floor droplet
+  number** (#1130). ``cloud_utils.eff_liquid_droplet_radius`` (the Martin
+  et al. 1994 / Lohmann preffl law, shared by the radiation and the
+  2-moment microphysics) took the cube root of the quotient
+  ``q·ρ / max(N, eps)``; for liquid as small as ~1e-22 kg/kg the combined
+  derivative exceeds float32's range even at a droplet number orders of
+  magnitude above the 1e-12 m⁻³ floor (``d/dN`` NaN at ``N = 0``, ``-inf``
+  just above it). The cube root of the numerator and of the floored
+  number are now taken separately — primal-identical to rounding
+  (<= 2 ulp f32), finite everywhere. The same quotient-then-cube-root
+  pattern, found by sweeping the rest of the cloud microphysics for it,
+  is fixed the same way in ``lohmann_2m/precip.py``'s riming collection
+  efficiency and ``lohmann_2m/deposition_freezing.py``'s contact-freezing
+  droplet radius (the latter also gained a numerical floor on the droplet
+  number it previously divided by unguarded); ``cloud_utils.
+  eff_ice_crystal_radius`` and the ARG activation closed forms already
+  fixed by #1109/#1113 were checked against the same failure and found
+  already safe. See the PR for the full per-site verdict table.
+
+- **The float32 dot-precision workaround understands dinosaur 1.5.1.**
+  dinosaur 1.5.1 ships ``spherical_harmonic.FAST_TRANSFORM_DOT_ALGORITHM =
+  None`` (defer to the float32 default: X6 on GPU, ``HIGHEST`` elsewhere)
+  instead of 1.5.0's X3. ``jcm.dycore.dinosaur.dot_precision`` leaves that
+  ``None`` alone, because on an affected jaxlib the float32 override already
+  resolves the transforms to ``HIGHEST``, and its import-time test now checks
+  the algorithm the transforms actually resolve to
+  (``effective_transform_dot_algorithm``) rather than the module constant, so
+  the fast suite passes against either dinosaur release.
+
+- **A warm-started run (``init=from_state init.file=...``) now always
+  records a content digest of its donor state in its provenance** (#937),
+  without needing ``JCM_HASH_INPUTS=1``. Previously the donor file was
+  recorded like any other boundary input — size + mtime, with a sha256
+  only opt-in — which does not survive a copy to another machine and
+  cannot tell two donor states apart once it no longer does. The donor
+  state is a single file (not a multi-GB boundary-condition set), so
+  ``jcm.runners._state_from_file`` now always hashes it
+  (``jcm.provenance.record_input(..., force_hash=True)``); every other
+  input's hashing stays opt-in. The digest folds into ``run_hash`` through
+  the existing input-hashing path, so two runs differing only in their
+  initial state now hash differently — a parameter-sweep arm is
+  distinguishable from its control even after both run directories are
+  copied off the machine that produced them.
+
+- **SPEEDY's top-level relative humidity spike near the poles is fixed**
+  (#407) **with a new public diagnostic, not by changing the physics
+  input.** ``get_qsat`` (``jcm/physics/clouds/speedy_humidity.py``) is a
+  verbatim port of speedy.f90's ``humidity.f90::get_qsat`` (Hatfield,
+  Kucharski & Molteni) and, like the reference, floors neither the
+  saturation specific humidity nor the ``rh = q / qsat`` ratio. At the
+  model's top sigma layers in deep polar night, where temperature can fall
+  to ~125-150 K, the ice-Tetens formula's saturation value collapses many
+  orders of magnitude faster than the residual specific humidity there, so
+  the ratio diverges — measured as high as 1.64e6 (164 million %) on the
+  ``speedy-t31`` release-validation year, with 2% of polar top-level
+  samples above 150%.
+
+  That ratio, ``physics_data.humidity.rh``, is also a *physics input* —
+  ``speedy_vdiff.py``, ``speedy_shortwave.py``'s cloud-top diagnosis (whose
+  fixed-sigma interpolation is not confined to any one level on every
+  SPEEDY vertical grid) and ``speedy_surface_flux.py`` all read it — so
+  capping it in place, even restricted to specific levels, risks changing
+  simulated clouds and fluxes on some configuration (caught by two rounds
+  of Codex review). A third round then caught that publishing SPEEDY's own
+  (sanity-capped) ratio under the name ``relative_humidity`` silently
+  redefined an existing cross-package output contract: every other
+  composition's ``relative_humidity`` is the water-only Bolton (1980) WMO
+  definition ``MoistAirColumnState`` computes (what ``tools/aerocom_cmor.py``
+  writes as CMIP ``hur``), documented in ``science/clouds_microphysics.md``
+  and ``science/constants.md`` as unchanged by which physics produced it.
+
+  The fix leaves ``humidity.rh`` exactly as the reference computes it and
+  adds a ``relative_humidity`` diagnostic computed independently from the
+  SAME shared Bolton formula (now factored out as
+  :func:`~jcm.physics.diagnostics.moist_air_state.bolton_relative_humidity`)
+  on SPEEDY's own pure-sigma pressure — mirroring the ``relative_humidity``
+  / ``cover_relative_humidity`` split ECHAM's Sundqvist closure already
+  uses for the identical reason, and giving a SPEEDY run's
+  ``relative_humidity`` the same physical meaning as an ECHAM run's. That
+  formula's own ``es`` floor (designed for exactly this cold, low-pressure
+  regime) is what keeps the result bounded, with no SPEEDY-specific cap:
+  a full ``speedy-t31`` year's maximum drops from 1.64e6 to 20.1 (2010%,
+  8.7 at the top level specifically) — every existing output field,
+  including ``humidity.rh`` and ``humidity.qsat`` themselves, is otherwise
+  bit-for-bit unchanged; ``relative_humidity`` is the only new field, and
+  it is the one to read going forward.
+
+- **SPEEDY's ``radiation.surface_lw_down`` / ``surface_lw_up`` are the fluxes
+  through the surface.** They carried SPEEDY's absorbed and emitted parts, each
+  ``1 - emisfc`` of the downward flux (about 6.5 W/m²) below the same fields of
+  the other backends and of CERES. ``surface_flux.rlds`` / ``rlus`` and the net
+  flux are unchanged.
+
+- **M7's clear-sky relative humidity is finite under full cloud cover in
+  float32.** ``ham_subm_interface`` caps the cover at ``1 − 1e-10``, which
+  rounds to exactly 1 in float32, so an overcast cell divided by zero: a NaN
+  that entered the M7 state wherever the cell was also exactly saturated, and
+  a NaN derivative in every overcast cell. The cap is now one float32 epsilon
+  below 1 in float32; float64 keeps HAM's value bit for bit. Only the float32
+  ``m7_jax`` path is affected.
+
+- **An M7 run without a biogenic-OC channel now warns** (#1188). An absent
+  ``emis_biogenic_oc`` reads as zero, which until now happened silently. The
+  mirror's bundles carry the channel (entry above); the warning catches a
+  user-supplied emissions file that lacks it.
+
+- **The AeroCom aerosol diagnostics run on M7.** The ``aerosol`` group's
+  N70/N100/PM integrals took MAM4's four modes whatever the population, so an
+  M7 run with ``enable_aerocom`` stopped at start with "4 mode widths ... but
+  the modal state carries 7 modes". ``echam_physics`` now hands
+  ``AerocomDiagnostics`` the JAM core's own spec (``aerosol_spec``).
+  ``tools/aerocom_cmor.py`` groups M7's ``oc`` optics into ``od550oa`` /
+  ``abs550oa`` beside MAM4's three organic species, where they were dropped
+  as unmapped.
+
+- **Missing-input warnings report the run's own forcing.** The build traces
+  every term once against an empty forcing to learn the diagnostics' shapes,
+  and four checks ran inside that trace: the SOAG warning and the M7
+  emission-channel warnings reported channels missing from no file at all,
+  and the ``soilw_rel`` notice was logged on every ECHAM run whether or not
+  its forcing had the field. Each now runs once, in the term's
+  ``validate_forcing``, on the run's own forcing: the emission checks cover a
+  run with no emissions file too, and the ``soilw_rel`` notice appears only
+  when the forcing's ``soilw_am`` has values to stand in with.
+
+- **A nudged M7 run uses HAM's nudged dust-threshold vector.** The M7 preset
+  never declared ``jam_dust_nudged``, so it kept the free-running vector
+  (1.05/1.45 at T63) under ``nudging=era5`` where HAM, and the MAM4 preset,
+  switch to the nudged one (0.95/1.25). It now follows the run like MAM4's.
+  The preset's dust threshold scale is fitted free-running.
+
+- **Parameter-struct fields with no consumer, closing #999.** A repo-wide
+  static scan (``jcm/parameter_fields_test.py``) found every ``*Parameters``
+  field no non-test code reads by name — a documented, differentiable
+  tunable with an exactly-zero gradient, the same defect
+  ``ConvectionParameters.cevapcu`` had. Each is now wired to the
+  formulation it names or removed:
+
+  - ``VDiffParameters.totte_min`` is the floor on every TKE and θᵥ-variance
+    bound (the closure and ``TteTkeVerticalDiffusion.__call__``) in place
+    of bare literals; its default is ECHAM's ``ztkemin = 1e-10`` (the TTE-TKE
+    closure entry above).
+  - ``VDiffParameters.cchar`` sets the water tile's Charnock momentum
+    roughness (#1118, above).
+
+See "API changes" below for the fields that were removed instead.
+
+Numerics and internals
+^^^^^^^^^^^^^^^^^^^^^^
+
+- **SPEEDY shortwave/longwave radiation uses the same float32-stable
+  idioms as the grey two-stream solver** (#571): layer absorptivity/
+  emissivity (previously formed as ``1 - exp(-optical_depth)``, which
+  cancels for a thin or weakly-absorbing layer) now uses
+  ``-expm1(-optical_depth)``, computed from the optical depth directly
+  rather than reconstructed from the already-rounded transmissivity.
+  Forward values are unchanged to float64 round-off; a dedicated
+  float32-vs-float64 test pins the improvement across a thin-to-thick
+  optical-depth sweep.
+- **The grid-mean-to-in-cloud conversion is one shared function**
+  (#615): ``jcm.physics.thermodynamics.grid_mean_to_in_cloud`` (with a new
+  ``zero_threshold`` parameter) now backs both the 1M cloud scheme's
+  in-cloud values and the radiation interface's
+  ``mcica.in_cloud_path``, replacing inline copies of the same division.
+  The JW initial-condition humidity profile
+  (``jcm.initial_states.injectors``) now shares its saturation-vapour-
+  pressure formula with the model's public Bolton relative-humidity
+  diagnostic instead of carrying its own copy of the fit's constants.
+  No forward values change.
+- **A new** ``ModelPredictions.with_primal_times`` **method** (#306) restores
+  a jvp/vjp tangent trajectory's timing metadata (``times``, ``time_bounds``,
+  ``time_cell_method``) to the paired primal's, so
+  ``tangent.with_primal_times(primal).with_context(model).to_xarray()``
+  works on a tangent's physical fields (``with_context`` is still required:
+  ``jax.jvp``/``jax.linearize`` strip host-side context from both outputs).
+  ``Model._run_from_state`` also applies ``jax.lax.stop_gradient`` to these
+  fields on the way out, since the model clock is never a quantity the
+  physics depends on.
+
+Dependencies
+^^^^^^^^^^^^
+
+- The ``m7`` extra depends on ``m7-jax`` by name, as ``cosp`` does on
+  ``jax-cosp``, so the jcm wheel stays publishable on PyPI. m7-jax is not on
+  PyPI yet, and every build of its release branch reports 0.2.0.dev0, so
+  install the validated commit first, then ``pip install jcm[m7]``
+  (:doc:`advanced_features` gives both lines).
+
+- **The jax upper bound is gone.** ``requirements.txt`` required
+  ``jax<0.11`` because flax 0.12.9 imports a ``jax.experimental.hijax``
+  symbol that no jax ≥ 0.11 provides (#853); flax 0.12.10 fixed that, so
+  the bound is now ``jax>=0.10`` (less 0.12.1, next entry) with
+  ``flax!=0.12.9``, the one pair that cannot import. jcm passes the fast and
+  slow suites on jax 0.12.0.1 with flax 0.12.12, and ``t63-echam-rrtmgp``
+  runs 20 days clean on an A100, diverging from jax 0.10.2 no faster than a
+  1-ppm noise twin. It is also
+  about 15 % slower there (8.5–8.8 vs 9.5–10.3 compute s per simulated
+  day), so 0.10.2 remains the validated and recommended line; CI, on
+  Python 3.11, cannot resolve anything newer either way, and the GPU Docker
+  image installs the 0.10 line.
+
+- **jax 0.12.1 is excluded, as a stopgap** (``jax>=0.10,!=0.12.1.*``, which
+  also excludes its ``0.12.1.x`` hotfixes). It fails nine fast tests that
+  0.12.0 and 0.10.2 pass. Five are controls
+  asserting that an unguarded division's reverse pass overflows in float32,
+  which 0.12.1's rewritten division derivative no longer does; the guarded
+  helpers they check still pass. The other four are float32 tolerances not
+  yet diagnosed. The exclusion stays until #1226 resolves them.
+
+- ``requirements.txt`` carries one reason-and-pointer line per pin; the
+  history behind each pin lives in these notes and the design docs.
+
+- **jax-rrtmgp 0.8.0 is the floor.** It is the version the release-matrix
+  bands are drawn on. jcm's per-column call (one column at a time under
+  ``vmap``) runs through 0.8.0's column-minor two-stream solve, which
+  jax-rrtmgp tests against its level-minor solve to float32 rounding, so
+  results are not bit for bit with 0.7.0; the three JAM members' bands,
+  redrawn on it, sit within 0.62 of their 0.7.0 half-widths in every
+  variable. (The four other ECHAM members moved further, from the MACv2
+  natural aerosol above, which their previous bands predate.) On one A100
+  it is no slower: 10.0 against 10.8 s per simulated day for
+  ``t63-echam-rrtmgp``, 29.1 against 29.3 for ``t63-echam-jam`` (f32),
+  interleaved on one card at jax 0.10.2.
+
+API changes
+^^^^^^^^^^^
+
+- **#999 removed ten fields with no consumer** — layout selectors whose
+  tile count already comes from array shapes, constants no thermodynamic
+  scheme reads from ``SurfaceParameters``, and a band table the shortwave
+  path never reads:
+
+  - ``VDiffParameters.nsfc_type``, ``VDiffParameters.itop`` (ECHAM's
+    hard-coded ``vdiff.f90`` loop bound, always 1; the vectorized JAX
+    solve has no use for it).
+  - ``SurfaceParameters.nsfc_type``.
+  - ``SurfaceParameters.ml_depth``, ``rho_water``, ``cp_water`` (mixed-layer
+    ocean): jcm's ocean surface temperature is a prescribed boundary
+    condition, so there is no slab-ocean scheme for these to drive.
+  - ``SurfaceParameters.rho_ice``, ``cp_ice``, ``conduct_ice`` (sea ice): the
+    prognostic sea-ice surface temperature (under "Bug fixes") reads its own
+    ``SeaIceTemperatureParameters`` instead.
+  - ``RadiationParameters.sw_band_limits``: the grey scheme's shortwave
+    path never reads it (it splits the TOA flux evenly across bands and
+    derives its per-band wavelengths from the module-level
+    ``constants.SW_BAND_LIMITS`` at import time, before any
+    ``RadiationParameters`` exists) — unlike ``lw_band_limits``, which
+    genuinely drives the Planck integration and is unaffected.
+
+  Code constructing any of these classes with one of the removed keywords
+  (``SurfaceParameters.default(nsfc_type=...)`` etc.) must drop it; every
+  other keyword is unaffected.
+
 v3.0.0 (2026-10-12)
 -------------------
 
@@ -1325,6 +2456,41 @@ The semi-Lagrangian step interpolates in log-pressure at the model top
   state the summer polar cap holds 161–169 K at 1 Pa, 196 K at 4.3 Pa and
   224 K at 11 Pa (was 164, 217 and 221 K, with ice from day 9). See
   :doc:`design/sl_vertical_interpolation`.
+
+The semi-Lagrangian nodal tracers get a local mass fixer
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- Every nodal tracer (cloud condensate, number, aerosol, gases) restored its
+  global mass with one proportional factor per step. With the quasi-monotone
+  limiter, clipping the cubic interpolant's undershoot beside a sharp,
+  near-zero minimum only ever adds mass, so the limiter's creation is
+  one-signed wherever a tracer is patchy (cirrus, a cold model top, aerosol
+  near a source); the proportional factor then took that mass back in
+  proportion to the tracer everywhere, draining whatever smooth, large-mass
+  region the same species happened to hold elsewhere even though that
+  region's own transport was essentially exact.
+- The Dinosaur backend now applies the IFS's local (Bermejo & Conde 2002,
+  MWR 130, 423; Diamantakis & Flemming 2014, Eqs. 5-6) fixer inside the
+  semi-Lagrangian transport step itself, ahead of the existing proportional
+  one: it removes the mass error where the high-order (quasi-cubic,
+  quasi-monotone) solution departs from a low-order (linear, unlimited)
+  interpolation of the same input field along the same departure points —
+  at the sharp features that produced it, not everywhere in proportion to
+  the tracer (``dycore.local_mass_fixer``, default ``true``;
+  ``jcm/dycore/dinosaur/tracer_mass_fixer.py``). The proportional fixer
+  still runs afterwards, now closing only the small remainder this
+  correction's own weights could not absorb plus the pressure change
+  between the transport and the end of the step.
+- On a short CPU case (two T21 grids, one SL step from the dycore's own
+  random-seeded rest-atmosphere-plus-noise state), a patchy species' limiter
+  creation reaches ~2 %/step after a few steps of wind spin-up — the same
+  order as the 0.44 %/step (``qi``) and 0.22 %/step (coarse sea salt)
+  measured on a real T63L47 JAM state — and the local fixer reduces the
+  residual left for the proportional pass by roughly 40-50 % at those early
+  steps, while a smooth, large-mass species in the same composition (whose
+  own high- and low-order interpolants already agree almost everywhere) has
+  its residual drop to round-off. The Eulerian core (SPEEDY) is unchanged
+  and bit-identical. See :doc:`design/tracer_mass_conservation`.
 
 ECHAM middle-atmosphere hyperdiffusion leaves the zonal mean alone
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -2777,11 +3943,6 @@ Accepted limitations (proposed)
   TOA band on three of the four); ``speedy-t31`` passes every gate on the
   ``3.0.0rc3`` tag, and ``echam-jam-t63-l47`` lands on the burdens its
   defaults were set to.
-- **SPEEDY's relative humidity spikes in the top sigma level near the poles**
-  (#407, still present in the rc3 validation year: top-level values of order
-  10\ :sup:`5` in 2 % of polar samples while the field is O(1) elsewhere). The
-  release gates do not read that level and all pass; the spikes are a
-  property of the diagnostic at σ = 0.025, not of the integration.
 - **pySES publishes no** ``omega``, so ECHAM's mid-level convection trigger
   cannot run on that backend. Model construction **raises** rather than
   substituting zero; the reference's own ``cu_lmfmid=false`` switch is the

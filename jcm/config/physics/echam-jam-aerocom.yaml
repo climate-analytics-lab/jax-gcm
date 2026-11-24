@@ -20,8 +20,10 @@
 #   cloud+column+plev+aerosol      +9.4 %   <-- this preset's DIAGNOSTIC cost
 #
 # That +9.4 % is the diagnostic groups only. This preset also sets
-# `aerosol_free: exact` below, which is a further ~+64 %, so the preset as
-# shipped costs roughly +80 % over a bare echam-jam run. The two are gated
+# `aerosol_free_interval: 1` below, which adds +48 % to each radiation
+# call (142.7 -> 211.7 ms at T63L47 on an A100, +2.4 % per model
+# step with radiation every tenth step; it was +64 % of the whole run when
+# the companion was a second solve). The two are gated
 # separately because they are separable choices.
 #
 # Most of a single group's ~3 % is the term's fixed per-step overhead, so
@@ -30,12 +32,11 @@
 # per-mode lognormal integrals. Drop `aerosol` from the list below if a run
 # does not need N70/N100/PM/burdens and you want to stay nearer ~4 %.
 #
-# The aerosol-free (*noa) radiation diagnostic needs a second radiation
-# call. Radiation is ~87 % of a *radiation* step but only runs one step in
-# N, so the whole-run overhead depends on the radiation gate as well as on
-# the solve — which is why it is quoted below as a measured wall-clock
-# number rather than derived from the 87 %. It has its own knob further
-# down (`aerosol_free`) — see jax-gcm#583.
+# The aerosol-free (*noa) radiation diagnostic is solved inside the one
+# radiation call (the library repeats the transport, not the gas optics).
+# Radiation only runs one step in N, so the whole-run overhead is smaller
+# than the per-call one. It has its own knob further down
+# (`aerosol_free_interval`) — see jax-gcm#583.
 #
 # Also gated separately: the per-species / per-mode / spectral aerosol
 # optics (#584), which need a second Mie sweep — use the

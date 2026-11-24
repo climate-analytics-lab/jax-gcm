@@ -18,6 +18,7 @@ it from here, not by growing logic in the runner.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import logging
 import os
@@ -28,7 +29,8 @@ from typing import Any
 import jax
 from omegaconf import DictConfig
 
-from jcm import provenance
+from jcm import progress as _progress
+from jcm import provenance, temporal_aggregation
 from jcm.data import mirror_manifest as mm
 from jcm.diffusion import DiffusionFilter
 from jcm.forcing import expand_yearly_files
@@ -45,7 +47,7 @@ from jcm.physics.resolution_defaults import (
     spectral_truncation,
 )
 from jcm.single_column_model import select_column
-from jcm.terrain import TerrainData
+from jcm.terrain import DEFAULT_FMASK_THRESHOLD, TerrainData
 from jcm.utils import get_coords
 
 
@@ -67,26 +69,27 @@ def configure_host_device_count(n: int | None) -> None:
     importing ``jcm``).
 
     We also append ``--xla_cpu_enable_concurrency_optimized_scheduler=false``
-    to ``XLA_FLAGS`` (idempotently): without it, complex graphs (e.g. ECHAM
-    physics) crash at >= 8 CPU devices because the spectral transform's
-    concurrent ``collective permute`` ops over-subscribe the XLA-CPU thread
-    rendezvous. Like the device count, this only takes effect when set before
-    the backend initialises.
+    to ``XLA_FLAGS`` (idempotently) to reduce how many CPU collectives the
+    thunk executor runs concurrently. It does not by itself prevent the
+    ``rendezvous.h`` abort that complex graphs (e.g. ECHAM physics) hit at
+    >= 8 CPU devices: that is prevented by the unique collective channel ids
+    ``jcm.utils.get_coords`` installs for a CPU ``spmd_mesh``
+    (``jcm/_xla_cpu_collectives.py``). Like the device count, the flag only
+    takes effect when set before the backend initialises.
 
     ``None`` or ``<= 1`` is a no-op (single-device run). If the backend is
     already live (e.g. under the CLI, where importing the model stack
     initialises it) neither the count nor the flag can change: we leave them,
     then validate and log a warning if the count falls short, pointing at the
     env-var lever the shell can set before the process starts:
-    ``XLA_FLAGS="--xla_force_host_platform_device_count=N
-    --xla_cpu_enable_concurrency_optimized_scheduler=false"``.
+    ``XLA_FLAGS="--xla_force_host_platform_device_count=N"``.
     """
     if not n or int(n) <= 1:
         return
     n = int(n)
     import jax
 
-    # Serialise CPU collectives (idempotent). Harmless on GPU. Must precede any
+    # Scheduler flag (idempotent); harmless on GPU. Must precede any
     # device touch to take effect, hence set on the env before the calls below.
     _flag = "--xla_cpu_enable_concurrency_optimized_scheduler=false"
     if _flag not in os.environ.get("XLA_FLAGS", ""):
@@ -278,6 +281,49 @@ def _build_term(term_name: str, term_entry: dict, truncation: int | None = 63):
     return term_cls(**init_kwargs)
 
 
+#: Term-list keys the land model reaches (``physics.land_model``).
+_LAND_TERM_KEYS = ("echam_boundary_conditions", "tte_tke_vertical_diffusion",
+                   "echam_surface_exchange")
+
+
+def _apply_land_model(terms_cfg: dict, land_model: str, slim_overrides) -> dict:
+    """Wire ``physics.land_model`` into an ECHAM term list.
+
+    ``prescribed`` (the default) leaves the list as it is. ``slim`` hands
+    SLIM's constants (``physics.slim_land``, field overrides of
+    :class:`~jcm.physics.surface.slim.SlimParameters`) to the vertical
+    diffusion and, with the albedo mode, to the boundary conditions, and inserts
+    :class:`~jcm.physics.surface.slim.SlimLand` before the surface-exchange
+    publisher, i.e. after the convection and the microphysics, as
+    ``echam_physics(land_model="slim")`` composes it.
+    """
+    if land_model in (None, "prescribed"):
+        if slim_overrides:
+            raise ValueError("physics.slim_land sets SLIM's constants, which only "
+                             "physics.land_model=slim composes.")
+        return terms_cfg
+    if land_model != "slim":
+        raise ValueError(
+            f"physics.land_model must be 'prescribed' or 'slim', got {land_model!r}")
+    missing = [k for k in _LAND_TERM_KEYS if terms_cfg.get(k) is None]
+    if missing:
+        raise ValueError(
+            f"physics.land_model=slim needs the ECHAM terms {missing} in physics.terms.")
+    slim_overrides = dict(slim_overrides or {})
+    out = {}
+    for name, entry in terms_cfg.items():
+        if name == "echam_surface_exchange":
+            out["slim_land"] = {"_target_": "jcm.physics.surface.slim.SlimLand",
+                                "params": dict(slim_overrides)}
+        if name == "echam_boundary_conditions":
+            entry = {**entry, "slim_albedo": slim_overrides.get("albedo", "slim"),
+                     "slim_params": dict(slim_overrides)}
+        if name == "tte_tke_vertical_diffusion":
+            entry = {**entry, "land_model": "slim", "slim_params": dict(slim_overrides)}
+        out[name] = entry
+    return out
+
+
 def build_physics(cfg: DictConfig, coords=None):
     r"""Build a ``ComposablePhysics`` from ``cfg.physics.terms``.
 
@@ -345,6 +391,10 @@ def build_physics(cfg: DictConfig, coords=None):
             "subclass."
         )
     terms_cfg = OmegaConf.to_container(terms_raw, resolve=True) or {}
+    slim_cfg = physics_cfg.get("slim_land", None)
+    terms_cfg = _apply_land_model(
+        terms_cfg, physics_cfg.get("land_model", "prescribed"),
+        None if slim_cfg is None else OmegaConf.to_container(slim_cfg, resolve=True))
     truncation = 63 if coords is None else spectral_truncation(coords)
 
     terms = []
@@ -356,11 +406,19 @@ def build_physics(cfg: DictConfig, coords=None):
             continue
         terms.append(_build_term(term_name, term_entry, truncation))
 
+    # `band_config` is left unset (jax-gcm#926's final design): a value
+    # precomputed here, like `RadiationBandConfig.for_terms(terms)` used to
+    # be, is indistinguishable from a genuine user override once handed to
+    # `ComposablePhysics(...)`, so it would survive a later
+    # `replace("radiation", ...)`/`remove`/`+` on this physics object
+    # VERBATIM even after the radiation term it was computed FOR is gone.
+    # `_finalize`/`cache_coords()` (called by `Model.__init__`) derives the
+    # identical value lazily, from whichever radiation term is actually in
+    # the final term set.
     physics = ComposablePhysics(
         terms=terms,
         checkpoint_terms=physics_cfg.get("checkpoint_terms", True),
         vectorize_columns=physics_cfg.get("vectorize_columns", False),
-        band_config=RadiationBandConfig.for_terms(terms),
     )
     return physics
 
@@ -545,8 +603,17 @@ def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):
     days = _configured_total_days(cfg, model.start_time)
     window = (str(start - _dt.timedelta(days=1)),
               str(start + _dt.timedelta(days=int(days) + 2)))
-    target = era5.nudging_target(
-        model.coords, *window, freq=str(nudging_cfg.get("freq", "6h")))
+    # Built and held in host memory: a year of 6-hourly T63 L47 targets is
+    # ~15 GB, and a chunked run moves only each chunk's window to the device
+    # (jcm.nudging.window_target).
+    try:
+        on_host = jax.default_device(jax.local_devices(backend="cpu")[0])
+    except RuntimeError:  # no CPU backend (JAX_PLATFORMS excludes it)
+        on_host = contextlib.nullcontext()
+    with on_host:
+        target = era5.nudging_target(
+            model.coords, *window, freq=str(nudging_cfg.get("freq", "6h")))
+    target = jax.device_get(target)
     forcing = _ensure_parent_forcing(forcing, model.coords)
     provenance.record_fact(
         "nudging", f"era5 {window[0]}..{window[1]} "
@@ -564,6 +631,18 @@ def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):
 _expand_years = expand_yearly_files
 
 
+def _fmask_threshold(terrain_cfg) -> float:
+    """``terrain.fmask_threshold``, or the terrain module's default when unset.
+
+    Every terrain that reads a land-sea mask takes it, so the key means the
+    same under ``auto``, ``from_file`` and ``from_file_enveloped``. ``null``
+    (or a config composed without the key) is the default, not "no rounding":
+    that is spelled 0.
+    """
+    value = terrain_cfg.get("fmask_threshold", None)
+    return DEFAULT_FMASK_THRESHOLD if value is None else float(value)
+
+
 def build_terrain(cfg: DictConfig, coords) -> TerrainData:
     terrain_cfg = cfg.terrain
     kind = terrain_cfg.kind
@@ -572,20 +651,42 @@ def build_terrain(cfg: DictConfig, coords) -> TerrainData:
     if kind == "auto":
         return TerrainData.from_coords(
             coords, terrain_file=_resolve_auto_terrain(coords),
+            fmask_threshold=_fmask_threshold(terrain_cfg),
         )
     if kind == "from_file":
         return TerrainData.from_coords(
             coords,
             terrain_file=_resolve_data_path(terrain_cfg.file),
             interpolate=terrain_cfg.get("interpolate", True),
+            fmask_threshold=_fmask_threshold(terrain_cfg),
         )
     if kind == "from_file_enveloped":
         return TerrainData.from_file(
             _resolve_data_path(terrain_cfg.file), coords=coords,
             orog_envelope_wavenumber=terrain_cfg.get(
                 "orog_envelope_wavenumber", None),
+            fmask_threshold=_fmask_threshold(terrain_cfg),
         )
     raise ValueError(f"Unknown terrain.kind={kind!r}")
+
+
+def build_observers(cfg: DictConfig) -> tuple:
+    """Build the virtual observers named under ``cfg.observers``.
+
+    Station and track files resolve like every other input path (``hf://``
+    included), and a malformed spec raises here, before any integration.
+    See :func:`jcm.observers.observers_from_config` for the spec.
+    """
+    from omegaconf import OmegaConf
+
+    from jcm.observers import observers_from_config
+
+    spec = cfg.get("observers", None)
+    if not spec:
+        return ()
+    return observers_from_config(
+        OmegaConf.to_container(spec, resolve=True),
+        resolve_path=_resolve_data_path)
 
 
 # ---------------------------------------------------------------------------
@@ -660,6 +761,43 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
 # ---------------------------------------------------------------------------
 
 
+def _preflight_from_state_init(cfg: DictConfig) -> str:
+    """CLI-door, once-per-process preflight for ``init.kind=from_state``.
+
+    Called from :func:`run` BEFORE ``run_chunked`` decides whether this
+    process will start fresh or resume from ``run.checkpoint_path`` — the
+    donor named by ``init.file`` is this run's identity either way, so
+    both branches must record the same fact (#937, #1112):
+
+    * Resolves ``init.file`` and fails fast (naming the config key) if it
+      does not exist, before the (minutes-scale at high resolution) model
+      build — not :func:`_state_from_file`'s job, since a resumed process
+      never reaches that function at all.
+    * Records a forced content sha256 of it in provenance. A resumed
+      process restores its OWN checkpoint and skips :func:`_state_from_file`
+      entirely; hashing only there (as a first attempt at #937 did) left a
+      resumed process's provenance holding just the unhashed
+      ``(size, mtime)`` descriptor ``_resolve_data_path`` always records,
+      while the pre-preemption chunks' held the sha256 one — chunks of the
+      SAME warm-started run disagreeing on ``run_hash``. This is the ONE
+      place the CLI door hashes ``init.file``; :func:`_state_from_file`
+      must not hash it again (it would also pay the streamed-hash cost,
+      multi-second for a GB-scale state, a second time for no reason on
+      the branch that does reach it).
+
+    Returns the resolved path, mostly so a caller/test can assert against
+    it without re-resolving.
+    """
+    resolved = _resolve_data_path(cfg.init.file)
+    if not str(resolved).startswith("hf://") and not Path(resolved).exists():
+        raise FileNotFoundError(
+            f"init.file={cfg.init.file!r} resolved to {resolved}, which "
+            "does not exist."
+        )
+    provenance.record_input(cfg.init.file, resolved, force_hash=True)
+    return resolved
+
+
 def _state_from_file(model: Model, cfg: DictConfig):
     """Config adapter for the ``init.kind=from_state`` warm start.
 
@@ -677,6 +815,22 @@ def _state_from_file(model: Model, cfg: DictConfig):
     refused because its unit convention is unrecorded — the position any
     state spun up with an earlier jcm is in. See
     ``docs/source/design/checkpoint_compatibility.md``.
+
+    Does NOT hash ``init.file`` itself (#937, #1112): the CLI door's
+    preflight (:func:`_preflight_from_state_init`, called from :func:`run`)
+    always records a forced content sha256 of it, before deciding whether
+    this process will call this function at all — a chunked run restarting
+    from
+    ``run.checkpoint_path`` restores its own checkpoint and skips this
+    function entirely, so hashing only here would leave a resumed
+    process's provenance without the donor's digest while the
+    pre-preemption chunks' had it. Hashing again here on the branch that
+    *does* reach this function would also pay the (multi-second, for a GB-
+    scale state) streamed-hash cost twice for no reason. The Python door
+    (:func:`jcm.configurations.load`) calls this function directly, with no
+    equivalent preflight; per this module's docstring that door already
+    does not attach provenance to any output (:func:`jcm.configurations.load`'s
+    own comment), so the gap is inert there, not a silent loss.
     """
     from jcm.checkpoint import parse_unstamped_scale
     from jcm.initial_states import checkpoint_state
@@ -978,7 +1132,9 @@ def build_model(cfg: DictConfig) -> Model:
     resolution and timestep come from the dycore group itself — see
     ``config/dycore/pyses_ne30l47.yaml``).
     """
-    from jcm.dycore.dinosaur.dycore import DEFAULT_OFF_CENTERING, DinosaurDycore
+    from jcm.dycore.dinosaur.dycore import (
+        DEFAULT_NODAL_HUMIDITY, DEFAULT_OFF_CENTERING, DinosaurDycore,
+    )
 
     dycore_name = cfg.get("dycore", {}).get("name", "dinosaur")
     if dycore_name == "pyses":
@@ -1011,6 +1167,8 @@ def build_model(cfg: DictConfig) -> Model:
             "'dinosaur' or 'pyses'."
         )
 
+    # First, so a malformed observer spec fails before the expensive build.
+    observers = build_observers(cfg)
     coords = build_coords(cfg)
     physics = build_physics(cfg, coords)
     physics = maybe_add_sponge(physics, cfg)
@@ -1037,6 +1195,9 @@ def build_model(cfg: DictConfig) -> Model:
         # sigma grids).
         "vertical_coordinate": dycore_cfg.get("sl_vertical_coordinate", None),
         "humidity_mass_fixer": bool(dycore_cfg.get("humidity_mass_fixer", True)),
+        "local_mass_fixer": bool(dycore_cfg.get("local_mass_fixer", True)),
+        "nodal_humidity": bool(dycore_cfg.get(
+            "nodal_humidity", DEFAULT_NODAL_HUMIDITY)),
     }
     dycore = DinosaurDycore(
         coords=coords,
@@ -1055,6 +1216,7 @@ def build_model(cfg: DictConfig) -> Model:
         physics=physics,
         time_step=time_step,
         start_time=_resolve_start_time(cfg),
+        observers=observers,
     )
 
 
@@ -1077,6 +1239,8 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     from jcm.dycore.pyses import PysesCamSEDycore
 
     dc = cfg.dycore
+    # First, so a malformed observer spec fails before the expensive build.
+    observers = build_observers(cfg)
     # The dycore is built from the tracers the physics declares, and the
     # physics takes its resolution-dependent defaults from the dycore's grid
     # (:mod:`jcm.physics.resolution_defaults`), which only exists once the
@@ -1096,6 +1260,11 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
         tracer_substeps=int(dc.get("tracer_substeps", -1)),
         dyn_substeps_per_tracer=int(dc.get("dyn_substeps_per_tracer", -1)),
         compute_frontogenesis=bool(dc.get("compute_frontogenesis", False)),
+        # ``Model`` turns this on automatically when the composed physics
+        # requires the ``omega`` field (ECHAM's ``cubasmc`` mid-level
+        # convection trigger, on by default — #698), so this explicit knob
+        # only matters for an override; see ``pyses_ne30l47.yaml``.
+        compute_omega=bool(dc.get("compute_omega", False)),
         terrain_file=_resolve_data_path(dc.get("terrain_file", None))
         or _pyses_default_bc("terrain.nc"),
         tracer_specs=tracer_specs,
@@ -1129,7 +1298,7 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
             configured_time_step,
         )
     return Model(dycore=dycore, physics=physics,
-                 start_time=_resolve_start_time(cfg))
+                 start_time=_resolve_start_time(cfg), observers=observers)
 
 
 def _pyses_default_bc(filename: str) -> str:
@@ -1192,6 +1361,7 @@ from jcm.forcing_assembly import (  # noqa: E402
     _grid_token as _grid_token,
     _merge_disjoint_emissions as _merge_disjoint_emissions,
     _model_latlon_deg as _model_latlon_deg,
+    _monthly_anchors as _monthly_anchors,
     _open_forcing_dataset as _open_forcing_dataset,
     _persist as _persist,
     _product_available_years as _product_available_years,
@@ -1284,6 +1454,11 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
     # ``validate_forcing`` with all four fields still ``None`` and a confusing
     # message — refuse it here with the real reason: forced surface fluxes are
     # a dinosaur(spectral)-backend capability for v3.0.
+    if (_forcing_cfg is not None
+            and _forcing_cfg.get("land_skin_temperature_file", None) is not None):
+        raise ValueError(
+            "forcing.land_skin_temperature_file requires a matching spectral "
+            "lat/lon grid; pySES column archives are not supported by this reader.")
     if _forcing_cfg is not None and _forcing_cfg.get(
             "prescribed_surface_flux", None) not in (None, "", "null"):
         raise ValueError(
@@ -1293,6 +1468,21 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
             "forced-flux presets (physics=speedy-forced-flux / "
             "echam-forced-flux) on a dinosaur dycore, or drop the "
             "prescribed_surface_flux block for a pySES run."
+        )
+
+    # Same reasoning, same remedy, for a coupled ocean current (jax-gcm#915):
+    # ``_attach_ocean_current`` only runs inside the spectral forcing
+    # assembly, so the pySES column-forcing builder would silently drop the
+    # block and leave ``ForcingData.ocean_u/v`` at ``None`` (a zero current)
+    # rather than the declared one.
+    if _forcing_cfg is not None and _forcing_cfg.get(
+            "ocean_current", None) not in (None, "", "null"):
+        raise ValueError(
+            "forcing.ocean_current is not supported on the pySES backend: "
+            "the coupled ocean current (jax-gcm#915) is wired through the "
+            "spectral (dinosaur) forcing path only for v3.0. Run on a "
+            "dinosaur dycore, or drop the ocean_current block for a pySES "
+            "run."
         )
 
     ozone_file = _forcing_cfg.get("ozone_file", None)
@@ -1386,6 +1576,9 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
             _forcing_cfg.get("dms_file", None), "dms_file")),
         dust_file=_resolve_data_path(_reject_year_pattern(
             _forcing_cfg.get("dust_file", None), "dust_file")),
+        volcanic_file=_resolve_data_path(_reject_year_pattern(
+            _forcing_cfg.get("volcanic_file", None), "volcanic_file")),
+        volcanic_eruption_year=_forcing_cfg.get("volcanic_eruption_year", None),
         **{key: _resolve_data_path(_reject_year_pattern(
             _forcing_cfg.get(key, None), key))
            for key in ("dust_preferential_file", "dust_soil_types_file",
@@ -1400,6 +1593,10 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
         # surface and ozone are climatology-only on this path.
         emissions_persist=_persist(_forcing_cfg, "emissions_file"),
         oxidants_persist=_persist(_forcing_cfg, "oxidants_file"),
+        # #902: the surface/ozone/oxidant climatology reconstruction, shared
+        # with the spectral path so the switch means the same thing on both
+        # backends.
+        monthly_anchors=_monthly_anchors(_forcing_cfg),
     )
     # MACv2-SP plume weights are the one dycore-agnostic attachment the
     # spectral tail below also performs that ``pyses_build_forcing`` does
@@ -1517,14 +1714,7 @@ def run(cfg: DictConfig, model: Model | None = None):
     provenance.start_run(cfg)
 
     if cfg.init.kind == "from_state":
-        # Resolve before the (minutes-scale at high resolution) model build
-        # so a typo'd path fails immediately and names the config key.
-        _p = _resolve_data_path(cfg.init.file)
-        if not str(_p).startswith("hf://") and not Path(_p).exists():
-            raise FileNotFoundError(
-                f"init.file={cfg.init.file!r} resolved to {_p}, which does "
-                "not exist."
-            )
+        _preflight_from_state_init(cfg)
 
     apply_constants_overrides(cfg)
 
@@ -1551,6 +1741,12 @@ def _has_jam(physics) -> bool:
     factory-built presets, not term-list ones).
     """
     return any(getattr(t, "name", "").startswith("jam_") for t in physics.terms)
+
+
+def _has_volcanic(physics) -> bool:
+    """Report whether the physics package emits volcanic SO₂ (``jam_volcanic``)."""
+    return any(getattr(t, "name", "") == "jam_volcanic_emissions"
+               for t in physics.terms)
 
 
 def _has_macv2sp(physics) -> bool:
@@ -1599,9 +1795,11 @@ def _forcing_tracks_calendar(forcing) -> bool:
     from jcm.forcing import BY_DATE, BY_DATE_INTERP, TimeSeries
     # ``getattr`` defaults so a caller passing a partial forcing stand-in (with
     # only the fields the check it targets needs) is treated as non-transient
-    # rather than raising — a real ForcingData always carries all five.
+    # rather than raising — a real ForcingData always carries the first
+    # five; the optional ``sea_ice_temperature`` is ``None`` when the file
+    # has no such channel, which the TimeSeries check below passes over.
     for name in ("sea_surface_temperature", "sice_am", "snowc_am",
-                 "soilw_am", "stl_am"):
+                 "soilw_am", "stl_am", "sea_ice_temperature"):
         field = getattr(forcing, name, None)
         if isinstance(field, TimeSeries) and int(field.align_mode) in (
                 BY_DATE, BY_DATE_INTERP):
@@ -1610,7 +1808,7 @@ def _forcing_tracks_calendar(forcing) -> bool:
 
 
 def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
-                               coords, forcing) -> None:
+                               coords, forcing, has_volcanic=True) -> None:
     """Emission-family config-trap warnings (traps 3 & 5) from RESOLVED values.
 
     Shared home so the CLI runner (:func:`warn_on_config_traps`) and the Python
@@ -1618,7 +1816,9 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
     once (#751). The terrain / forcing-kind / MACv2-weight traps read cfg only
     and stay in :func:`warn_on_config_traps`. ``forcing_cfg`` is the ``forcing``
     config mapping; ``coords`` the built grid; ``forcing`` the built struct
-    (``None`` on the default/prescribed path).
+    (``None`` on the default/prescribed path); ``has_volcanic`` whether the
+    physics composes ``VolcanicEmissions`` (the Python door builds no physics
+    and takes the JAM presets' default, on).
     """
     # 3. Prognostic aerosol with no RESOLVED prescribed-emission source: only
     #    online Gong sea-salt then has one. Reads the RESOLVED values, not the
@@ -1667,6 +1867,13 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
                        if str(forcing_cfg.get(k, None)) == "auto"
                        and resolved[k] is None]
         if len(unset) == len(source_keys):
+            # The grid-free volcanic product (#1190) still resolves here.
+            volcanic = has_volcanic and _resolved_emission_value(
+                forcing_cfg.get("volcanic_file", None), "volcanic_file",
+                coords, has_jam, is_pyses) is not None
+            online = ("Gong sea salt and volcanic SO2" if volcanic
+                      else "Gong sea salt")
+            zeroed = ("other sulfur" if volcanic else "sulfur")
             if auto_nulled:
                 reason = (
                     "the pySES backend publishes no per-grid emission bundles"
@@ -1676,22 +1883,21 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
                 logger.warning(
                     "config trap: zero-emission JAM baseline — the 'auto' "
                     "emission key(s) %s resolved to None because %s, so the "
-                    "only online aerosol source is Gong sea salt; sulfur, dust "
-                    "and carbonaceous species stay at zero. Point each key at "
-                    "an on-grid file (e.g. forcing.emissions_file=<path>) to "
-                    "supply prescribed emissions.",
-                    ", ".join(auto_nulled), reason,
+                    "only aerosol sources are %s; %s, dust and carbonaceous "
+                    "species stay at zero. Point each key at an on-grid file "
+                    "(e.g. forcing.emissions_file=<path>) to supply prescribed "
+                    "emissions.",
+                    ", ".join(auto_nulled), reason, online, zeroed,
                 )
             else:
                 logger.warning(
                     "config trap: zero-emission JAM baseline — %s are all "
-                    "unset, so the only online aerosol source is Gong sea "
-                    "salt; sulfur, dust and carbonaceous species stay at zero. "
-                    "Leave them at their 'auto' default (the per-grid HF "
-                    "bundles) or set an explicit path (e.g. "
-                    "forcing.emissions_file=hf://bundles/<grid>/"
-                    "emissions_pd.nc).",
-                    ", ".join(unset),
+                    "unset, so the only aerosol sources are %s; %s, dust and "
+                    "carbonaceous species stay at zero. Leave them at their "
+                    "'auto' default (the per-grid HF bundles) or set an "
+                    "explicit path (e.g. forcing.emissions_file=hf://bundles/"
+                    "<grid>/emissions_pd.nc).",
+                    ", ".join(unset), online, zeroed,
                 )
         elif auto_nulled:
             # Partial silent-degrade (F2): SOME 'auto' keys nulled while others
@@ -1849,7 +2055,8 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
     #    RESOLVED values in the shared home both doors traverse (#751).
     warn_emission_config_traps(
         has_jam=has_jam, is_pyses=is_pyses, is_scm=is_scm,
-        forcing_cfg=cfg.get("forcing", {}), coords=coords, forcing=forcing)
+        forcing_cfg=cfg.get("forcing", {}), coords=coords, forcing=forcing,
+        has_volcanic=_has_volcanic(physics))
 
     # 4. MACv2-SP driven by the all-ones default weights: perpetual year-2005
     #    plume amplitude with no seasonal cycle — not historical forcing. Only
@@ -1896,6 +2103,15 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     # After model + forcing construction: config-selected libraries are
     # imported and the ozone source is decided, so the summary is accurate.
     logger.info("provenance: %s", provenance.summary())
+    pressure_levels_hpa = cfg.run.get("pressure_levels", None)
+    if pressure_levels_hpa:
+        # Before any integration, on every path (the chunked branch below
+        # repeats this -- harmless -- when it builds its own schedule):
+        # a typo in run.pressure_levels must fail before the run starts,
+        # not only when to_pressure_levels is first called at save time.
+        from jcm.analysis import validate_pressure_levels
+
+        validate_pressure_levels(pressure_levels_hpa)
     chunk_days = float(cfg.run.get("chunk_days", 0.0) or 0.0)
     if cfg.run.get("monthly_means", False) and chunk_days <= 0:
         raise ValueError(
@@ -1913,6 +2129,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             forcing=forcing,
         )
 
+    progress_bar = bool(cfg.run.get("progress_bar", False))
     if cfg.init.kind == "isothermal":
         return model.run(
             forcing=forcing,
@@ -1922,6 +2139,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             output_averages=cfg.run.output_averages,
             snapshot_interval=cfg.run.get("snapshot_interval"),
             snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+            progress=progress_bar,
         )
     # A warm start (from_state) carries the donor's physics carry through to
     # ``run``; every other init builds a fresh carry (initial_physics_state
@@ -1947,6 +2165,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         output_averages=cfg.run.output_averages,
         snapshot_interval=cfg.run.get("snapshot_interval"),
         snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+        progress=progress_bar,
     )
 
 
@@ -2171,9 +2390,15 @@ def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
     ``run.chunk_days`` / ``run.checkpoint_path`` drive the chunked,
     resumable ``full`` integration; ``prescribed`` and ``scm`` evaluate a
     state file in one pass with nothing to checkpoint, so a set value would
-    be silently ignored.
+    be silently ignored. ``observers`` sample inside the dycore integration
+    scan, which these modes do not run, so they are refused too.
     """
     mode = cfg.run.get("mode", "full")
+    if cfg.get("observers", None):
+        raise ValueError(
+            f"run.mode={mode!r} has no integration scan to sample, so "
+            f"observers ({sorted(cfg.observers)}) apply only to "
+            "run.mode=full. Remove them for this mode.")
     chunk = float(cfg.run.get("chunk_days", 0) or 0)
     ckpt = cfg.run.get("checkpoint_path", None)
     if chunk > 0 or ckpt not in (None, "", "null"):
@@ -2285,12 +2510,30 @@ def _run_scm(cfg: DictConfig, time_step_model: Model | None = None):
     return scm.run(column_states)
 
 
-def _reject_forced_flux_in_scm(cfg: DictConfig, physics) -> None:
-    """Refuse forced surface fluxes (#301) on the SCM CLI path.
+#: Fields a term may declare in ``consumed_forcing_fields()`` that are safe
+#: in SCM mode: they default to a harmless zero when ``ForcingData`` leaves
+#: them ``None`` (``SingleColumnModel.run``'s own ``ForcingData.zeros((1,
+#: 1))`` does), unlike the forced-mode ``prescribed_*`` fields, which a
+#: consuming term REQUIRES and errors without. Excluded from the blanket
+#: "any consumed field blocks SCM" check below so declaring them (jax-gcm#915)
+#: does not retroactively refuse every ECHAM SCM run; the SEPARATE
+#: ``forcing.ocean_current`` block check (which SCM genuinely cannot reach,
+#: exactly like ``prescribed_surface_flux``) still applies.
+#: ``natural_aerosol`` is the same kind of field: ``Macv2NaturalAerosol``
+#: passes the plumes' optics through when it is ``None``, so a single column
+#: runs without a natural background rather than not at all.
+_SCM_SAFE_DEFAULT_FORCING_FIELDS = frozenset({"ocean_u", "ocean_v",
+                                              "natural_aerosol"})
 
-    Forced fluxes are a gridded ``ForcingData`` input, which ``run.mode=scm``
-    never assembles: a ``prescribed_surface_flux`` block would be dropped
-    silently and a forced-mode physics would have nothing to read.
+
+def _reject_forced_flux_in_scm(cfg: DictConfig, physics) -> None:
+    """Refuse forced surface fluxes (#301) and a coupled current (#915) on
+    the SCM CLI path.
+
+    Forced fluxes and a coupled ocean current are gridded ``ForcingData``
+    inputs, which ``run.mode=scm`` never assembles: a
+    ``prescribed_surface_flux`` or ``ocean_current`` block would be dropped
+    silently and a consuming term would have nothing to read.
     """
     forcing_cfg = cfg.get("forcing", None)
     if forcing_cfg is not None and forcing_cfg.get(
@@ -2301,7 +2544,16 @@ def _reject_forced_flux_in_scm(cfg: DictConfig, physics) -> None:
             "the prescribed fluxes would be ignored. Drive forced mode from "
             "Python (SingleColumnModel.run(..., forcing=ForcingData with the "
             "prescribed_* fields)) or run it on the full model.")
-    consumed = getattr(physics, "consumed_forcing_fields", lambda: ())()
+    if forcing_cfg is not None and forcing_cfg.get(
+            "ocean_current", None) not in (None, "", "null"):
+        raise ValueError(
+            "forcing.ocean_current is not supported with run.mode=scm: the "
+            "single-column runner builds no ForcingData, so the current "
+            "would be ignored. Drive it from Python "
+            "(SingleColumnModel.run(..., forcing=ForcingData with "
+            "ocean_u/v set)) or run it on the full model.")
+    consumed = set(getattr(physics, "consumed_forcing_fields", lambda: ())())
+    consumed -= _SCM_SAFE_DEFAULT_FORCING_FIELDS
     if consumed:
         raise ValueError(
             f"run.mode=scm with a physics package that reads {list(consumed)} "
@@ -2442,6 +2694,45 @@ def _copy_atomically(src: str, dst: str) -> None:
         shutil.copyfileobj(source, handle)
 
 
+def _to_netcdf_with_retry(ds, path, *, max_attempts: int = 4,
+                          initial_backoff: float = 1.0) -> None:
+    """``ds.to_netcdf(path)``, retrying a transient permission error.
+
+    #736: three chunked Derecho benchmark runs (August 2026) truncated mid-run
+    on ``PermissionError: [Errno 13] Permission denied`` from
+    ``netCDF4.Dataset.__init__`` during exactly this write, on different
+    nodes and different days, with no reproducible cause found (not fixed by
+    ``HDF5_USE_FILE_LOCKING=FALSE``) — transient Lustre/directory-level
+    state on the scratch filesystem was the leading suspect. A single retry
+    would have saved all three runs, so this retries ``max_attempts`` times
+    with a doubling backoff (1, 2, 4, ... seconds) before giving up.
+
+    Narrow on purpose: only ``PermissionError`` with ``errno`` ``EACCES`` or
+    ``EPERM`` is retried (and logged each time), so a *persistent* permission
+    problem (wrong ownership, a read-only mount, a quota that will never
+    clear) still raises on the final attempt rather than being silently
+    masked — retrying forever would turn a real misconfiguration into a
+    run that hangs instead of failing loudly.
+    """
+    import errno
+    import time
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            ds.to_netcdf(path)
+            return
+        except PermissionError as exc:
+            if exc.errno not in (errno.EACCES, errno.EPERM):
+                raise
+            if attempt == max_attempts:
+                raise
+            backoff = initial_backoff * 2 ** (attempt - 1)
+            logger.warning(
+                "to_netcdf(%s) raised %s on attempt %d/%d; retrying in "
+                "%.0fs (#736)", path, exc, attempt, max_attempts, backoff)
+            time.sleep(backoff)
+
+
 @dataclasses.dataclass(frozen=True)
 class _ChunkJob:
     """What one integrated chunk's host work needs, captured at its end.
@@ -2459,6 +2750,41 @@ class _ChunkJob:
     chunk_wall: float
     total_wall: float
     days_this_invocation: float
+
+
+def _apply_pressure_levels(ds, levels_hpa):
+    """Convert ``ds`` onto constant pressure surfaces before it is written.
+
+    ``run.pressure_levels`` (#258): ``levels_hpa`` is the config value, which
+    is ``None``/empty when the option is off (the common case), in which
+    case ``ds`` is returned untouched -- sigma output, the default, is
+    unaffected either way. A ``ds`` with no ``level`` dimension at all (the
+    2-D ``run.snapshot_interval`` stream) also passes through unchanged
+    rather than raising :func:`jcm.analysis.to_pressure_levels`'s "no
+    pressure_full" error: there is nothing in it to convert.
+    """
+    if not levels_hpa or "level" not in ds.dims:
+        return ds
+    from jcm.analysis import to_pressure_levels
+
+    return to_pressure_levels(ds, list(levels_hpa))
+
+
+def _write_observations(predictions, stem: str, params) -> list[str]:
+    """Write each observer's per-``dt`` samples to ``{stem}_obs_{name}.nc``.
+
+    Never converted to pressure levels: the samples already sit at each
+    observer's own vertical target (or are whole columns in profile mode).
+    Returns the paths written; none when the run had no observers.
+    """
+    datasets = getattr(predictions, "observation_datasets", lambda: {})()
+    paths = []
+    for name, obs_ds in datasets.items():
+        path = f"{stem}_obs_{name}.nc"
+        obs_ds.attrs.update(provenance.attrs(params))
+        _to_netcdf_with_retry(obs_ds, path)
+        paths.append(path)
+    return paths
 
 
 def run_chunked(
@@ -2500,20 +2826,54 @@ def run_chunked(
         forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
 
     from jcm.date import parse_duration_seconds
+    from jcm.forcing import _host_epoch_seconds
+    from jcm.nudging import samples_per_span, window_target
 
     # All scheduling is in exact integer seconds of the model clock; days are
     # derived only for file names and reports. The save interval is handed to
     # the model as configured (it parses it exactly) after an eager check.
     save_interval = cfg.run.save_interval
-    parse_duration_seconds(save_interval)
+    save_seconds = parse_duration_seconds(save_interval)
     total_seconds = _configured_total_seconds(cfg, model.start_time)
     chunk_seconds = parse_duration_seconds(chunk_days)
+    # Opt-in, HOST-ONLY progress bar (#320), off by default; see
+    # jcm.progress for why nothing reports from inside the jitted
+    # integration. Ticked once per completed chunk below -- the finest
+    # grain a chunked run reports at.
+    progress_bar = bool(cfg.run.get("progress_bar", False))
 
     def _elapsed_seconds():
         elapsed = model.run_state.time - model.start_time
         return int(elapsed.days) * 86400 + int(elapsed.seconds)
 
     ckpt_path = cfg.run.get("checkpoint_path", None)
+
+    # #1145: configurable health-gate ceilings, following the same
+    # ``cfg.run.get(..., <default>)`` pattern as ``bail_on_unhealthy`` above.
+    # ``jcm/config/run/default.yaml`` is the schema (every run group inherits
+    # it), so a run that overrides neither key still gets ``check_health``'s
+    # own defaults via ``.get`` on the nested mapping.
+    health_cfg = cfg.run.get("health", {})
+    max_wind_speed = health_cfg.get("max_wind_speed", 250.0)
+    max_temperature = health_cfg.get("max_temperature", 400.0)
+
+    # Constant pressure-surface output (#258): applied to each dataset right
+    # before it is written (chunk/monthly/snapshot files below), never to
+    # the ``ds`` the health check or the monthly accumulator consume -- the
+    # accumulator's own duration-weighted NaN handling is correct either
+    # way, but the health check's NaN scan must stay reading the sigma
+    # grid's own missing-ness, not a sub-surface mask this option introduces
+    # on purpose.
+    pressure_levels_hpa = cfg.run.get("pressure_levels", None)
+    if pressure_levels_hpa:
+        # Validated here too (not only inside to_pressure_levels, which
+        # runs no earlier than the first chunk's write): a typo (a
+        # negative or repeated pressure, a stray NaN) must fail before any
+        # integration, the same promise every other #903/#258 schedule
+        # check in this function makes.
+        from jcm.analysis import validate_pressure_levels
+
+        validate_pressure_levels(pressure_levels_hpa)
 
     # Streaming calendar-month means (#901): every chunk's interval means feed
     # one MonthlyMeanAccumulator; each month is written when the first
@@ -2527,11 +2887,19 @@ def run_chunked(
             "produce no output. Set run.save_chunks=true or "
             "run.monthly_means=true.")
     accumulator = None
+    monthly_schedule = None
     if monthly:
         from jcm.temporal_aggregation import MonthlyMeanAccumulator
 
-        check_monthly_schedule(cfg, model.start_time, chunk_seconds,
-                               total_seconds)
+        # #903: a schedule of sub-runs (the configured save_interval for most
+        # of each month, a single-interval "edge" sub-run wherever a regular
+        # interval would otherwise cross a midnight/month/run-end boundary),
+        # not a single fixed save_interval for the whole run -- see
+        # `check_monthly_schedule` and `jcm.temporal_aggregation.
+        # schedule_monthly_segments`. Built (and validated) before any
+        # integration, so an unreachable edge is refused up front.
+        monthly_schedule = check_monthly_schedule(
+            cfg, model, chunk_seconds, total_seconds)
         accumulator = MonthlyMeanAccumulator()
 
     reports: list[dict] = []
@@ -2585,6 +2953,13 @@ def run_chunked(
     started_at_days = elapsed_sim_days
     bailed = False
     last_params = None
+    # Host-side display count; purely cosmetic (the loop below stops on
+    # ``elapsed_seconds``, not on this), so an off-by-one from an
+    # already-partial final chunk only affects the bar's "of N" label.
+    import math
+
+    n_chunks_remaining = math.ceil(
+        (total_seconds - elapsed_seconds) / chunk_seconds)
 
     def process_chunk(job: _ChunkJob) -> bool:
         """Do one integrated chunk's host work; return True to stop the run.
@@ -2603,7 +2978,39 @@ def run_chunked(
         # per-chunk wall time) are stamped on the chunk dataset.
         closed_months = (accumulator.update(_monthly_input(ds))
                          if accumulator is not None else None)
-        ok, report = check_health(ds, job.chunk_idx, elapsed_sim_days)
+        # Codex review finding (#903/#258): ``job.chunk_idx`` alone is a
+        # stale proxy for "this is the run's bootstrap interval" once
+        # chunks are not all ``chunk_seconds`` long -- a monthly schedule's
+        # leading edge can be shorter, so resuming right after it lands
+        # ``elapsed_seconds // chunk_seconds == 0`` for the next (body)
+        # interval too. The actual condition the emission-wind exemption
+        # (``jcm.diagnostics.check_health``) needs is whether THIS
+        # interval's own start is the run's absolute time zero.
+        is_bootstrap_chunk = (
+            job.elapsed_seconds - job.cur_chunk_seconds) == 0
+        # Codex review finding (#1145): under ``run.output_averages=true``
+        # ``ds`` is the chunk's INTERVAL MEAN, which can hide an
+        # instantaneous blowup entirely (alternating-sign winds average
+        # toward zero; a transient temperature spike is smoothed) --
+        # exactly the failure mode the wind/temperature ceilings exist to
+        # catch. ``job.run_state`` is the model's own state at the chunk
+        # boundary (never averaged); converting it to the gridpoint
+        # ``PhysicsState`` every other check already reads lets
+        # ``check_health`` evaluate every extreme-value field on that
+        # instant instead. ``getattr``/``hasattr`` guard a bare mock
+        # ``model``/``run_state`` (this module's own unit tests), which
+        # have no ``dycore``/``dynamics`` to convert; a real run always
+        # has both.
+        dycore = getattr(model, "dycore", None)
+        boundary_state = (
+            dycore.to_physics_state(job.run_state.dynamics)
+            if dycore is not None and hasattr(job.run_state, "dynamics")
+            else None)
+        ok, report = check_health(ds, job.chunk_idx, elapsed_sim_days,
+                                  is_bootstrap_chunk=is_bootstrap_chunk,
+                                  max_wind_speed=max_wind_speed,
+                                  max_temperature=max_temperature,
+                                  boundary_state=boundary_state)
         report["wall_seconds"] = job.chunk_wall
         reports.append(report)
         print_report(report)
@@ -2618,7 +3025,17 @@ def run_chunked(
         for _line in aerosol_budget_report(ds, dt_seconds):
             print(_line)
 
-        nc_path = f"{output_prefix}_day{elapsed_sim_days:g}.nc"
+        # ``:.12g`` (not the default 6-significant-digit ``:g``): past
+        # ~1000 sim-days, plain ``:g`` cannot distinguish a whole chunk
+        # boundary from one a #903 trailing edge away (e.g. 1000 vs.
+        # 1000 + one model step in days), so one chunk's file and sidecar
+        # would silently overwrite the one before it (Codex review
+        # finding). 12 significant digits is enough day-fraction
+        # resolution for any realistic model timestep over any realistic
+        # run length, while every whole/short-decimal day this already
+        # produced (``_day30.nc``, ``_day0.5.nc``) is unchanged -- ``g``
+        # formatting drops the extra digits again where they are zero.
+        nc_path = f"{output_prefix}_day{elapsed_sim_days:.12g}.nc"
         # The parameters ride on the predictions object, not the module
         # registry, so the record belongs to the model that produced THIS
         # chunk; pass them to both calls or the sidecar's run_hash will not
@@ -2627,17 +3044,24 @@ def run_chunked(
         if save_chunks:
             ds.attrs.update(provenance.attrs(params))
             ds.attrs["jcm_prov_chunk_wall_seconds"] = round(job.chunk_wall, 1)
-            ds.to_netcdf(nc_path)
+            _to_netcdf_with_retry(
+                _apply_pressure_levels(ds, pressure_levels_hpa), nc_path)
             provenance.write_sidecar(nc_path, params)
             print(f"  Saved {nc_path}")
-        _write_monthly(closed_months, output_prefix, params)
+        _write_monthly(closed_months, output_prefix, params, pressure_levels_hpa)
         snap_ds = getattr(job.preds, "snapshot_dataset", lambda: None)()
         if snap_ds is not None:
-            snap_path = (f"{output_prefix}_day{elapsed_sim_days:g}"
+            snap_path = (f"{output_prefix}_day{elapsed_sim_days:.12g}"
                          "_snapshots.nc")
             snap_ds.attrs.update(provenance.attrs(params))
-            snap_ds.to_netcdf(snap_path)
+            _to_netcdf_with_retry(
+                _apply_pressure_levels(snap_ds, pressure_levels_hpa),
+                snap_path)
             print(f"  Saved {snap_path}")
+        for obs_path in _write_observations(
+                job.preds, f"{output_prefix}_day{elapsed_sim_days:.12g}",
+                params):
+            print(f"  Saved {obs_path}")
 
         # Checkpoint only after a PASSING health check, keeping the previous
         # checkpoint as ``.prev``: an unhealthy chunk must not overwrite the
@@ -2679,10 +3103,14 @@ def run_chunked(
                 int((elapsed_sim_days + tol) // archive_every)
                 > int((previous_days + tol) // archive_every)
             ):
-                # ``:g`` keeps whole-day archives named ``_day30`` while giving
-                # sub-day cadences a distinct name instead of colliding on the
-                # truncated integer day.
-                day = f"{elapsed_sim_days:g}".replace(".", "p")
+                # ``:.12g`` keeps whole-day archives named ``_day30`` while
+                # giving sub-day cadences a distinct name instead of
+                # colliding on the truncated day: plain ``:g`` (6
+                # significant digits) collides past ~1000 days, where a
+                # #903 trailing edge a fraction of a day long can round to
+                # the same integer as the chunk before it (Codex review
+                # finding).
+                day = f"{elapsed_sim_days:.12g}".replace(".", "p")
                 archive = f"{output_prefix}_day{day}.ckpt"
                 _copy_atomically(ckpt_path, archive)
                 if accumulator is not None:
@@ -2730,94 +3158,125 @@ def run_chunked(
     # the critical path. See ``docs/source/design/chunked_run_io_overlap.md``.
     from concurrent.futures import ThreadPoolExecutor
 
-    io_pool = ThreadPoolExecutor(max_workers=1,
-                                 thread_name_prefix="jcm-chunk-io")
-    pending = None
-    try:
-        while elapsed_seconds < total_seconds:
-            cur_chunk_seconds = min(chunk_seconds, total_seconds - elapsed_seconds)
-            cur_chunk = f"{cur_chunk_seconds} seconds"
-
-            t0 = time.perf_counter()
-            first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
-            if first_fresh_chunk:
-                # First fresh chunk: bootstrap from the configured initial state
-                # and integrate. ``model.run`` = bootstrap_state + resume, so the
-                # cross-step physics carry is built exactly as the plain
-                # (isothermal) path's ``model.run`` does. ``init=era5`` must be
-                # handled here too: the chunked dispatch returns before
-                # ``_run_full``'s init ladder runs.
-                # from_state warm starts thread the donor's physics carry into
-                # the first chunk's ``run``; all other inits build a fresh carry.
-                initial_physics_state = None
-                if cfg.init.kind == "jw":
-                    initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
-                elif cfg.init.kind == "balanced_isothermal":
-                    initial_state = balanced_isothermal_state(model)
-                elif cfg.init.kind == "era5":
-                    initial_state = _state_from_era5(model, cfg)
-                elif cfg.init.kind == "from_state":
-                    initial_state, initial_physics_state = _state_from_file(model, cfg)
+    with _progress.bar(n_chunks_remaining, desc="jcm chunks",
+                       enabled=progress_bar) as chunk_bar:
+        io_pool = ThreadPoolExecutor(max_workers=1,
+                                     thread_name_prefix="jcm-chunk-io")
+        pending = None
+        try:
+            while elapsed_seconds < total_seconds:
+                if monthly_schedule is not None:
+                    cur_chunk_seconds, cur_save_seconds = _next_monthly_call(
+                        monthly_schedule, elapsed_seconds, chunk_seconds,
+                        total_seconds, save_seconds)
+                    cur_save_interval = f"{cur_save_seconds} seconds"
                 else:
-                    initial_state = None
-                preds = model.run(
-                    initial_state=initial_state,
-                    initial_physics_state=initial_physics_state,
-                    forcing=forcing,
-                    save_interval=save_interval,
-                    total_time=cur_chunk,
-                    output_averages=cfg.run.output_averages,
-                    snapshot_interval=cfg.run.get("snapshot_interval"),
-                    snapshot_variables=tuple(
-                        cfg.run.get("snapshot_variables") or ()),
-                )
-            else:
-                preds = model.resume(
-                    forcing=forcing,
-                    save_interval=save_interval,
-                    total_time=cur_chunk,
-                    output_averages=cfg.run.output_averages,
-                    snapshot_interval=cfg.run.get("snapshot_interval"),
-                    snapshot_variables=tuple(
-                        cfg.run.get("snapshot_variables") or ()),
-                )
+                    cur_chunk_seconds = min(chunk_seconds,
+                                            total_seconds - elapsed_seconds)
+                    cur_save_interval = save_interval
+                cur_chunk = f"{cur_chunk_seconds} seconds"
+                # Only the nudging samples that bracket this chunk go to the
+                # device; one window length for every chunk keeps the
+                # compiled program shared.
+                chunk_forcing = forcing
+                nudge = getattr(forcing, "nudging_target", None)
+                n_nudge = (None if nudge is None else samples_per_span(
+                    nudge, max(chunk_seconds, cur_chunk_seconds)))
+                if n_nudge is not None:
+                    start_s = int(_host_epoch_seconds(model.start_time))
+                    chunk_forcing = forcing.copy(nudging_target=window_target(
+                        nudge, start_s + elapsed_seconds, n_nudge))
 
-            jax.tree_util.tree_map(
-                lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
-                preds._predictions,
-            )
-            chunk_wall = time.perf_counter() - t0
-            total_wall += chunk_wall
-            elapsed_seconds = _elapsed_seconds()
-            elapsed_sim_days = elapsed_seconds / 86400.0
-            job = _ChunkJob(
-                preds=preds, run_state=model.run_state, chunk_idx=chunk_idx,
-                elapsed_seconds=elapsed_seconds,
-                cur_chunk_seconds=cur_chunk_seconds, chunk_wall=chunk_wall,
-                total_wall=total_wall,
-                days_this_invocation=elapsed_sim_days - started_at_days)
-            del preds
+                t0 = time.perf_counter()
+                first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
+                if first_fresh_chunk:
+                    # First fresh chunk: bootstrap from the configured initial state
+                    # and integrate. ``model.run`` = bootstrap_state + resume, so the
+                    # cross-step physics carry is built exactly as the plain
+                    # (isothermal) path's ``model.run`` does. ``init=era5`` must be
+                    # handled here too: the chunked dispatch returns before
+                    # ``_run_full``'s init ladder runs.
+                    # from_state warm starts thread the donor's physics carry into
+                    # the first chunk's ``run``; all other inits build a fresh carry.
+                    initial_physics_state = None
+                    if cfg.init.kind == "jw":
+                        initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
+                    elif cfg.init.kind == "balanced_isothermal":
+                        initial_state = balanced_isothermal_state(model)
+                    elif cfg.init.kind == "era5":
+                        initial_state = _state_from_era5(model, cfg)
+                    elif cfg.init.kind == "from_state":
+                        initial_state, initial_physics_state = _state_from_file(model, cfg)
+                    else:
+                        initial_state = None
+                    # progress=False here, always: this chunk's own
+                    # per-chunk tick (chunk_bar.update(1) below, host-only
+                    # per jcm.progress) already reports exactly this
+                    # granularity, so a second, nested "0/1 -> 1/1" bar
+                    # from model.run itself would be pure visual noise on
+                    # top of it, not a finer-grained report (#320 — there
+                    # is no per-saved-interval reporting left to show).
+                    preds = model.run(
+                        initial_state=initial_state,
+                        initial_physics_state=initial_physics_state,
+                        forcing=chunk_forcing,
+                        save_interval=cur_save_interval,
+                        total_time=cur_chunk,
+                        output_averages=cfg.run.output_averages,
+                        snapshot_interval=cfg.run.get("snapshot_interval"),
+                        snapshot_variables=tuple(
+                            cfg.run.get("snapshot_variables") or ()),
+                        progress=False,
+                    )
+                else:
+                    preds = model.resume(
+                        forcing=chunk_forcing,
+                        save_interval=cur_save_interval,
+                        total_time=cur_chunk,
+                        output_averages=cfg.run.output_averages,
+                        snapshot_interval=cfg.run.get("snapshot_interval"),
+                        snapshot_variables=tuple(
+                            cfg.run.get("snapshot_variables") or ()),
+                        progress=False,
+                    )
 
-            # This chunk's host work (output conversion, health check, netCDF and
-            # checkpoint writes) runs on the I/O thread while the next chunk
-            # integrates; only the previous chunk's job is waited for here, so it
-            # finishes, in order, before this one is queued. An unhealthy previous
-            # chunk with ``bail_on_unhealthy`` therefore stops the run one chunk
-            # later than a serial loop would, and the chunk integrated meanwhile
-            # is discarded unwritten — its checkpoint and outputs never exist.
+                jax.tree_util.tree_map(
+                    lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
+                    preds._predictions,
+                )
+                chunk_wall = time.perf_counter() - t0
+                total_wall += chunk_wall
+                elapsed_seconds = _elapsed_seconds()
+                elapsed_sim_days = elapsed_seconds / 86400.0
+                job = _ChunkJob(
+                    preds=preds, run_state=model.run_state, chunk_idx=chunk_idx,
+                    elapsed_seconds=elapsed_seconds,
+                    cur_chunk_seconds=cur_chunk_seconds, chunk_wall=chunk_wall,
+                    total_wall=total_wall,
+                    days_this_invocation=elapsed_sim_days - started_at_days)
+                del preds
+
+                # This chunk's host work (output conversion, health check, netCDF and
+                # checkpoint writes) runs on the I/O thread while the next chunk
+                # integrates; only the previous chunk's job is waited for here, so it
+                # finishes, in order, before this one is queued. An unhealthy previous
+                # chunk with ``bail_on_unhealthy`` therefore stops the run one chunk
+                # later than a serial loop would, and the chunk integrated meanwhile
+                # is discarded unwritten — its checkpoint and outputs never exist.
+                if pending is not None and pending.result():
+                    bailed = True
+                    pending = None
+                    break
+                pending = io_pool.submit(process_chunk, job)
+                chunk_idx += 1
+                chunk_bar.update(1)
+
             if pending is not None and pending.result():
                 bailed = True
-                pending = None
-                break
-            pending = io_pool.submit(process_chunk, job)
-            chunk_idx += 1
-
-        if pending is not None and pending.result():
-            bailed = True
-    finally:
-        # A failure in the integration still lets the queued job (a healthy
-        # chunk's outputs and checkpoint) finish before the error propagates.
-        io_pool.shutdown(wait=True)
+        finally:
+            # A failure in the integration still lets the queued job (a healthy
+            # chunk's outputs and checkpoint) finish before the error propagates.
+            io_pool.shutdown(wait=True)
 
     # The run reached its end: flush the pending (possibly partial) month.
     # Not after a bail — that month's remainder was never integrated.
@@ -2835,48 +3294,145 @@ def run_chunked(
             # same physics from the same config).
             final = _unwritten_months(final, output_prefix)
             last_params = _built_params(model)
-        _write_monthly(final, output_prefix, last_params)
+        _write_monthly(final, output_prefix, last_params, pressure_levels_hpa)
 
     return reports
 
 
-def check_monthly_schedule(cfg: DictConfig, start_time, chunk_seconds: int,
-                           total_seconds: int) -> None:
-    """Refuse a ``run.monthly_means`` run whose intervals cross a month edge.
+def check_monthly_schedule(cfg: DictConfig, model, chunk_seconds: int,
+                           total_seconds: int
+                           ) -> list[temporal_aggregation.MonthlySegment]:
+    """Build (and validate) the ``run.monthly_means`` schedule for one run.
 
-    Checked before integrating, not at the first month boundary: every save
-    interval ``[start + k*save, start + (k+1)*save)`` over the run must end
-    on or before the first instant of the month it starts in, so that each
-    interval mean belongs to one calendar month (daily or sub-daily saves
-    from a midnight start always do). Splitting an interval at a month edge
-    is #903.
+    A fixed ``save_interval`` for the whole run, from an arbitrary
+    ``start_time``, will eventually produce an interval that straddles a
+    month boundary (a non-midnight start, or a ``save_interval`` that does
+    not tile every month, e.g. 5 days). Rather than require the caller to
+    pre-segment the run by hand (the pre-#903 behaviour), this returns a
+    schedule of sub-runs -- see
+    ``jcm.temporal_aggregation.schedule_monthly_segments`` for the actual
+    construction (the "Python helper" of #903, also usable without the
+    chunked runner) -- that ``run_chunked``'s loop (via
+    ``_next_monthly_call``) integrates in place of one uniform
+    ``save_interval``. Every edge sub-run's duration must be reachable in
+    whole model steps; the schedule builder raises before anything is
+    integrated if not (e.g. a 7-minute timestep against an off-grid month
+    edge).
+
+    ``chunk_seconds`` must still be a whole multiple of ``save_interval``:
+    chunk boundaries are also health-check/checkpoint boundaries, and
+    splitting a *body* segment there (independently of month edges) relies
+    on that, same as before #903.
+
+    ``run.snapshot_interval``/``run.snapshot_variables`` (#586), when both
+    are set, must also divide every *edge* segment's one-off duration: an
+    edge is integrated with ``save_interval`` equal to its own duration
+    (one output interval), and ``Model.run``/``resume`` require the
+    snapshot stride to divide the number of inner steps per save interval.
+    The configured ``snapshot_interval`` is built to divide the *regular*
+    ``save_interval``; nothing otherwise guarantees it also divides a
+    shorter edge, so that is checked here too, up front.
+
+    Takes ``model`` rather than a bare ``start_time``/``dt_seconds`` pair so
+    the cheap config-only checks below (``output_averages``, the
+    chunk/save ratio) raise before anything touches the model's timestep --
+    ``jcm.runners_test`` exercises those with a bare stand-in model that has
+    no ``dt_si``.
     """
-    import numpy as np
-
-    from jcm.date import parse_duration_seconds, to_datetime
+    from jcm.date import parse_duration_seconds
 
     if not cfg.run.get("output_averages", False):
         raise ValueError("run.monthly_means=true needs run.output_averages=true "
                          "(monthly means are built from interval means).")
     save = parse_duration_seconds(cfg.run.save_interval)
-    if chunk_seconds % save or total_seconds % save:
+    if chunk_seconds % save:
         raise ValueError(
-            "run.monthly_means=true needs run.chunk_days and the run length to "
-            f"be whole multiples of run.save_interval ({save} s), so every "
+            "run.monthly_means=true needs run.chunk_days to be a whole "
+            f"multiples of run.save_interval ({save} s), so every "
             "chunk continues the same interval grid.")
-    start = np.datetime64(to_datetime(start_time).to_datetime64(), "s")
-    starts = start + np.arange(total_seconds // save) * np.timedelta64(save, "s")
-    ends = starts + np.timedelta64(save, "s")
-    edges = (starts.astype("datetime64[M]") + np.timedelta64(1, "M")).astype(
-        "datetime64[s]")
-    crossing = np.flatnonzero(ends > edges)
-    if crossing.size:
-        k = int(crossing[0])
+    schedule = temporal_aggregation.schedule_monthly_segments(
+        model.start_time, save, total_seconds, int(model.dt_si.m))
+
+    snapshot_interval = cfg.run.get("snapshot_interval", None)
+    if snapshot_interval is not None and cfg.run.get("snapshot_variables", None):
+        snap_seconds = parse_duration_seconds(snapshot_interval)
+        bad = [segment for segment in schedule
+              if segment.is_edge and segment.duration_seconds % snap_seconds]
+        if bad:
+            segment = bad[0]
+            start = segment.offset_seconds
+            raise ValueError(
+                "run.monthly_means=true: run.snapshot_interval "
+                f"({snap_seconds} s) does not divide the edge interval "
+                f"[{start}, {start + segment.duration_seconds}) s that "
+                f"#903's schedule needs ({segment.duration_seconds} s, "
+                "shorter than the regular run.save_interval it divides); "
+                "choose a start_time/save_interval whose edges are all "
+                "multiples of the snapshot interval, or "
+                "run.snapshot_variables=[] to disable snapshots.")
+    return schedule
+
+
+def _next_monthly_call(schedule: list[temporal_aggregation.MonthlySegment],
+                       elapsed_seconds: int, chunk_seconds: int,
+                       total_seconds: int, save_seconds: int
+                       ) -> tuple[int, int]:
+    """Return ``(cur_chunk_seconds, cur_save_interval_seconds)`` for the next
+    ``model.run``/``model.resume`` call under a #903 monthly schedule.
+
+    Consecutive body segments (e.g. two months that both happen to tile
+    exactly under the configured ``save_interval``, so the schedule needs no
+    edge between them) are one continuous region here, not a forced split:
+    they share ``save_seconds`` and, by construction, each is itself a whole
+    multiple of it, so a single model call spanning both produces exactly
+    the same per-interval grid as running them separately would -- forcing
+    a restart at every silent month boundary would needlessly multiply
+    compilations and fragment ``run.chunk_days``'s own per-chunk files
+    (``_dayN.nc``) at points the health-check/checkpoint cadence never
+    asked for. Only the next *edge* segment -- a leading/month-boundary/
+    trailing stub that is itself exactly one output interval -- or the
+    run's end stops a body region; ``chunk_seconds`` still subdivides it for
+    the regular health-check/checkpoint cadence. An edge segment, once
+    reached, is always integrated whole in its own call: it already IS the
+    one interval it needs to produce.
+
+    ``elapsed_seconds`` must itself land exactly on this schedule -- an
+    edge's own start, or a ``save_seconds`` multiple from the body segment
+    containing it -- which a resume is not guaranteed to do if the
+    checkpoint's run used a *different* ``run.total_time``/``run.end_time``
+    than this invocation: #903's schedule is a function of the whole run's
+    length (an edge can close out a month earlier or later depending on
+    where the run was always going to end), so a restored clock that was a
+    valid stopping point under one length can land mid-body-segment,
+    off the ``save_seconds`` grid, under another. That is rejected here
+    (before integrating this call) rather than passed through as a
+    ``total_time``/``save_interval`` pair ``Model.resume`` would also
+    reject, just less legibly and not necessarily before the first chunk of
+    *this* invocation has already run.
+    """
+    for segment in schedule:
+        if segment.is_edge and segment.offset_seconds == elapsed_seconds:
+            return segment.duration_seconds, segment.save_interval_seconds
+    body = next((segment for segment in schedule if not segment.is_edge
+                and segment.offset_seconds <= elapsed_seconds
+                < segment.offset_seconds + segment.duration_seconds), None)
+    if body is None or (elapsed_seconds - body.offset_seconds) % save_seconds:
         raise ValueError(
-            "run.monthly_means=true: save interval "
-            f"[{starts[k]}, {ends[k]}) crosses the month boundary {edges[k]}; "
-            "use a save_interval that tiles every month from run.start_time "
-            "(e.g. 1 day from a midnight start).")
+            f"run.monthly_means=true: the restored clock (elapsed "
+            f"{elapsed_seconds} s) does not land on the monthly schedule "
+            f"built for this run (run.total_time resolving to "
+            f"{total_seconds} s, run.save_interval {save_seconds} s). "
+            "Resuming a monthly-means checkpoint with a different "
+            "run.total_time/run.end_time than produced it can misalign "
+            "the output grid; resume with the length that was configured "
+            "when the checkpoint was written, or start a fresh run for "
+            "the new length.")
+    next_stop = min(
+        [total_seconds] + [segment.offset_seconds for segment in schedule
+                           if segment.is_edge
+                           and segment.offset_seconds > elapsed_seconds])
+    cur = min(chunk_seconds, next_stop - elapsed_seconds)
+    return cur, save_seconds
 
 
 def _monthly_input(ds):
@@ -2906,8 +3462,20 @@ def _monthly_input(ds):
     return out
 
 
-def _write_monthly(months, output_prefix: str, params) -> list[str]:
-    """Write each month of ``months`` to ``{prefix}_monthly_YYYY-MM.nc``."""
+def _write_monthly(months, output_prefix: str, params,
+                   pressure_levels_hpa=None) -> list[str]:
+    """Write each month of ``months`` to ``{prefix}_monthly_YYYY-MM.nc``.
+
+    ``pressure_levels_hpa`` (#258) is applied to each month's own mean
+    fields and its own mean ``pressure_full`` -- the same "convert whatever
+    is about to be written, using its own column pressures" rule as every
+    other call site, here applied to a time-mean rather than an
+    instantaneous/interval-mean dataset. This inherits, rather than
+    resolves, the pre-existing open question of averaging order for
+    nonlinearly-derived quantities (noted where the monthly accumulator
+    itself is documented); #258 does not need to decide that to add the
+    option.
+    """
     if months is None:
         return []
     paths = []
@@ -2923,7 +3491,8 @@ def _write_monthly(months, output_prefix: str, params) -> list[str]:
             if name != bounds and month[name].dtype.kind == "f":
                 month[name].encoding = {}
         month.attrs.update(provenance.attrs(params))
-        month.to_netcdf(path)
+        _to_netcdf_with_retry(
+            _apply_pressure_levels(month, pressure_levels_hpa), path)
         provenance.write_sidecar(path, params)
         print(f"  Saved {path} (coverage "
               f"{float(month['time_coverage_fraction'].values[0]):.3f})")
@@ -3059,13 +3628,22 @@ def resolve_output_path(cfg: DictConfig, hydra_cfg: Any) -> Path:
     return out_dir / output_name
 
 
-def save_predictions(predictions, output_path: Path) -> None:
+def save_predictions(predictions, output_path: Path,
+                     pressure_levels_hpa=None) -> None:
     """Persist a run's outputs.
 
     ``run_chunked`` already writes one netCDF per chunk and returns the
     list of health-check reports. Skip the final dump in that case (the
     list of dicts has no ``to_xarray`` method, and the per-chunk files
     are the actual data).
+
+    ``pressure_levels_hpa`` (#258, ``run.pressure_levels``) converts the
+    dataset about to be written onto constant pressure surfaces -- see
+    :func:`_apply_pressure_levels`, the same conversion ``run_chunked``
+    applies to its own per-chunk/monthly/snapshot files.
+
+    Each attached observer's samples go to ``<stem>_obs_<name>.nc`` beside
+    the output (``run_chunked`` writes the same per chunk).
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(predictions, list):
@@ -3077,7 +3655,8 @@ def save_predictions(predictions, output_path: Path) -> None:
     params = getattr(predictions, "params", None)
     ds = predictions.to_xarray()
     ds.attrs.update(provenance.attrs(params))
-    ds.to_netcdf(str(output_path))
+    _to_netcdf_with_retry(
+        _apply_pressure_levels(ds, pressure_levels_hpa), str(output_path))
     provenance.write_sidecar(output_path, params)
     logger.info("Wrote %s", output_path)
     # Interval-instantaneous snapshot stream (jax-gcm#586): a separate
@@ -3087,5 +3666,12 @@ def save_predictions(predictions, output_path: Path) -> None:
     if snap_ds is not None:
         snap_path = output_path.with_name(output_path.stem + "_snapshots.nc")
         snap_ds.attrs.update(provenance.attrs(params))
-        snap_ds.to_netcdf(str(snap_path))
+        _to_netcdf_with_retry(
+            _apply_pressure_levels(snap_ds, pressure_levels_hpa),
+            str(snap_path))
         logger.info("Wrote %s", snap_path)
+    # Observer samples have a per-dt time axis of their own, so each
+    # observer gets its own file, as the snapshot stream does.
+    for obs_path in _write_observations(
+            predictions, str(output_path.with_name(output_path.stem)), params):
+        logger.info("Wrote %s", obs_path)

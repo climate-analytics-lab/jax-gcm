@@ -20,10 +20,13 @@ forced configuration therefore composes
 insulating/free-slip bottom — followed by this term, which adds the
 prescribed fluxes as an explicit bottom-layer source:
 
-    dT/dt|_bot = g·SHF / (cpd·Δp) ,  dq/dt|_bot = g·E / Δp ,
+    dT/dt|_bot = (g·SHF/Δp + D) / c_p ,  dq/dt|_bot = g·E / Δp ,
     du/dt|_bot = −g·τ_u / Δp      ,  dv/dt|_bot = −g·τ_v / Δp ,
 
-with Δp the bottom-layer pressure thickness. A prescribed flux is
+with Δp the bottom-layer pressure thickness, ``c_p = c_pd·(1 + vtmpc2·q)``
+the layer's moist heat capacity and ``D`` the kinetic energy the stress
+removes per unit time (the heat and the heating the interactive solve
+delivers, see ``docs/source/design/tte_tke_closure.md``). A prescribed flux is
 state-independent, so the explicit delivery is exact for the surface term
 (no Richtmyer–Morton handshake to honour — the implicit coupling exists to
 keep a *state-dependent* exchange stable). The same-step bookkeeping the
@@ -161,14 +164,19 @@ def validate_run_forcing(physics, forcing, run_window=None) -> None:
 
     (a) prescribed fluxes supplied → some composed term must consume them
         (:func:`check_prescribed_flux_consumers`);
+    (a2) a coupled ocean current supplied → some composed term must consume
+        it (:func:`~jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion.
+        check_ocean_current_consumers`, jax-gcm#915 — the same "producer
+        without a consumer is a silent no-op" rule as (a), for the OTHER
+        forcing input a coupler feeds back from an external surface model);
     (b) a consumer composed → ``physics.validate_forcing(forcing,
         run_window)`` runs every term's own check: the forced-mode terms
         raise if the fluxes are absent (and judge their coverage, below);
     (c) given a concrete ``run_window`` ``(start_s, end_s)`` in seconds since
         1970-01-01, EVERY date-aligned forcing leaf — surface fields and
         GHGs, ozone, emissions, oxidants, MACv2-SP weights, prescribed
-        fluxes, a nudging target — must cover it, or have declared
-        ``persist=hold`` (:func:`jcm.forcing.check_forcing_coverage`).
+        fluxes, an ocean current, a nudging target — must cover it, or have
+        declared ``persist=hold`` (:func:`jcm.forcing.check_forcing_coverage`).
 
     Callers and their windows: ``Model.run_from_state_with_carry`` (the
     choke point of ``run`` / ``resume`` / ``run_from_state``; the exact run
@@ -182,8 +190,20 @@ def validate_run_forcing(physics, forcing, run_window=None) -> None:
     JAX transformation.
     """
     from jcm.forcing import check_forcing_coverage
+    from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion import (
+        check_ocean_current_consumers,
+    )
 
     check_prescribed_flux_consumers(physics, forcing)
+    if getattr(forcing, "land_skin_temperature", None) is not None:
+        consumed_fn = getattr(physics, "consumed_forcing_fields", None)
+        consumed = consumed_fn() if consumed_fn is not None else ()
+        if "land_skin_temperature" not in consumed:
+            raise ValueError(
+                "forcing.land_skin_temperature requires a surface-coupled "
+                "TteTkeVerticalDiffusion with land_temperature='prescribed'; "
+                "the composed physics would ignore the skin archive.")
+    check_ocean_current_consumers(physics, forcing)
     validate = getattr(physics, "validate_forcing", None)
     if validate is not None:
         validate(forcing, run_window=run_window)
@@ -269,11 +289,21 @@ class PrescribedSurfaceFlux(PhysicsTerm):
         g_over_dp = c.grav / dp
 
         zeros = jnp.zeros_like(state.temperature)
-        t_tend = zeros.at[-1].set(shf * g_over_dp / c.cpd)
         q_tend = zeros.at[-1].set(evap * g_over_dp)
         # Positive-down stress removes momentum from the atmosphere.
-        u_tend = zeros.at[-1].set(-stress_u * g_over_dp)
-        v_tend = zeros.at[-1].set(-stress_v * g_over_dp)
+        du = -stress_u * g_over_dp
+        dv = -stress_v * g_over_dp
+        u_tend = zeros.at[-1].set(du)
+        v_tend = zeros.at[-1].set(dv)
+        # The sensible heat flux is a flux of dry static energy, heating the
+        # layer at its moist heat capacity, and the kinetic energy the stress
+        # removes returns as heat — as the interactive solve delivers both
+        # (ECHAM's c_pd·(1 + vtmpc2·q) and zdis, vdiff.f90 l.1418-1446).
+        u_bot = state.u_wind[-1]
+        v_bot = state.v_wind[-1]
+        ke_loss = -(u_bot * du + v_bot * dv) - 0.5 * dt * (du * du + dv * dv)
+        cp_bot = c.cpd * (1.0 + c.vtmpc2 * state.specific_humidity[-1])
+        t_tend = zeros.at[-1].set((shf * g_over_dp + ke_loss) / cp_bot)
 
         tendency = PhysicsTendency(
             u_wind=u_tend,
@@ -301,7 +331,11 @@ class PrescribedSurfaceFlux(PhysicsTerm):
         vdiff = diagnostics["vertical_diffusion"]
         vdiff = vdiff.copy(
             surface_evaporation=evap,
+            # The coupler's sensible heat is taken as given, so the dry-cp
+            # field carries the same value (no vapour-enthalpy split is
+            # known on this side of the interface).
             surface_sensible_heat=shf,
+            surface_sensible_heat_dry=shf,
             surface_latent_heat=c.alhc * evap,
             surface_stress_u=stress_u,
             surface_stress_v=stress_v,

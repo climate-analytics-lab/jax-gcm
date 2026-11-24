@@ -30,6 +30,9 @@ import sys
 import weakref
 
 from jcm import profiling, provenance
+# Aliased: several methods below have their own ``progress`` bool parameter
+# (#320), which would otherwise shadow the module.
+from jcm import progress as _progress
 from jcm.date import (
     DateData, SECONDS_PER_DAY, parse_duration_seconds,
     to_datetime,
@@ -38,7 +41,8 @@ from jcm.forcing import ForcingData, default_forcing
 from jcm.predictions import ModelPredictions
 from jcm.physics_interface import (
     POST_PHYSICS_STATE_KEY, PhysicsState, Physics,
-    compute_physics_step_gridpoint, verify_state,
+    build_initial_physics_carry, compute_physics_step_gridpoint,
+    record_post_physics_anchor, verify_state,
 )
 from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.terrain import TerrainData
@@ -746,9 +750,10 @@ class Model:
         # still (a term losing an input it declared, invisibly). The Hydra
         # path has resolved providers this way since jax-gcm#409
         # (``runners._want_omega``); this makes the policy uniform for
-        # library callers, and leaves genuine incapability (a backend with no
-        # such provider at all, e.g. pySES and omega — #698) as the only
-        # failure.
+        # library callers, and leaves genuine incapability (a backend with
+        # no such provider at all, and no ``compute_<field>`` flag to turn
+        # on) as the only failure. Both shipped backends (dinosaur, pySES)
+        # supply ``omega`` and ``frontogenesis`` this way as of jax-gcm#698.
         required = tuple(getattr(self.physics, "required_dycore_fields",
                                  lambda: ())())
         for field in required:
@@ -1202,17 +1207,22 @@ class Model:
                 # stays differentiable: one step back through the carry, like
                 # ``_prev_step``.
                 #
-                # It is recorded through the same ``verify_state`` the physics
-                # applies to the state it receives, so both ends of that
-                # difference are in one representation: the next step's
-                # physics sees ``max(q, 0)``, and an unclamped anchor would
-                # turn the entry clamp of a small negative (spectral ringing)
-                # into a spurious ``−q_ap/dt`` of "convergence".
+                # Shared with ``PrescribedStateModel``'s scan step (#623
+                # follow-up, Codex P1 round 5) via
+                # ``record_post_physics_anchor`` — see its docstring for the
+                # verify_state/entry-clamp reasoning and why ``Model`` passes
+                # its OWN ``after_physics_state_fn`` here rather than letting
+                # the shared function's no-dycore default run: this dycore's
+                # ``after_physics_state`` may apply the tendency in its own
+                # representation (e.g. Dinosaur's spectral projection), which
+                # the gridpoint-only default cannot reproduce.
                 with profiling.scope(profiling.BRIDGE_TO_PHYSICS):
-                    post_physics = verify_state(self.dycore.after_physics_state(
-                        state, physics_tendency))
-                    new_physics_state = self.physics.record_post_physics_state(
-                        new_physics_state, post_physics)
+                    new_physics_state = record_post_physics_anchor(
+                        self.physics, new_physics_state, physics_state_grid,
+                        physics_tendency, self.dt_si.m,
+                        after_physics_state_fn=partial(
+                            self.dycore.after_physics_state, state),
+                    )
                     if axis is not None and POST_PHYSICS_STATE_KEY in new_physics_state:
                         # Recorded outside the auto-sharded physics region:
                         # give the slot the column sharding every other carry
@@ -1280,33 +1290,18 @@ class Model:
         method does not mutate :attr:`physics_carry`; use
         :meth:`bootstrap_state` to install a fresh state/carry pair on the
         model.
+
+        The seed/template union and the cross-precision cast (for dycores
+        that run dynamics and physics at different precisions, e.g. pySES
+        CAM-SE) live in the dycore-agnostic
+        :func:`jcm.physics_interface.build_initial_physics_carry`, shared
+        with :class:`jcm.prescribed_state_model.PrescribedStateModel`
+        (#623) so both cold-start a carry for the same
+        physics+coords identically.
         """
-        template = self.physics.get_empty_data(self.coords)
-        initial_carry = self.physics.initial_carry_state(self.coords)
-        if isinstance(initial_carry, dict) and isinstance(template, dict):
-            carry = {**template, **initial_carry}
-        else:
-            # Explicit ``is None`` check: ``initial_carry or template`` would
-            # trigger ``bool(carry)`` and raise an ambiguous-truth
-            # ``ValueError`` if a ``Physics`` subclass returns a JAX array
-            # (or any object with non-scalar truth semantics).
-            carry = template if initial_carry is None else initial_carry
-        # Dycores that run their dynamics at a different precision than the
-        # physics (the pySES CAM-SE backend: float64 dynamics under
-        # jax_enable_x64, float32 physics) expose ``physics_dtype``; the
-        # scan carry must match the dtype the per-step compute produces, or
-        # iteration 1 fails to type-check. The template above was built at
-        # the process default, so cast its float leaves down here. Backends
-        # without the attribute (dinosaur) are untouched.
         physics_dtype = getattr(self.dycore, "physics_dtype", None)
-        if physics_dtype is not None:
-            carry = jax.tree.map(
-                lambda x: x.astype(physics_dtype)
-                if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
-                else x,
-                carry,
-            )
-        return carry
+        return build_initial_physics_carry(
+            self.physics, self.coords, physics_dtype=physics_dtype)
 
     def _build_initial_physics_carry(self) -> Any:
         """Forward to :meth:`initial_physics_carry` for compatibility."""
@@ -1471,6 +1466,17 @@ class Model:
         ``initial_physics_state`` and returned as the final carry so callers
         can continue a run across API boundaries without re-seeding (e.g.
         :meth:`Model.resume`).
+
+        No progress reporting happens from inside this method (#320): three
+        rounds of embedding a ``jax.debug.callback`` in the scan each broke a
+        different way (``ordered=True`` fails to compile under a
+        multi-device ``NamedSharding``; dropping ``ordered`` makes the
+        callback's *pure* semantics free for the scan or a multi-device
+        lowering to elide or duplicate, per a further review, so the bar
+        could end short even on one device) — three failures of the same
+        mechanism means the mechanism, not the latest patch, was wrong. See
+        :mod:`jcm.progress`: progress is host-only now, reported by the
+        caller around this whole call, never from inside it.
         """
         dt_seconds = int(self.dt_si.m)
         save_seconds = parse_duration_seconds(save_interval)
@@ -1512,6 +1518,19 @@ class Model:
          predictions, observations, snapshots, times,
          time_bounds) = integrate(initial_state, initial_physics_state)
 
+        # #306: times/time_bounds are labelling metadata (the model clock),
+        # never a quantity we differentiate -- nothing downstream should
+        # backprop a gradient through them into whatever produced the clock.
+        # stop_gradient makes that explicit rather than relying on them
+        # happening to have no real dependency on the differentiated inputs.
+        # It does NOT make a jvp tangent's times equal the primal's: times
+        # is int64-backed (jax_datetime.Datetime), and JAX's forward-mode
+        # tangent for an integer leaf is unconditionally the `float0`
+        # placeholder regardless of stop_gradient -- see
+        # ModelPredictions.with_primal_times for the actual fix to that half
+        # of #306.
+        times = jax.tree_util.tree_map(jax.lax.stop_gradient, times)
+        time_bounds = jax.tree_util.tree_map(jax.lax.stop_gradient, time_bounds)
         predictions = predictions.replace(
             times=times,
             time_bounds=time_bounds,
@@ -1746,6 +1765,7 @@ class Model:
                                   observer_xs=None,
                                   initial_time: jdt.Datetime | None = None,
                                   initial_step: Any = None,
+                                  progress: bool = False,
     ):
         """Lower-level ``run_from_state`` that exposes the cross-step physics carry.
 
@@ -1769,6 +1789,31 @@ class Model:
         window start used to build host tables per call cannot. Pass both
         ``initial_time`` and ``initial_step`` from the complete
         :class:`RunState`; this method returns ``(RunState, ModelPredictions)``.
+
+        ``progress`` (#320) opens a bar — ``tqdm`` if importable, else a
+        plain printer; see :mod:`jcm.progress` — showing this call as ONE
+        unit ("chunks": 0 -> 1), ticked on the HOST once the whole call
+        returns AND (opt-in only, so the default path keeps JAX's async
+        dispatch untouched) every returned array has actually finished on
+        the device — ticking immediately on the returned futures would
+        report "done" while a GPU integration was still running. Off by
+        default and never a hard dependency. Progress WITHIN the call
+        (per saved interval) is not reported: three
+        rounds of embedding a progress callback inside the jitted scan
+        each broke a different way (see ``_run_from_state``'s docstring),
+        which is the signal that the mechanism — a callback from inside
+        jit at all — was wrong, not any one patch to it; reporting only
+        host-side, around the whole call, cannot be dropped, duplicated
+        or reordered because nothing inside the trace is involved. A
+        chunked run (``jcm.runners.run_chunked``) gets its real
+        granularity for free from this: it already ticks once per chunk
+        on the host, which is exactly as fine-grained as a single
+        ``run_from_state_with_carry`` call can honestly report. Supports
+        one active bar per PROCESS, not per thread: ``progress=True`` on
+        overlapping calls from two different threads raises
+        ``RuntimeError`` rather than interleaving reports onto the wrong
+        bar (see :mod:`jcm.progress`) — pass ``progress=False`` on every
+        concurrent run but one.
         """
         if initial_time is None or initial_step is None:
             raise ValueError(
@@ -1833,13 +1878,37 @@ class Model:
                 for obs in self.observers
             )
 
-        (final_dycore_state, final_physics_state, final_time, final_step,
-         predictions, observations, snapshots) = self._run_from_state(
-                initial_state, initial_physics_state, initial_time, initial_step, forcing,
-                save_interval, total_time,
-                output_averages, observer_xs,
-                snapshot_stride, tuple(snapshot_variables),
-        )
+        # Host-only progress (#320): a bar of ONE unit, ticked after the
+        # whole call returns -- see this method's docstring and
+        # ``_run_from_state``'s for why nothing reports from inside the
+        # traced scan. "chunks" is the same unit ``run_chunked``'s own
+        # per-chunk bar uses, so a plain (unchunked) run and a chunked one
+        # read the same way: this call IS one chunk as far as progress
+        # reporting is concerned.
+        with _progress.bar(1, desc="jcm chunks", enabled=progress) as b:
+            result = self._run_from_state(
+                    initial_state, initial_physics_state, initial_time, initial_step, forcing,
+                    save_interval, total_time,
+                    output_averages, observer_xs,
+                    snapshot_stride, tuple(snapshot_variables),
+            )
+            if progress:
+                # Opt-in only, so the default (progress=False) path keeps
+                # JAX's async dispatch untouched: ``_run_from_state``
+                # returns device FUTURES, not completed results, so
+                # ticking "done" immediately would report 100% while the
+                # integration is still running on the device -- instant,
+                # with a cached compilation, which is exactly when it is
+                # most misleading (Codex review on #320). ``run_chunked``
+                # already blocks the same way before reporting a chunk
+                # complete.
+                jax.tree_util.tree_map(
+                    lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
+                    result,
+                )
+            b.update(1)
+            (final_dycore_state, final_physics_state, final_time, final_step,
+             predictions, observations, snapshots) = result
         predictions = predictions.replace(
             time_cell_method=jnp.asarray(output_averages))
         snapshot_times = None
@@ -1895,6 +1964,7 @@ class Model:
                snapshot_variables=(),
                observer_t0_days=None,
                observer_xs=None,
+               progress: bool = False,
     ) -> ModelPredictions:
         """Continue from end of previous ``run`` / ``resume``.
 
@@ -1904,6 +1974,9 @@ class Model:
         reset at the API seam. A run broken into ``run()`` then ``resume()``
         for the same total duration therefore matches a single ``run()`` of
         the combined duration (to numerical roundoff).
+
+        ``progress`` (#320): opt-in progress bar, off by default; see
+        :meth:`run_from_state_with_carry` and :mod:`jcm.progress`.
         """
         if self._carry_was_traced:
             raise ValueError(
@@ -1936,6 +2009,7 @@ class Model:
             observer_xs=observer_xs,
             initial_time=self._final_time,
             initial_step=self._final_step,
+            progress=progress,
         )
         logger.info("Run completed.")
         # Under an enclosing transformation these are tracers, and storing
@@ -1963,6 +2037,7 @@ class Model:
             initial_physics_state: Any = None,
             observer_t0_days=None,
             observer_xs=None,
+            progress: bool = False,
     ) -> ModelPredictions:
         """Set the initial state and run the full simulation forward in time.
 
@@ -1987,6 +2062,9 @@ class Model:
         carry from a different composition would not line up. In practice this
         is the value returned by :func:`jcm.initial_states.checkpoint_state`,
         which loads it through that same template.
+
+        ``progress`` (#320): opt-in progress bar, off by default; see
+        :meth:`resume` and :mod:`jcm.progress`.
         """
         dycore_state, physics_carry = self.bootstrap_state(initial_state)
         if initial_physics_state is not None:
@@ -2007,6 +2085,7 @@ class Model:
             snapshot_variables=snapshot_variables,
             observer_t0_days=observer_t0_days,
             observer_xs=observer_xs,
+            progress=progress,
         )
 
     def _at_fresh_clock(self, dycore_state):

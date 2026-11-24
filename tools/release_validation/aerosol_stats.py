@@ -14,6 +14,21 @@ release gate can score, and applies the two tolerance tiers described in
   detector: an aerosol runaway grows multiplicatively with the meteorology
   entirely normal, so a climatological range gate does not notice it until the
   final fortnight of a year that was unusable months earlier.
+
+  Which window a record gets is not left to how much of it happens to be
+  loaded: a **warm-started or second year** (:func:`warm_start_kind`, detected
+  from the run's own ``.hydra/config.yaml``, or an explicit ``--warm-start``)
+  is always scored over its *whole* record, ignoring an operator's
+  ``--last-n`` — the six-month window exists to skip a cold start's spin-up
+  ramp, which a warm start never has (:func:`resolve_warm_start`). For **POA
+  and BC** — the two species with a prescribed (not interactive) emission —
+  the whole-year slope additionally has a periodic box model's own fit
+  artefact subtracted before it is gated (:func:`box_model_drift`); both the
+  raw and the box-corrected slope are reported. Dust and sea salt are
+  unaffected: their emission is interactive, so a box driven by "the run's own
+  emission series" would not be driven by an external forcing at all. See
+  ``docs/source/design/jam_regression.md`` ("Which window, and the box-model
+  correction").
 * **climatological anchors** — the shared ``jam_burden_report._SPECIES``
   ranges widened by the release gate's slack, unchanged.
 * **regression tolerances** — ``max(3 sigma, 15 %)`` against a reference run
@@ -32,6 +47,22 @@ Both output vertical conventions are supported. Levels are chosen by their
 (see the "Inspecting model output" rule in ``CLAUDE.md``), and the layer
 thicknesses come from :func:`jam_burden_report._layer_dp`, which orients
 pre-#710 TOA-first interfaces onto the surface-first ``level`` axis.
+
+**Two different windows, read from the same chunk files (#1010).** The drift,
+ledger and mean statistics above are scored on whatever window the caller
+asks for (``--last-n``, or the whole run directory without it) — that is the
+"settled window" the design doc means by it. The *annual-budget* statistics
+(currently just ``dust_emission_tg_per_yr``; see :data:`MIN_DUST_WINDOW_DAYS`)
+are drawn on a full T63 year and are scored on the WHOLE run directory's
+trailing year (:func:`annual_window_bounds`) regardless of ``--last-n``: the
+documented ``health.py --last-n 40`` recipe is a 200-day window, below
+:data:`MIN_DUST_WINDOW_DAYS`, so scoring the annual statistic on it rather
+than on the run's actual year reported it UNSCORED on every confirmation-year
+report of the #682 retune. :func:`collect_windows` and :func:`slice_windows`
+read or slice both windows from one record and hand each to
+:func:`summarize`/:func:`unscored_gates` as a separate ``annual_*`` triple;
+``main`` below is the one caller that needs this, and ``health.py`` uses the
+same two functions for its own aerosol block.
 
 Usage:
     python tools/release_validation/aerosol_stats.py <run_dir>
@@ -57,7 +88,15 @@ for _p in (str(_REPO), str(_TOOLS)):
         sys.path.insert(0, _p)
 
 from jcm.analysis import area_weights, column_integral, global_mean  # noqa: E402
-from jam_burden_report import _SPECIES, _layer_dp, burden  # noqa: E402
+from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES  # noqa: E402
+from jcm.physics.aerosol.jam.microphysics import MAM4_SPEC  # noqa: E402
+from jam_burden_report import (  # noqa: E402
+    _POPULATIONS,
+    _SPECIES,
+    _layer_dp,
+    burden,
+    sulfate_molar_mass,
+)
 
 #: Species carrying a lifetime statistic — those whose removal is dominated by
 #: the two published deposition ledgers (``dry_*`` sedimentation and ``wet_*``
@@ -72,25 +111,100 @@ LIFETIME_SPECIES = ("so4", "bc", "du", "ss")
 #: ledgers but no entry in the shared ``_SPECIES`` anchor table, so no burden
 #: is computed for it and there is no storage term to close against. Adding it
 #: needs a climatological anchor range, which is a calibration decision.
-PRIMARY_BUDGET_SPECIES = ("bc", "du", "ss", "poa")
+#: ``oc`` is M7's whole organic aerosol, emitted as primary (HAM's default
+#: emits biogenic SOA as primary too), so ``emi_oc`` is its complete source; a
+#: MAM4 run carries no ``oc`` tracer and is skipped as not carrying it.
+PRIMARY_BUDGET_SPECIES = ("bc", "du", "ss", "poa", "oc")
 
-#: Kilograms of sulfate AEROSOL per kilogram of each sulfur carrier, so the
-#: whole family can be totalled in one mass unit. Read from jcm's own species
-#: table rather than restated: the ``so4`` tracer is ammonium bisulfate, not
-#: SO4, and converting SO2/DMS emissions with the SO4 molar mass instead
-#: understates the sulfate source by 20 %.
-from jcm.physics.aerosol.jam.species import SPECIES as _JAM_SPECIES  # noqa: E402
+#: Species whose emission is PRESCRIBED — an external climatology, not a
+#: function of this run's own winds, soil moisture or SST — and so the only
+#: ones #1081's periodic-box correction (:func:`box_model_drift`) applies to.
+#: POA and BC both come from the MACv2-SP/AeroCom biomass-burning and
+#: fossil/biofuel emission climatology; dust and sea salt are emitted
+#: INTERACTIVELY (saltation on the model's own 10 m wind and soil wetness for
+#: dust, whitecap fraction on wind and SST for sea salt), so a box driven by
+#: "the run's own emission series" would be driven by the run's own dynamics,
+#: not an external forcing the box model can honestly claim to replay — the
+#: maintainer's explicit decision is to correct only these two (#1081).
+BOX_CORRECTED_SPECIES = ("poa", "bc")
 
-_M_SO4_AEROSOL = _JAM_SPECIES["so4"].molar_mass
-_SULFUR_CARRIERS = {"so2": _M_SO4_AEROSOL / 0.0640648,     # 1.795
-                    "dms": _M_SO4_AEROSOL / 0.0621324,     # 1.851
-                    "h2so4": _M_SO4_AEROSOL / 0.0980784,   # 1.172
-                    "so4": 1.0}
-#: Gas reservoirs and emission channels of that family. The gases are stored
-#: as raw column burdens by :func:`chunk_reduction`; the conversion above is
-#: applied here, in the ledger, so the reduction stays unit-neutral.
+#: Gas reservoirs and emission channels of the sulfur family. The gases are
+#: stored as raw column burdens by :func:`chunk_reduction`; the conversion to
+#: sulfate (:func:`sulfur_carriers`) is applied in the ledger, so the
+#: reduction stays unit-neutral.
 _S_FAMILY_GASES = ("so2", "dms", "h2so4")
 _S_FAMILY_EMIS = ("so2", "dms", "so4")
+
+
+def sulfur_carriers(m_sulfate: float) -> dict[str, float]:
+    """Kilograms of the run's sulfate per kilogram of each sulfur carrier.
+
+    One sulfur atom per molecule throughout, so each factor is a ratio of
+    molar masses, which lets the whole family be totalled in the unit the
+    sulfate burden and deposition ledgers are already in. The sulfate's molar
+    mass ``m_sulfate`` [kg/mol] is the population's, read from the output by
+    :func:`jam_burden_report.sulfate_molar_mass`: MAM4's ``so4`` tracer is
+    ammonium bisulfate (115 g/mol, so SO2 converts at 1.795) and M7's is SO4
+    (96.0631 g/mol, 1.499). The model converts with the population's value, so
+    a ledger built on the other one misstates every carrier by their 19.7 %
+    ratio and reads that as a leak or a source.
+    """
+    factors = {gas: m_sulfate / GAS_SPECIES[gas].molar_mass
+               for gas in _S_FAMILY_GASES}
+    factors["so4"] = 1.0
+    return factors
+
+
+def _record_sulfate_molar_mass(series) -> float | None:
+    """Return the one sulfate molar mass every chunk of the record carries.
+
+    ``None`` when any chunk could not be attributed to a population (a chunk
+    with no or mixed sulfate tracers) or when chunks disagree: a record
+    spanning two populations has no single sulfate unit to close the family
+    in.
+
+    A series cached (``--series-out``) before the reduction recorded the unit
+    has no ``so4_molar_mass`` at all. The tools that wrote those knew only
+    MAM4's species until M7's ``oc`` joined them, so such a record with a
+    sulfate burden but no ``burden_oc`` key is MAM4's and closes in MAM4's
+    sulfate, as it always did; one carrying ``burden_oc`` stays unscored.
+    """
+    m = series.get("so4_molar_mass")
+    if m is None:
+        if "burden_so4" in series and "burden_oc" not in series:
+            return MAM4_SPEC.species_props("so4").molar_mass
+        return None
+    m = np.asarray(m, dtype=float)
+    if m.size == 0 or not np.all(np.isfinite(m)) or np.ptp(m) != 0.0:
+        return None
+    return float(m[0])
+
+
+#: The population each anchor species belongs to (an index into
+#: ``_POPULATIONS``), or ``None`` for one both carry: a species is one
+#: population's when every mode it lists is that population's (MAM4's ``poa``
+#: and ``soa``, M7's ``oc``); ``so4``, ``bc``, ``du`` and ``ss`` are both's.
+_SPECIES_POPULATION = {
+    species: next((i for i, spec in enumerate(_POPULATIONS)
+                   if set(modes) <= set(spec.mode_shorts)), None)
+    for species, (modes, _range) in _SPECIES.items()}
+
+
+def other_population_species(series: dict) -> set[str]:
+    """Return the anchor species of a population the record does not carry.
+
+    Their absence is a different model, not a missing measurement, so it is
+    neither an unscored gate nor a NOTE: a MAM4 run has no ``oc`` and an M7
+    run no ``poa``/``soa``. Read from which population's own species the
+    record has burdens of; empty when it has none (nothing to tell the two
+    apart by, so every absence is still reported).
+    """
+    carried = {pop for species, pop in _SPECIES_POPULATION.items()
+               if pop is not None and f"burden_{species}" in series}
+    if not carried:
+        return set()
+    return {species for species, pop in _SPECIES_POPULATION.items()
+            if pop is not None and pop not in carried}
 
 #: Dynamics-conservation gate. ``budget_dyn_<sp>`` (#713) is the mass the
 #: transport created or destroyed per step, so ``|dyn|*dt/mass`` is the
@@ -162,28 +276,34 @@ MIN_DUST_WINDOW_DAYS = 300.0
 EARTH_AREA_M2 = 4.0 * np.pi * 6.371e6 ** 2
 
 #: Release band on the annual D < 10 µm dust emission [Tg/yr] — the size range
-#: jcm actually emits (coarser mass is discarded and published separately as
-#: ``dust_supercoarse_flux``). The parent model converted to this window is
+#: jcm's MAM4 population emits (coarser mass is discarded and published
+#: separately as ``dust_supercoarse_flux``); for the M7 population the same
+#: statistic is HAM's own window, whose references are HAM2.3's budgets
+#: directly (see ``docs/source/science/aerosol.md``). The parent model converted to this window is
 #: the lower anchor: ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day (Krätschmer
 #: et al. 2022), which is the mass reaching M7 — tracers 1-4 of ``mo_ham_dust``,
 #: everything below 15.887 µm — and 47.4 % of that window is the 10-15.887 µm
 #: slice this port does not carry, so the comparable budget is 642 Tg/yr
 #: present-day and 485 pre-industrial. The shipped dust threshold scale is
-#: fitted to the observed dust AOD rather than to that budget (JAM aerosol
-#: retune, ``docs/source/design/jam_aerosol_retune.md``) and a T63 year emits
-#: 2351 Tg/yr, above the AeroCom phase-I median of 1640 (Textor et al. 2006;
-#: Huneeus et al. 2011 give 1123 for their 15 models, at different size
-#: cut-offs). The band spans the converted budget and that year; its upper edge
-#: is 1.11 times the calibrated year, against a run-to-run spread of about 6 %
-#: (two free-running members that differ only in start date), so the calibrated
-#: configuration passes with a margin of under two spreads. The band is a check
-#: on vanishing and runaway dust, not a tuning target. The derivation and the
+#: fitted to the observed dust AOD and the AeroCom burden rather than to that
+#: budget (``docs/source/design/jam_aerosol_retune.md``, "The v3.1 refit"), and
+#: the T63 L47 year emits 1630 Tg/yr, at the AeroCom phase-I median of 1640
+#: (Textor et al. 2006; Huneeus et al. 2011 give 1123 for their 15 models, at
+#: different size cut-offs). The band spans the converted budget and the
+#: calibrated years, with its upper edge 1.6 times the T63 L47 one against a
+#: run-to-run spread of about 6 % (two free-running members that differ only
+#: in start date). The band is a check on vanishing and runaway dust, not a
+#: tuning target. The derivation and the
 #: literature it is read against are in ``docs/source/science/aerosol.md``.
 #: It is the check that dust has neither vanished (HAM's untuned threshold
 #: gives jcm 5.7 Tg/yr, #808) nor run away (the same model's LGM run emits
-#: 5159 Tg/yr in HAM's size window, about 2700 in this one). Under the
-#: documented ``health.py --last-n 40`` recipe the record is 200 days, shorter
-#: than ``MIN_DUST_WINDOW_DAYS``, so the gate is unscored there (#1010).
+#: 5159 Tg/yr in HAM's size window, about 2700 in this one). The documented
+#: ``health.py --last-n 40`` recipe's 200-day window is shorter than
+#: ``MIN_DUST_WINDOW_DAYS``, but the statistic is scored anyway: it is built
+#: from the WHOLE run directory's trailing year, not from the ``--last-n``
+#: slice (:func:`annual_window_bounds`, #1010) — the band is drawn on a full
+#: T63 year, including its first months, so the cold-start ramp is part of
+#: the year the band was calibrated on rather than a transient to discard.
 DUST_EMISSION_TG_PER_YR = (400.0, 2600.0)
 
 #: T63's Gaussian latitude count. The dust band is a T63 calibration (#810:
@@ -211,7 +331,15 @@ _GATED_PREFIXES = ("dlnB_dt_", "budget_residual", "dyn_frac_per_step_",
 #: Bookkeeping entries of the statistic set that describe the record rather than
 #: measure the model (matched by prefix): a run scored over a different window
 #: than its reference, or by a different fit, is not a regression.
-_RECORD_METADATA = ("record_days", "drift_harmonic_")
+#: ``dust_window_days`` names the annual window ``dust_emission_tg_per_yr``
+#: (itself already exempt, via ``_GATED_PREFIXES``) was scored on (#1010).
+#: ``raw_dlnB_dt_``/``box_dlnB_dt_`` (#1081) are the UNCORRECTED slope and the
+#: box model's own fit artefact that ``dlnB_dt_<sp>_per_day`` (already exempt,
+#: above) is built from for POA/BC -- companions of an already-exempt gate,
+#: not an independent measurement of anything, so scoring them against a
+#: reference would be scoring the same slope twice under two different names.
+_RECORD_METADATA = ("record_days", "drift_harmonic_", "dust_window_days",
+                    "raw_dlnB_dt_", "box_dlnB_dt_")
 
 #: Absolute tolerance floors [statistic units], so a reference that is legibly
 #: zero (an unused species' burden) does not collapse the tolerance to zero and
@@ -474,7 +602,13 @@ def chunk_reduction(ds: xr.Dataset) -> dict[str, float]:
         out["so4_above_500hPa"] = float(global_mean(col_aloft, weights))
 
     # Sulfur-family gas burdens [mg/m2] as carried, for the closure test; the
-    # conversion to sulfate-aerosol mass belongs to the ledger.
+    # conversion to sulfate-aerosol mass belongs to the ledger, which needs to
+    # know which sulfate the file's ``so4`` tracers carry (MAM4's ammonium
+    # bisulfate or M7's SO4). Recorded per chunk, like ``nlat``, so a record
+    # stitched from two populations is caught rather than averaged.
+    m_sulfate = sulfate_molar_mass(ds)
+    if m_sulfate is not None:
+        out["so4_molar_mass"] = m_sulfate
     for gas in _S_FAMILY_GASES:
         name = f"g_{gas}"
         if name in ds:
@@ -557,6 +691,152 @@ YEAR_DAYS = 365.0
 
 #: The fit window [days] for a record shorter than a year: its final six months.
 SHORT_RECORD_WINDOW_DAYS = 182.5
+
+
+# --- Annual window selection (#1010) ---------------------------------------
+#
+# The drift/ledger/mean statistics are scored on whatever window the caller
+# asked for (``--last-n``, or the whole record without it). The annual-budget
+# statistics (``dust_emission_tg_per_yr``; see ``MIN_DUST_WINDOW_DAYS``) are
+# drawn on a full T63 year and must be scored on the record's actual year
+# regardless of that request — the functions below resolve the two windows
+# from one record (:func:`annual_window_bounds`) and read or slice both from
+# it in one pass (:func:`collect_windows`, :func:`slice_windows`), so
+# ``main`` (here and in ``health.py``) reads the chunk files it needs once.
+
+
+def annual_window_bounds(days: np.ndarray,
+                         window_start: float | None = None
+                         ) -> tuple[int, float | None]:
+    """First index, and that index's ``window_start``, of the annual window.
+
+    The annual window is the trailing slice of ``days`` covering at least
+    :data:`YEAR_DAYS`, or the whole record when it covers less — a record
+    shorter than a year stays whole (and may still fail
+    ``MIN_DUST_WINDOW_DAYS`` downstream; that is a genuinely short run, not an
+    artefact of this selection) and a record longer than a year is trimmed to
+    its final one, so a multi-year run is not annualised over its entire
+    history.
+
+    The slice is whole CHUNKS: the smallest trailing run of them whose
+    combined duration (:func:`chunk_durations`) is at least ``YEAR_DAYS``,
+    never a fraction of one, because the statistics the window feeds are
+    chunk means. On a coarse cadence this can run a little past 365 days
+    (13 trailing 30-day chunks is 390), which is immaterial next to the
+    seasonal cycle the window exists to average over.
+
+    Returns ``(start_index, new_window_start)`` into ``days``, in the same
+    convention :func:`_window_starts` uses for a ``--last-n`` slice:
+    ``new_window_start`` is the label of the chunk immediately before the
+    slice, carried through unchanged (``None`` usually means "the run's own
+    start") when the slice is the whole record.
+    """
+    days = np.asarray(days, dtype=float)
+    durations = chunk_durations(days, window_start)
+    if float(np.sum(durations)) <= YEAR_DAYS + 1e-6:
+        return 0, window_start
+    cumulative = 0.0
+    start = days.size - 1
+    for start in range(days.size - 1, -1, -1):
+        cumulative += durations[start]
+        if cumulative >= YEAR_DAYS - 1e-6:
+            break
+    new_window_start = window_start if start == 0 else float(days[start - 1])
+    return start, new_window_start
+
+
+def _window_indices(days: np.ndarray, last_n: int | None,
+                    window_start: float | None = None
+                    ) -> tuple[int, float | None, int, float | None]:
+    """Start index (and its ``window_start``) of the request and annual windows.
+
+    Shared by :func:`collect_windows` (reading from chunk files) and
+    :func:`slice_windows` (re-slicing an already-loaded series): both windows
+    end at the record's last sample, so separating "which indices" from "how
+    to extract them" lets a file-backed and an in-memory record share one
+    definition. ``window_start`` is the label of the chunk before ``days[0]``
+    when ``days`` is itself already a slice of a longer record (as a loaded
+    ``--series-in`` may be) — the request/annual windows this returns are
+    slices of ``days``, so one that would need to reach past ``days[0]`` is
+    capped there; the ANNUAL window is then shorter than a year through no
+    fault of the run, only of a cache that was itself saved pre-sliced (see
+    :func:`slice_windows`).
+    """
+    annual_start, annual_window_start = annual_window_bounds(days, window_start)
+    n = days.size
+    if last_n and last_n < n:
+        req_start = n - last_n
+        req_window_start = float(days[req_start - 1])
+    else:
+        req_start = 0
+        req_window_start = window_start
+    return req_start, req_window_start, annual_start, annual_window_start
+
+
+def collect_windows(files: list,
+                    last_n: int | None) -> tuple[tuple, tuple]:
+    """Read the request (``--last-n``) and annual windows in ONE pass.
+
+    Returns ``(request, annual)``, each a ``(days, series, window_start)``
+    triple ready for :func:`summarize`/:func:`unscored_gates`. ``request`` is
+    exactly the pre-#1010 ``--last-n`` slice — what the drift/ledger/mean
+    statistics read; ``annual`` is :func:`annual_window_bounds`' trailing
+    slice — what the annual-budget statistics read regardless of ``--last-n``.
+
+    The two windows share their last chunk, so their union is one trailing
+    slice of ``files``, read with a single :func:`collect` call: reading the
+    whole record on every invocation would defeat ``--last-n`` on the common
+    case where the request already covers a year, so this reads only the
+    chunks the annual window needs beyond the request (zero of them, when the
+    request is already that long or longer).
+    """
+    all_days = np.array([chunk_day(f, i) for i, f in enumerate(files)],
+                        dtype=float)
+    req_start, req_window_start, annual_start, annual_window_start = \
+        _window_indices(all_days, last_n)
+    union_start = min(req_start, annual_start)
+    union_days, union_series = collect(files[union_start:])
+
+    def extract(start):
+        offset = start - union_start
+        return union_days[offset:], {k: v[offset:]
+                                     for k, v in union_series.items()}
+
+    req_days, req_series = extract(req_start)
+    annual_days, annual_series = extract(annual_start)
+    return ((req_days, req_series, req_window_start),
+            (annual_days, annual_series, annual_window_start))
+
+
+def slice_windows(days: np.ndarray, series: dict[str, np.ndarray],
+                  last_n: int | None, window_start: float | None = None
+                  ) -> tuple[tuple, tuple]:
+    """Split an already-loaded series into the same ``(request, annual)``
+    pair :func:`collect_windows` returns — the ``--series-in`` path.
+
+    The record is fully in memory, so both windows are produced by array
+    slicing alone — no second read. If ``days``/``series`` is ITSELF a slice
+    saved by an earlier ``--last-n ... --series-out`` run (see
+    ``TestSeriesRoundTrip.test_window_start_travels_with_a_sliced_series``,
+    which pins that ``--series-out`` keeps saving exactly the requested
+    slice, not the annual window, so this case is expected rather than a
+    bug), the annual window can only be as long as what was saved: a cache
+    sliced short of a year before saving has no more record to recover, and
+    the annual statistic reads UNSCORED exactly as it would from a run
+    directory with chunks genuinely missing. Save with ``--series-out`` and
+    no ``--last-n`` to keep the whole record available to every later
+    re-score.
+    """
+    req_start, req_window_start, annual_start, annual_window_start = \
+        _window_indices(days, last_n, window_start)
+
+    def extract(start):
+        return days[start:], {k: v[start:] for k, v in series.items()}
+
+    req_days, req_series = extract(req_start)
+    annual_days, annual_series = extract(annual_start)
+    return ((req_days, req_series, req_window_start),
+            (annual_days, annual_series, annual_window_start))
 
 
 def drift_window_days(days: np.ndarray,
@@ -672,6 +952,102 @@ def fit_log_drift(days: np.ndarray, values: np.ndarray,
     return float(np.polyfit(t, y, 1)[0]), False
 
 
+#: Substeps per output chunk, and periodic cycles to spin the box model up by,
+#: in :func:`box_model_drift`. 50 substeps resolves the exact-exponential step
+#: far finer than the forcing varies within one chunk; 20 annual cycles decays
+#: the arbitrary initial condition by ``exp(-20*cadence/tau)`` -- for a 5-day
+#: cadence and POA/BC's 4-7 day lifetime that is below 1e-5 of the signal, so
+#: the sampled solution is the periodic steady state to well past the
+#: precision this statistic is read to.
+_BOX_SUBSTEPS_PER_CHUNK = 50
+_BOX_SPINUP_CYCLES = 20
+
+
+def box_model_drift(days: np.ndarray, emission: np.ndarray, burden: np.ndarray,
+                    dry: np.ndarray, wet: np.ndarray,
+                    window_days: float = YEAR_DAYS) -> float:
+    """Return the ``d ln B/dt`` the gate's own fit reads off a box with NO real drift.
+
+    POA and BC are a lopsided seasonal pulse (biomass burning): a least-squares
+    fit over any *finite* window of a periodic signal is biased by the part of
+    the cycle it does not evenly sample, even the annual-harmonic fit
+    (:func:`fit_log_drift`'s own docstring: "over exactly one period a trend
+    and an arbitrary periodic function cannot be told apart"). This builds the
+    box ``dB/dt = E(t) - B/tau`` that is EXACTLY periodic by construction (its
+    steady-state solution, reached after :data:`_BOX_SPINUP_CYCLES` annual
+    cycles) and reads the SAME fit off it, so the returned number is that
+    fit's own artefact on this run's actual emission shape -- not a model of
+    what the run did, a model of what the GATE's STATISTIC does to a signal
+    that, by construction, has no drift at all.
+
+    ``emission`` drives the box with the run's own chunk-mean ``emi_<sp>``
+    series, repeated periodically (period :data:`YEAR_DAYS`) by reading it as
+    a function of day-of-year. ``tau`` -- the e-folding removal time -- is a
+    SINGLE CONSTANT, the record's own mean of the elementwise
+    ``burden / (dry + wet)``, not the run's time-varying lifetime. That choice
+    is deliberate: a box driven by the run's own tau(t) would absorb whatever
+    the sink actually did that year, including a genuine sink-strength trend,
+    and "correct" it away along with the artefact -- which is exactly the
+    failure mode a correction must not have. The constant-tau box isolates
+    only what the emission's periodic SHAPE does to the fit, independent of
+    any information about how the run's own sink evolved.
+
+    Validated against an independent reduction of 12 JAM T63 L47/L95 years on
+    disk (six stage-3 years, a cold/warm-start pair and two consecutive-year
+    pairs): this function reproduces the investigation's box-model slope to
+    machine precision on every one of them (year D POA: box -0.00145,
+    raw -0.00324, corrected -0.00179 -- see
+    ``docs/source/design/jam_regression.md``, "Which window, and the
+    box-model correction").
+    """
+    sink = np.asarray(dry, dtype=float) + np.asarray(wet, dtype=float)
+    emission = np.asarray(emission, dtype=float)
+    days = np.asarray(days, dtype=float)
+    # ``burden`` is the ``burden_<sp>`` series as reduced, in mg/m2 (see the
+    # ``* 1e6`` where the column integral is formed), while the ledgers are
+    # kg/m2/s, so the lifetime needs the same mg -> kg conversion the
+    # ``lifetime_<sp>_days`` statistic applies. Elementwise mean, not
+    # ratio-of-means: the statistic box_and_figs.py validated this against
+    # uses ``(B/sink).mean()``, and the two differ whenever burden and sink
+    # co-vary seasonally (which they do).
+    burden_kg = np.asarray(burden, dtype=float) * 1e-6
+    tau_seconds = float(np.mean(burden_kg / sink))
+    cadence = float(np.median(np.diff(days)))
+    # The fine grid is an integer number of substeps per chunk AND an integer
+    # number of chunks per year (the nearest whole count for a cadence that
+    # does not divide the year, e.g. 10 or 30 days), so pooling the fine
+    # solution back to chunk means below is always an exact reshape.
+    n_chunks = max(int(round(YEAR_DAYS / cadence)), 1)
+    n_per_chunk = _BOX_SUBSTEPS_PER_CHUNK
+    n_fine = n_chunks * n_per_chunk
+    fine_step = YEAR_DAYS / n_fine
+    fine = (np.arange(n_fine) + 0.5) * fine_step
+    # Chunks are labelled by their END day and hold an average over the
+    # cadence before it (see chunk_centres); read as a function of
+    # day-of-year via periodic interpolation so this works for any chunk
+    # offset, not only a record that starts exactly on day ``cadence``.
+    centres = days - 0.5 * cadence
+    e_fine = np.interp(fine, centres, emission, period=YEAR_DAYS)
+    equilibrium = e_fine * tau_seconds       # instantaneous eq. B = E*tau
+    decay = float(np.exp(-fine_step * 86400.0 / tau_seconds))
+    b = float(np.mean(emission)) * tau_seconds       # arbitrary starting B
+    out = np.empty(n_fine)
+    for _ in range(_BOX_SPINUP_CYCLES):
+        for i in range(n_fine):
+            # Exact exponential step for E, tau constant over one substep.
+            b = equilibrium[i] + (b - equilibrium[i]) * decay
+            out[i] = b
+    # One canonical year of chunk means (the fine steady solution pooled back
+    # to the native cadence), then read off at the record's ACTUAL chunk
+    # labels by day-of-year -- so a record that is not exactly one
+    # ``cadence``-aligned year still gets a box sample for every real sample.
+    canonical = out.reshape(n_chunks, n_per_chunk).mean(axis=1)
+    canonical_days = (np.arange(n_chunks) + 0.5) * (YEAR_DAYS / n_chunks)
+    box = np.interp(np.mod(centres, YEAR_DAYS), canonical_days, canonical,
+                    period=YEAR_DAYS)
+    return fit_log_drift(days, box, window_days)[0]
+
+
 def standard_error(values: np.ndarray) -> float:
     """Estimate the standard error of the mean of an autocorrelated series.
 
@@ -729,9 +1105,11 @@ def _budget_residual(days, series, species,
     chunk-mean burden at those same two endpoints. Every component must be
     present: a missing one returns ``None`` (reported unscored) rather than
     counting as zero. For sulfate the ledger is the
-    whole sulfur family in SO4-equivalent mass (SO2 and DMS emissions are the
-    real sulfate source; ``emi_so4`` alone is a few per cent of it), and the
-    stored mass includes the gas-phase reservoirs.
+    whole sulfur family in the run's own sulfate mass (SO2 and DMS emissions
+    are the real sulfate source; ``emi_so4`` alone is a few per cent of it),
+    the stored mass includes the gas-phase reservoirs, and the sulfate is the
+    one the reduction identified (``so4_molar_mass``): a record without it,
+    or spanning two populations, is unscored.
     """
     span = float(days[-1] - days[0])
     if span <= 0 or days.size < 2:
@@ -759,12 +1137,17 @@ def _budget_residual(days, series, species,
     # it, which is a false pass or a false failure rather than the "unscored"
     # the caller would get from None.
     if species == "so4":
-        # Every carrier converted to sulfate-AEROSOL mass, the unit the
-        # burden and the deposition ledger are already in.
+        # Every carrier converted to the run's own sulfate mass, the unit the
+        # burden and the deposition ledger are already in. Without a known
+        # sulfate there is no unit to convert to: unscored, not guessed.
+        m_sulfate = _record_sulfate_molar_mass(series)
+        if m_sulfate is None:
+            return None
+        carriers = sulfur_carriers(m_sulfate)
         contributions = [integral(f"emi_{c}") for c in _S_FAMILY_EMIS]
         if any(e is None for e in contributions):
             return None
-        emitted = sum(e * _SULFUR_CARRIERS[c]
+        emitted = sum(e * carriers[c]
                       for e, c in zip(contributions, _S_FAMILY_EMIS))
         stored = series.get("burden_so4")
         if stored is None:
@@ -773,7 +1156,7 @@ def _budget_residual(days, series, species,
             reservoir = series.get(f"gas_{gas}")
             if reservoir is None:
                 return None     # a gas reservoir omitted, not empty
-            stored = stored + reservoir * _SULFUR_CARRIERS[gas]
+            stored = stored + reservoir * carriers[gas]
     else:
         emitted = integral(f"emi_{species}")
         stored = series.get(f"burden_{species}")
@@ -797,16 +1180,78 @@ def _budget_residual(days, series, species,
     return residual if np.isfinite(residual) else None
 
 
+def _box_slope(days: np.ndarray, series: dict[str, np.ndarray], species: str,
+               burden: np.ndarray, window_days: float) -> float | None:
+    """:func:`box_model_drift` for ``species``, or ``None`` if it cannot be built.
+
+    Needs the emission and both deposition ledgers, every sample finite (a
+    ledger that is present but holed is not usable, the same bar
+    :func:`_budget_residual` and the ``lifetime_*`` statistic hold the removal
+    series to) and a positive sink (an undefined lifetime). Any of those
+    missing falls back to the UNCORRECTED slope in :func:`summarize` --
+    exactly today's behaviour -- rather than a fabricated correction.
+    """
+    emission = series.get(f"emi_{species}")
+    dry = series.get(f"dry_{species}")
+    wet = series.get(f"wet_{species}")
+    if emission is None or dry is None or wet is None:
+        return None
+    if not (np.all(np.isfinite(emission)) and np.all(np.isfinite(dry))
+            and np.all(np.isfinite(wet)) and np.all(np.isfinite(burden))):
+        return None
+    if np.any((dry + wet) <= 0):
+        return None
+    # The box describes the SAME window the gate fits: for a record longer
+    # than ``window_days`` (two-year directories are supported) only the
+    # final window drives the box and sets its lifetime. Folding every year
+    # onto one day-of-year axis would blend years with different emissions
+    # and make the subtracted slope describe neither the fitted year nor a
+    # deliberate average.
+    # Strictly inside the window: the chunk labelled exactly one window
+    # before the last one is the previous year's final sample, and read by
+    # day-of-year it would sit on top of the last chunk's own centre.
+    days = np.asarray(days, dtype=float)
+    sel = days > (days[-1] - window_days)
+    days, emission, burden = days[sel], np.asarray(emission)[sel], np.asarray(burden)[sel]
+    dry, wet = np.asarray(dry)[sel], np.asarray(wet)[sel]
+    # No emission at all (a run with the prescribed anthropogenic sources
+    # switched off still carries a residual burden) drives a zero box whose
+    # fit is undefined; that is "no correction available", not a failure.
+    if not np.any(emission > 0):
+        return None
+    slope = box_model_drift(days, emission, burden, dry, wet, window_days)
+    return slope if np.isfinite(slope) else None
+
+
 def summarize(days: np.ndarray, series: dict[str, np.ndarray],
               timestep_seconds: float | None = None,
-              window_start: float | None = None) -> dict[str, float]:
+              window_start: float | None = None,
+              annual_days: np.ndarray | None = None,
+              annual_series: dict[str, np.ndarray] | None = None,
+              annual_window_start: float | None = None) -> dict[str, float]:
     """Build the statistic set from the series returned by :func:`collect`.
 
     Every entry is a single number a gate or a stored reference can be
     compared against; the rationale for each is in the design doc.
     ``window_start`` is the label of the chunk preceding ``days[0]`` when the
     record is a slice of a longer run (see :func:`chunk_centres`).
+
+    ``annual_days``/``annual_series``/``annual_window_start`` are the record
+    the annual-budget statistics (``dust_emission_tg_per_yr``) are scored on
+    — the whole run directory's trailing year (:func:`annual_window_bounds`),
+    independent of whatever ``days``/``series``/``window_start`` were sliced
+    to by ``--last-n`` (#1010: the band is drawn on a full year, and scoring
+    it on a ``--last-n`` short of one measures the season, which is exactly
+    what left it UNSCORED on every documented recipe). They default to
+    ``days``/``series``/``window_start`` when omitted (keyed on
+    ``annual_series is None``, since ``annual_days`` alone says nothing), so
+    a direct call — as every existing test, and the reference path in
+    :func:`compare_to_reference`, make — scores the annual statistics on
+    whatever record it was given, unchanged.
     """
+    if annual_series is None:
+        annual_days, annual_series, annual_window_start = (
+            days, series, window_start)
     stats: dict[str, float] = {}
     span_days = float(days[-1] - days[0]) if days.size > 1 else 0.0
     fit_window = drift_window_days(days, window_start)
@@ -823,7 +1268,20 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
         # gate FAIL for something never measured is worse than no number.
         drift, harmonic = fit_log_drift(days, b, fit_window)
         if np.isfinite(drift) and span_days >= MIN_WINDOW_DAYS:
-            stats[f"dlnB_dt_{species}_per_day"] = drift
+            gated = drift
+            # The box-model correction (#1081) only ever applies to the
+            # whole-year harmonic fit: that is the only fit a periodic box can
+            # be validated against (the box needs a full annual emission
+            # cycle to build, which a straight-line fit's shorter window does
+            # not have), and it is the only one the maintainer asked
+            # corrected, for POA and BC alone (BOX_CORRECTED_SPECIES).
+            if species in BOX_CORRECTED_SPECIES and harmonic:
+                box = _box_slope(days, series, species, b, fit_window)
+                if box is not None:
+                    stats[f"raw_dlnB_dt_{species}_per_day"] = drift
+                    stats[f"box_dlnB_dt_{species}_per_day"] = box
+                    gated = drift - box
+            stats[f"dlnB_dt_{species}_per_day"] = gated
             # Which fit produced this slope, because the gate's limit depends
             # on it and the slope alone cannot say. Per species: whether a
             # year-long window held enough finite samples for the harmonic is
@@ -866,12 +1324,17 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     if residuals:
         stats["budget_residual_max"] = max(residuals.values(), key=abs)
 
-    # Annual D < 10 µm dust emission [Tg/yr]. ``emi_du`` is a global-MEAN
-    # flux, so the total is that times the Earth's area; the mass above
-    # 10 µm never enters a tracer and is not in this number. Emitted only for
-    # a window long enough to mean the year rather than a season, and only on
-    # the grid the band was calibrated for — an unscored statistic is dropped
-    # here and explained in :func:`unscored_gates`, exactly like the drifts.
+    # Annual dust emission [Tg/yr] in the population's own size window: D < 10
+    # µm for MAM4, M7's AI and CI modes (to ``dust.py``'s ``M7_CI_UM`` edge,
+    # HAM's own window) for M7. ``emi_du`` is a global-MEAN flux, so the total
+    # is that times the Earth's area; mass above the window never enters a
+    # tracer and is not in this number. Read from
+    # ``annual_series``/``annual_days`` — the whole run directory's trailing
+    # year, regardless of what ``--last-n`` sliced ``days``/``series`` to
+    # (#1010) — and emitted only for a window long enough to mean the year
+    # rather than a season, and only on the grid the band was calibrated for;
+    # an unscored statistic is dropped here and explained in
+    # :func:`unscored_gates`, exactly like the drifts.
     # Every chunk must contribute: ``nanmean`` over a series with a missing
     # chunk would annualise the chunks that happen to be present, so a year
     # whose emission diagnostic vanished half-way — a mixed-version rerun, a
@@ -880,14 +1343,24 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     # year written as twelve 30-day chunks and a final 5-day one would
     # otherwise give those five days a month's weight, and dust is seasonal
     # enough for that to move the annual total across the band.
-    if ("emi_du" in series
-            and covered_days(days, window_start) >= MIN_DUST_WINDOW_DAYS
-            and _is_t63(series) and np.all(np.isfinite(series["emi_du"]))
-            and _uneven_window_reason(days, window_start) is None):
+    if ("emi_du" in annual_series
+            and covered_days(annual_days, annual_window_start)
+            >= MIN_DUST_WINDOW_DAYS
+            and _is_t63(annual_series)
+            and np.all(np.isfinite(annual_series["emi_du"]))
+            and _uneven_window_reason(annual_days, annual_window_start)
+            is None):
         stats["dust_emission_tg_per_yr"] = (
-            float(np.average(series["emi_du"],
-                             weights=chunk_durations(days, window_start)))
+            float(np.average(annual_series["emi_du"],
+                             weights=chunk_durations(annual_days,
+                                                     annual_window_start)))
             * EARTH_AREA_M2 * 86400.0 * 365.0 / 1e9)
+        # The window actually scored, in days, so a reader of the printed
+        # table or health.json can tell this annual budget's window apart
+        # from ``record_days`` (the drift/ledger window, which may be the
+        # much shorter ``--last-n`` slice) rather than assuming they match.
+        stats["dust_window_days"] = covered_days(annual_days,
+                                                 annual_window_start)
 
     if "so4_above_500hPa" in series and "burden_so4" in series:
         aloft = float(np.nanmean(series["so4_above_500hPa"]))
@@ -930,6 +1403,21 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     return stats
 
 
+def _hydra_config(run_dir: str) -> dict | None:
+    """Load ``<run_dir>/.hydra/config.yaml``; ``None`` when it is absent.
+
+    Shared by :func:`timestep_seconds` and :func:`warm_start_kind`: both read
+    provenance Hydra itself saved beside the run's output, and both treat its
+    absence (a hand-assembled directory, or output copied without it) the
+    same way — "unknown", never a guess.
+    """
+    cfg = Path(run_dir) / ".hydra" / "config.yaml"
+    if not cfg.is_file():
+        return None
+    import yaml
+    return yaml.safe_load(cfg.read_text()) or {}
+
+
 def timestep_seconds(run_dir: str) -> float | None:
     """Read the run.s timestep [s] from the Hydra config saved beside it.
 
@@ -937,13 +1425,61 @@ def timestep_seconds(run_dir: str) -> float | None:
     (a hand-assembled directory, or output copied without it), which makes the
     dynamics-conservation gate unscored rather than wrong.
     """
-    cfg = Path(run_dir) / ".hydra" / "config.yaml"
-    if not cfg.is_file():
+    loaded = _hydra_config(run_dir)
+    if loaded is None:
         return None
-    import yaml
-    loaded = yaml.safe_load(cfg.read_text()) or {}
     minutes = (loaded.get("run") or {}).get("time_step")
     return float(minutes) * 60.0 if minutes else None
+
+
+def warm_start_kind(run_dir: str) -> bool | None:
+    """Was ``run_dir`` launched with ``init=from_state`` (a warm start)?
+
+    Read from the ``init.kind`` Hydra records in ``.hydra/config.yaml``
+    (``jcm/config/init/from_state.yaml`` sets ``kind: from_state``; every
+    other ``init/*.yaml`` names its own cold-start kind). A "second year" in
+    this codebase is produced exactly this way — a fresh run warm-started from
+    the first year's end state (``docs/source/design/jam_regression.md``,
+    "The spun-up state") — so this one check answers both "warm-started" and
+    "second year" questions at once; there is no separate provenance marker
+    for the latter.
+
+    Returns ``None`` when the run directory carries no ``.hydra/config.yaml``
+    to read (predates it, or was hand-assembled/copied without it): the
+    caller then has only an explicit ``--warm-start`` to go on, exactly as
+    :func:`timestep_seconds` falls back to ``--timestep-minutes``.
+    """
+    loaded = _hydra_config(run_dir)
+    if loaded is None:
+        return None
+    return (loaded.get("init") or {}).get("kind") == "from_state"
+
+
+def resolve_warm_start(flag: str, run_dir: str | None) -> tuple[bool, str]:
+    """Decide warm-start status from an explicit flag, or else provenance.
+
+    ``flag`` is one of ``"yes"``, ``"no"`` or ``"auto"`` (a CLI
+    ``--warm-start`` argument's value). ``"auto"`` defers to
+    :func:`warm_start_kind`, which needs ``run_dir``; when that is ``None`` or
+    the directory carries no provenance to detect from, the record defaults
+    to cold-start — the one choice that reproduces every existing run's
+    current behaviour unchanged, so adding this detection is never a silent
+    behaviour change for output it cannot read. Returns ``(warm, reason)``:
+    ``reason`` is printed so a report says *why* a run was scored the way it
+    was, not just that it was.
+    """
+    if flag == "yes":
+        return True, "--warm-start yes"
+    if flag == "no":
+        return False, "--warm-start no"
+    detected = warm_start_kind(run_dir) if run_dir else None
+    if detected is None:
+        return False, ("no .hydra/config.yaml to detect a warm start from "
+                       "(scored as cold-start; pass --warm-start yes to "
+                       "override)")
+    if detected:
+        return True, "init.kind=from_state in .hydra/config.yaml"
+    return False, "init.kind != from_state in .hydra/config.yaml"
 
 
 def compare_to_reference(stats: dict[str, float],
@@ -991,7 +1527,10 @@ def compare_to_reference(stats: dict[str, float],
 
 def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
                    timestep_seconds: float | None = None,
-                   window_start: float | None = None
+                   window_start: float | None = None,
+                   annual_days: np.ndarray | None = None,
+                   annual_series: dict[str, np.ndarray] | None = None,
+                   annual_window_start: float | None = None
                    ) -> list[tuple[str, str]]:
     """Gates that could NOT be evaluated, each with the reason.
 
@@ -999,17 +1538,28 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
     was never run. Reporting the absence is what stops a run with no dynamics
     gauge, or a window too short to fit a slope, from reading as clean.
     Returns ``(gate_name, reason)`` pairs for the caller to print.
+
+    ``annual_days``/``annual_series``/``annual_window_start`` name the record
+    the ``dust_emission_tg_per_yr`` reasons below are checked against — see
+    :func:`summarize` for why it differs from ``days``/``series``/
+    ``window_start`` (#1010); they default the same way.
     """
+    if annual_series is None:
+        annual_days, annual_series, annual_window_start = (
+            days, series, window_start)
     span = float(days[-1] - days[0]) if days.size > 1 else 0.0
     short_slope = (f"window spans {span:.0f} days; a slope needs "
                    f"{MIN_WINDOW_DAYS:.0f} to rise above its own fit noise")
     short_budget = (f"window spans {span:.0f} days; the storage endpoints "
                     f"swamp the flux integral below {MIN_WINDOW_DAYS:.0f}")
     rows: list[tuple[str, str]] = []
+    other = other_population_species(series)
 
     for species in _SPECIES:
         b = series.get(f"burden_{species}")
         if b is None:
+            if species in other:
+                continue        # the other population's species, not a gap
             # No tracers for it at all. Reported here so the standalone
             # scorer says what health.py says.
             rows.append((f"burden_{species}_mg_m2",
@@ -1027,30 +1577,34 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
 
     # The dust budget: say which of the three preconditions is missing, so a
     # silently unscored release blocker (#808) cannot look like a pass.
-    if "emi_du" not in series:
+    # Checked against the ANNUAL window (the whole run directory's trailing
+    # year), not the ``--last-n`` slice ``days``/``series`` may be (#1010) —
+    # see :func:`summarize`.
+    if "emi_du" not in annual_series:
         rows.append(("dust_emission_tg_per_yr",
                      "the run publishes no emi_du flux, so no dust was "
                      "emitted or the emission diagnostic is absent"))
-    elif not _is_t63(series):
+    elif not _is_t63(annual_series):
         rows.append(("dust_emission_tg_per_yr",
                      "the band is a T63 calibration (#808/#810) and this "
                      "output is on another grid, where nduscale_reg keeps "
                      "HAM's untuned value"))
-    elif covered_days(days, window_start) < MIN_DUST_WINDOW_DAYS:
+    elif covered_days(annual_days, annual_window_start) < MIN_DUST_WINDOW_DAYS:
         rows.append(("dust_emission_tg_per_yr",
-                     f"window spans {covered_days(days, window_start):.0f} "
+                     "the run directory spans "
+                     f"{covered_days(annual_days, annual_window_start):.0f} "
                      "days; dust emission is "
                      f"seasonal, so annualising below {MIN_DUST_WINDOW_DAYS:.0f} "
                      "days measures the season, not the year"))
-    elif not np.all(np.isfinite(series["emi_du"])):
-        missing = int(np.sum(~np.isfinite(np.asarray(series["emi_du"]))))
+    elif not np.all(np.isfinite(annual_series["emi_du"])):
+        missing = int(np.sum(~np.isfinite(np.asarray(annual_series["emi_du"]))))
         rows.append(("dust_emission_tg_per_yr",
-                     f"{missing} of {len(series['emi_du'])} chunks carry no "
-                     "finite emi_du, and an annual budget averaged over the "
-                     "rest would not be this run's year"))
-    elif _uneven_window_reason(days, window_start) is not None:
+                     f"{missing} of {len(annual_series['emi_du'])} chunks "
+                     "carry no finite emi_du, and an annual budget averaged "
+                     "over the rest would not be this run's year"))
+    elif _uneven_window_reason(annual_days, annual_window_start) is not None:
         rows.append(("dust_emission_tg_per_yr",
-                     _uneven_window_reason(days, window_start)))
+                     _uneven_window_reason(annual_days, annual_window_start)))
 
     if span < MIN_WINDOW_DAYS:
         rows.append(("budget_residual_max", short_budget))
@@ -1064,10 +1618,20 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
             if f"burden_{species}" not in series:
                 continue        # the run does not carry it; nothing to close
             if _budget_residual(days, series, species, window_start) is None:
-                rows.append((
-                    f"budget_residual_{species}",
-                    "the mass ledger is incomplete — a missing emi_*/dry_*/"
-                    "wet_* diagnostic, or a non-finite burden endpoint"))
+                if (species == "so4"
+                        and _record_sulfate_molar_mass(series) is None):
+                    reason = (
+                        "the sulfate the so4 tracers carry is not identified "
+                        "(a series saved before the reduction recorded "
+                        "so4_molar_mass, or chunks with no, mixed or "
+                        "different populations' sulfate tracers), so the "
+                        "sulfur family has no unit to close in; re-read the "
+                        "run directory")
+                else:
+                    reason = ("the mass ledger is incomplete — a missing "
+                              "emi_*/dry_*/wet_* diagnostic, or a non-finite "
+                              "burden endpoint")
+                rows.append((f"budget_residual_{species}", reason))
             else:
                 closed.append(species)
         if not closed:
@@ -1256,9 +1820,25 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("run_dir", nargs="?", default=None)
     ap.add_argument("--last-n", type=positive_int, default=None,
-                    help="use only the last N chunks (default: all)")
+                    help="use only the last N chunks for the drift/ledger/"
+                         "mean statistics (default: all); the annual-budget "
+                         "statistics (dust_emission_tg_per_yr) still read "
+                         "the whole run directory's trailing year, #1010")
+    ap.add_argument("--warm-start", choices=("auto", "yes", "no"),
+                    default="auto",
+                    help="is this record warm-started or a second year (no "
+                         "cold-start spin-up ramp)? When yes, the REQUEST "
+                         "window (the drift/ledger/mean statistics) is "
+                         "scored over the WHOLE record -- --last-n is "
+                         "ignored for it -- and POA/BC get the #1081 "
+                         "box-model correction. 'auto' (default) detects "
+                         "init.kind=from_state from the run's "
+                         ".hydra/config.yaml and falls back to cold-start "
+                         "when that is absent, e.g. under --series-in")
     ap.add_argument("--series-out", default=None,
-                    help="save the per-chunk reductions to this .npz")
+                    help="save the per-chunk reductions to this .npz "
+                         "(exactly the --last-n window, if given: omit "
+                         "--last-n here to keep the whole record cached)")
     ap.add_argument("--series-in", default=None,
                     help="re-score a saved .npz instead of reading the run "
                          "(reducing a year of JAM output takes ~40 min)")
@@ -1271,19 +1851,38 @@ def main() -> int:
                          "with --series-out)")
     args = ap.parse_args()
 
+    # A warm-started or second year (#1081) is scored, on the REQUEST window,
+    # over its whole record rather than an operator's ``--last-n`` -- that
+    # window exists to skip a cold-start's spin-up ramp, which a warm start
+    # never has. Resolved ONCE, before either branch below builds the
+    # request/annual windows, so both read the same decision and the printed
+    # NOTE always reflects what actually happened. The ANNUAL window (#1010,
+    # dust_emission_tg_per_yr) is unaffected either way -- it already ignores
+    # --last-n unconditionally.
+    warm, warm_reason = resolve_warm_start(args.warm_start, args.run_dir)
+    last_n = None if warm else args.last_n
+    if warm and args.last_n:
+        print(f"NOTE  --last-n {args.last_n} ignored for the request window "
+              f"(drift/ledger/mean statistics): {warm_reason} -- scored "
+              "over the whole record (docs/source/design/jam_regression.md, "
+              "\"Which window, and the box-model correction\")")
+
     dt = None
-    # The label of the chunk before ``days[0]``: None for a record that starts
-    # at the run start, the preceding chunk's day for a ``--last-n`` slice.
-    # ``chunk_centres`` needs it to place the first window (see there).
-    window_start = None
+    # (days, series, window_start) for the request (--last-n, or the whole
+    # record without it — unchanged from before #1010) and the annual window
+    # (the whole run directory's trailing year, which the annual-budget
+    # statistics read regardless of --last-n: see collect_windows/
+    # slice_windows and the summarize()/unscored_gates() docstrings).
     if args.series_in:
         loaded = np.load(args.series_in)
-        days = loaded["_days"]
+        full_days = loaded["_days"]
         # Underscore keys are the reduction's own metadata, not statistics.
-        series = {k: loaded[k] for k in loaded.files if not k.startswith("_")}
+        full_series = {k: loaded[k] for k in loaded.files
+                       if not k.startswith("_")}
+        full_window_start = None
         if "_window_start" in loaded.files:
             stored = float(loaded["_window_start"])
-            window_start = stored if np.isfinite(stored) else None
+            full_window_start = stored if np.isfinite(stored) else None
         # The timestep travels WITH the reduction: re-scoring a saved series
         # has no run directory to read it from, and without it every
         # dynamics-conservation gate would silently drop out of a re-score
@@ -1291,37 +1890,36 @@ def main() -> int:
         if "_timestep_seconds" in loaded.files:
             stored = float(loaded["_timestep_seconds"])
             dt = stored if np.isfinite(stored) and stored > 0 else None
-        if args.last_n:
-            # Applied here too: silently ignoring it would score a different
-            # window than the one asked for. The chunk before the slice is the
-            # retained window's start.
-            if args.last_n < days.size:
-                window_start = float(days[-args.last_n - 1])
-            days = days[-args.last_n:]
-            series = {k: v[-args.last_n:] for k, v in series.items()}
+        request, annual = slice_windows(full_days, full_series, last_n,
+                                        full_window_start)
     else:
         files = run_files(args.run_dir)
         if not files:
             print(f"FAIL  no chunk files in {args.run_dir}")
             return 1
-        if args.last_n:
-            if args.last_n < len(files):
-                window_start = chunk_day(files[-args.last_n - 1])
-            files = files[-args.last_n:]
-        days, series = collect(files)
+        request, annual = collect_windows(files, last_n)
         dt = timestep_seconds(args.run_dir)
+    days, series, window_start = request
+    annual_days, annual_series, annual_window_start = annual
     if args.timestep_minutes:
         dt = args.timestep_minutes * 60.0
     if args.series_out:
+        # Exactly the REQUEST window, not the annual one: a reader who sliced
+        # with --last-n before saving asked for that slice to be what the
+        # cache holds (test_window_start_travels_with_a_sliced_series pins
+        # this). Save without --last-n to keep the whole record available to
+        # every later re-score's annual window too.
         np.savez(args.series_out, _days=days,
                  _timestep_seconds=np.array(dt if dt else np.nan),
                  _window_start=np.array(np.nan if window_start is None
                                         else window_start),
                  **series)
-    stats = summarize(days, series, dt, window_start)
+    stats = summarize(days, series, dt, window_start,
+                      annual_days, annual_series, annual_window_start)
     gates = anchor_gates(stats) + physics_gates(stats)
     print(format_table(stats, gates))
-    unscored = unscored_gates(days, series, dt, window_start)
+    unscored = unscored_gates(days, series, dt, window_start,
+                              annual_days, annual_series, annual_window_start)
     for name, reason in unscored:
         print(f"UNSCORED  {name}: {reason}")
     # An individual UNSCORED gate is deliberately NOT a failure: the commonest

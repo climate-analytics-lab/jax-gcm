@@ -100,7 +100,8 @@ LAYOUT_AGNOSTIC = frozenset({
 #: no generic environment supplies: SSO fields (``LottMillerSso`` — the
 #: harness runs aquaplanet terrain), a frontogenesis field
 #: (``FrontalGravityWaveDrag``), populated aerosol tracers
-#: (``Mam4JaxMicrophysics``, ``IceNucleation``), a dycore omega provider
+#: (``Mam4JaxMicrophysics``, ``M7JaxMicrophysics``, ``IceNucleation``), a
+#: dycore omega provider
 #: (``OmegaDiagnostic``), or are no-ops by design
 #: (``PlaceholderMicrophysics``).
 #:
@@ -120,6 +121,13 @@ INERT_IN_HARNESS = frozenset({
     "FrontalGravityWaveDrag",
     "IceNucleation",
     "LottMillerSso",
+    "M7JaxMicrophysics",
+    # Broadcasting-native, but it passes the ``aerosol`` slot through until
+    # the forcing carries ``natural_aerosol`` (the MACv2 bundle), which no
+    # generic environment supplies. Its own test drives both hosts on a
+    # synthetic climatology (``macv2_natural_test.py``,
+    # ``test_grid_and_column_hosts_agree_per_column``).
+    "Macv2NaturalAerosol",
     "Mam4JaxMicrophysics",
     "OmegaDiagnostic",
     "PlaceholderMicrophysics",
@@ -149,6 +157,12 @@ NOT_AUDITED = frozenset({
     "DmsEmissions", "DustEmissions", "Echam1MMicrophysics",
     "EchamBoundaryConditions", "EchamSurface", "EchamSurfaceExchange",
     "GreyTwoStreamRadiation",
+    # Column-only: it unpacks ``nlev, ncols`` and reshapes its carry to
+    # ``(ncols,)``; it also needs the SLIM properties on the forcing.
+    "SlimLand",
+    # The HAM siblings of ArgActivation/JamOpticsTerm (#1017) need the same
+    # rich upstream ``_jam_state`` carry.
+    "HamActivation", "HamLutOpticsTerm",
     "HeldSuarez", "HinesGwd", "JamOpticsTerm", "Lohmann2MMicrophysics",
     "Macv2SpAerosol", "ModalMicrophysicsTerm", "NNEmulatorRadiation",
     "PreSpeciatedEmissions", "PrescribedOxidants",
@@ -162,6 +176,9 @@ NOT_AUDITED = frozenset({
     "_ClearSky",
     "SundqvistCloudFraction", "TiedtkeConvection", "TracerVerticalDiffusion",
     "TteTkeVerticalDiffusion", "UpperTemperatureRelaxation", "WetScavenging",
+    # Needs ``forcing.volcanic_emissions`` and ``forcing.solar``; its own
+    # test checks the nodal and column layouts agree.
+    "VolcanicEmissions",
 })
 
 
@@ -436,9 +453,9 @@ class LayoutAgnosticTermsTest(unittest.TestCase):
             "(then this audit checks them), else to NOT_AUDITED.",
         )
 
-    # Needs every jcm module importable, which today only the MAM4 adapter
-    # (jcm.physics.aerosol.jam.microphysics.mam4_jax) is not without its
-    # extra. The default CI jobs install none, so they skip this and the
+    # Needs every jcm module importable, which the MAM4 and M7 adapters
+    # (jcm.physics.aerosol.jam.microphysics.mam4_jax / m7_jax) are not
+    # without their extras. The default CI jobs install none, so they skip this and the
     # extras-tests job, which installs them all, runs it.
     @pytest.mark.requires_extra("mam4")
     def test_every_shipped_term_is_audited_and_rosters_are_current(self):

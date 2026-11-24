@@ -11,10 +11,10 @@ from jcm.physics.forcing.echam_boundary_conditions import (
     EchamBoundaryConditions,
     SurfaceOpticsParameters,
     _surface_optical_properties,
-    sea_ice_surface_temperature,
 )
 from jcm.physics.radiation import SURFACE_OPTICS_KEY, current_cos_zenith
 from jcm.physics.surface.echam import albedo as albedo_scheme
+from jcm.physics.surface.echam.sea_ice_temperature import carried_ice_temperature
 from jcm.physics.surface.echam.surface_types import (
     ECHAM_SURFACE_EMISSIVITY,
     SurfaceParameters,
@@ -132,10 +132,58 @@ class SurfaceOpticsTest(unittest.TestCase):
         vis, _, _ = _optics(ocean, ice, cos_zenith=jnp.array([1.0, 0.2]))
         self.assertLess(float(vis[0]), float(vis[1]))
 
-    def test_sea_ice_tile_temperature_is_min_sst_ctfreez(self):
-        t = sea_ice_surface_temperature(jnp.array([275.0, 270.0, 280.0]),
-                                        jnp.array([0.5, 0.5, 0.0]))
+    def test_unset_sea_ice_tile_temperature_starts_at_min_sst_ctfreez(self):
+        sst, frac = jnp.array([275.0, 270.0, 280.0]), jnp.array([0.5, 0.5, 0.0])
+        t = carried_ice_temperature(None, sst, frac)
         np.testing.assert_allclose(t, [albedo_scheme.CTFREEZ, 270.0, 280.0])
+        # A carried value is kept where there is ice and has been set; an
+        # unset (0) one and a cell without ice are seeded / follow the SST.
+        t = carried_ice_temperature(jnp.array([260.0, 0.0, 250.0]), sst, frac)
+        np.testing.assert_allclose(t, [260.0, 270.0, 280.0])
+
+    def test_per_band_quartet_matches_broadband_on_land_and_ice(self):
+        # Land and ice are broadband and use the SAME value for the direct
+        # beam and diffuse light (JSBACH's fast scheme / non-melt-pond ice),
+        # so over pure land or pure ice the quartet collapses to the
+        # broadband pair.
+        land, ice = jnp.array([1.0, 0.0]), jnp.array([0.0, 1.0])
+        (vis, nir, _, _, vis_dir, vis_dif,
+         nir_dir, nir_dif) = _surface_optical_properties(
+            land, ice, P,
+            background_albedo=jnp.full(2, 0.2), snow_fraction=jnp.zeros(2),
+            land_temperature=jnp.full(2, 250.0),
+            ice_temperature=jnp.full(2, albedo_scheme.CTFREEZ),
+            cos_zenith=jnp.ones(2),
+        )
+        np.testing.assert_allclose(vis_dir, vis, rtol=1e-6)
+        np.testing.assert_allclose(vis_dif, vis, rtol=1e-6)
+        np.testing.assert_allclose(nir_dir, nir, rtol=1e-6)
+        np.testing.assert_allclose(nir_dif, nir, rtol=1e-6)
+
+    def test_ocean_fresnel_direct_albedo_differs_from_diffuse_at_low_sun(self):
+        # Open water is the one tile whose direct-beam (Fresnel) albedo is
+        # NOT the same as its diffuse albedo, and the gap widens as the sun
+        # drops toward the horizon (jax-gcm#959).
+        ocean, ice = jnp.zeros(2), jnp.zeros(2)
+        (vis, _, _, _, vis_dir, vis_dif,
+         nir_dir, nir_dif) = _surface_optical_properties(
+            ocean, ice, P,
+            background_albedo=jnp.full(2, 0.2), snow_fraction=jnp.zeros(2),
+            land_temperature=jnp.full(2, 250.0),
+            ice_temperature=jnp.full(2, albedo_scheme.CTFREEZ),
+            # Overhead sun, then a low sun (mu0 = 0.1).
+            cos_zenith=jnp.array([1.0, 0.1]),
+        )
+        # Broadband is the OCEAN_DIRECT_WEIGHT-average of dir and dif.
+        w = albedo_scheme.OCEAN_DIRECT_WEIGHT
+        np.testing.assert_allclose(vis, w * vis_dir + (1.0 - w) * vis_dif,
+                                   rtol=1e-6)
+        # Diffuse is zenith-independent (``calbsea``); direct is not, and
+        # at low sun the Fresnel direct albedo is well above the diffuse one.
+        self.assertAlmostEqual(float(vis_dif[0]), float(vis_dif[1]), places=6)
+        self.assertGreater(float(vis_dir[1]), float(vis_dir[0]))
+        self.assertGreater(float(vis_dir[1] - vis_dif[1]), 0.05)
+        self.assertGreater(float(nir_dir[1] - nir_dif[1]), 0.05)
 
     def test_parameters_are_differentiable(self):
         def total_vis(p):
@@ -225,6 +273,34 @@ class EchamBoundaryConditionsTermTest(unittest.TestCase):
         np.testing.assert_allclose(rad["albedo_vis"], expected,
                                    rtol=1e-5)
 
+    def test_published_optics_carry_the_per_band_direct_diffuse_quartet(self):
+        # jax-gcm#959: the boundary-condition term must publish the REAL
+        # ocean direct/diffuse pair, not just the broadband average, so
+        # RRTMGP can drive jax-rrtmgp's sfc_alb_dir/sfc_alb_dif.
+        term = _cached_term()
+        state, diagnostics, forcing, _ = _term_inputs()
+        ocean = types.SimpleNamespace(fmask=jnp.zeros((4,)))
+        rad = term(state, diagnostics, forcing, ocean)[1][SURFACE_OPTICS_KEY]
+        for key in ("albedo_vis_dir", "albedo_vis_dif",
+                    "albedo_nir_dir", "albedo_nir_dif"):
+            self.assertIn(key, rad)
+        lats = jnp.linspace(-1.2, 1.2, 4)
+        mu = current_cos_zenith(forcing.solar, jnp.zeros(4),
+                                lats * 180.0 / jnp.pi)
+        exp_vis_dir, exp_nir_dir, exp_diffuse = albedo_scheme.ocean_albedo(
+            mu, P.albedo)
+        np.testing.assert_allclose(rad["albedo_vis_dir"], exp_vis_dir, rtol=1e-5)
+        np.testing.assert_allclose(rad["albedo_vis_dif"], exp_diffuse, rtol=1e-5)
+        np.testing.assert_allclose(rad["albedo_nir_dir"], exp_nir_dir, rtol=1e-5)
+        np.testing.assert_allclose(rad["albedo_nir_dif"], exp_diffuse, rtol=1e-5)
+        # Not every column is sunlit on this latitude band at this synthetic
+        # date, but at least one must show a real dir != dif gap, or the
+        # "publish the real pair" claim is untested.
+        self.assertGreater(
+            float(jnp.max(jnp.abs(rad["albedo_vis_dir"] - rad["albedo_vis_dif"]))),
+            1e-4,
+        )
+
 
 
 class LandSkinTemperatureTest(unittest.TestCase):
@@ -234,6 +310,16 @@ class LandSkinTemperatureTest(unittest.TestCase):
         from jcm.physics.surface.echam.surface_types import SurfaceData
         return SurfaceData.zeros((4,), 3).copy(
             land_surface_temperature=jnp.asarray(t_skin, jnp.float32))
+
+    def test_prescribed_archive_replaces_previous_skin_in_radiation(self):
+        term = _cached_term()
+        state, diagnostics, forcing, terrain = _term_inputs(
+            land_skin_temperature=jnp.array([285., 286., 287., 288.]))
+        out = term(state, {**diagnostics, 'surface': self._surface([260.] * 4)},
+                   forcing, terrain)[1]
+        np.testing.assert_allclose(out['surface'].surface_temperature, [285., 286., 287., 288.])
+        np.testing.assert_allclose(out['surface'].land_surface_temperature,
+                                   forcing.land_skin_temperature)
 
     def test_unset_skin_seeds_from_the_soil_temperature(self):
         """A zero carry — cold start, or a checkpoint from before the field — reads stl_am."""
@@ -261,6 +347,136 @@ class LandSkinTemperatureTest(unittest.TestCase):
                                    rtol=1e-5)
         np.testing.assert_allclose(out[SURFACE_OPTICS_KEY]["land_emissivity"],
                                    P.land_emissivity)
+
+
+class TileWeightedRadiativeTemperatureTest(unittest.TestCase):
+    """ECHAM's ``radtemp`` tile-weighted T**4 mean (#988), vs the old
+    ``where(fmask > 0.5, land, sst)`` snap it replaces.
+    """
+
+    def test_matches_mo_surface_formula_directly(self):
+        from jcm.physics.forcing.echam_boundary_conditions import (
+            tile_weighted_radiative_temperature,
+        )
+        land_f = jnp.array([0.3])
+        ice_f = jnp.array([0.2])
+        t_land, t_ice, t_ocean = 270.0, 260.0, 285.0
+        got = tile_weighted_radiative_temperature(
+            land_f, ice_f, jnp.array([t_land]), jnp.array([t_ice]),
+            jnp.array([t_ocean]))
+        ocean_f = 1.0 - 0.3 - 0.2
+        expect = (0.3 * t_land ** 4 + 0.2 * t_ice ** 4
+                  + ocean_f * t_ocean ** 4) ** 0.25
+        np.testing.assert_allclose(got, [expect], rtol=1e-6)
+
+    def test_degenerates_to_pure_land_and_pure_ocean(self):
+        """At the extremes the tile-weighted mean must reduce exactly to
+        the single-tile value — this is why the pure-land/pure-ocean
+        regression tests elsewhere are unaffected by #988.
+        """
+        from jcm.physics.forcing.echam_boundary_conditions import (
+            tile_weighted_radiative_temperature,
+        )
+        land = jnp.array([280.0])
+        ocean = jnp.array([290.0])
+        ice = jnp.array([260.0])
+        pure_land = tile_weighted_radiative_temperature(
+            jnp.array([1.0]), jnp.array([0.0]), land, ice, ocean)
+        pure_ocean = tile_weighted_radiative_temperature(
+            jnp.array([0.0]), jnp.array([0.0]), land, ice, ocean)
+        np.testing.assert_allclose(pure_land, land, rtol=1e-6)
+        np.testing.assert_allclose(pure_ocean, ocean, rtol=1e-6)
+
+    def test_sea_ice_tile_now_enters(self):
+        """The sea-ice temperature entered NEITHER branch of the old snap
+        (it fell into the ``sst`` branch regardless of ``sice_am``); with
+        the T**4 mean a colder ice tile measurably cools the grid value
+        relative to its SST.
+        """
+        from jcm.physics.forcing.echam_boundary_conditions import (
+            tile_weighted_radiative_temperature,
+        )
+        warm_ice = tile_weighted_radiative_temperature(
+            jnp.array([0.0]), jnp.array([0.5]),
+            jnp.array([280.0]), jnp.array([273.0]), jnp.array([290.0]))
+        no_ice = tile_weighted_radiative_temperature(
+            jnp.array([0.0]), jnp.array([0.0]),
+            jnp.array([280.0]), jnp.array([273.0]), jnp.array([290.0]))
+        self.assertLess(float(warm_ice[0]), float(no_ice[0]))
+
+    def test_coastal_cell_moves_land_only_and_ocean_only_do_not(self):
+        """End-to-end through the term: land-only and ocean-only cells'
+        ``surface_temperature`` are unchanged (round-off) by #988; the
+        reported number is the coastal cell's own move away from the old
+        majority-tile snap.
+        """
+        term = _cached_term(ncols=3)
+        state, diagnostics, forcing, _ = _term_inputs(
+            ncols=3, stl_am=jnp.full((3,), 260.0),
+            sea_surface_temperature=jnp.full((3,), 290.0))
+        # Columns: pure land, pure ocean, 30% land coastal cell.
+        terrain = types.SimpleNamespace(fmask=jnp.array([1.0, 0.0, 0.3]))
+        out = term(state, diagnostics, forcing, terrain)[1]
+        t_new = np.asarray(out["surface"].surface_temperature)
+
+        old_snap = np.where(np.array([1.0, 0.0, 0.3]) > 0.5, 260.0, 290.0)
+        np.testing.assert_allclose(t_new[:2], old_snap[:2], atol=1e-5)
+        coastal_old, coastal_new = old_snap[2], t_new[2]
+        expect_coastal = (0.3 * 260.0 ** 4 + 0.7 * 290.0 ** 4) ** 0.25
+        np.testing.assert_allclose(coastal_new, expect_coastal, rtol=1e-6)
+        # Report (via assertion, not print): the old snap picked the OCEAN
+        # value outright (fmask=0.3 <= 0.5, all-290 K) for a cell that is
+        # 30% land; the new blend sits strictly between the two tiles, ~8 K
+        # cooler than the old snap's all-ocean answer.
+        self.assertLess(coastal_new, coastal_old)
+        self.assertGreater(coastal_new, 260.0)
+        self.assertGreater(coastal_old - coastal_new, 0.5)  # non-trivial move
+
+
+class RoughnessLengthTileGateTest(unittest.TestCase):
+    """``surface.roughness_length`` stays a majority-tile snap (#988 review).
+
+    This field is PUBLIC: ``jcm.physics.diagnostics.aerocom`` reads it as
+    the single grid-cell roughness for its 2 m-reduction diagnostic
+    (``aerocom_tas``/``aerocom_dew2``), where a coastal cell with only a
+    trace of land should still read as "mostly ocean" — an "any land" gate
+    would jump that diagnostic's roughness 100x for every near-pure-ocean
+    coastal cell (Codex review). The ECHAM-Louis LAND TILE's own momentum
+    roughness no longer reads this field at all (fixed directly in
+    ``vertical_diffusion.py`` instead; see
+    ``TestLandTileRoughnessIsUnconditional`` there), so this field keeps
+    its original ``> 0.5`` behaviour unconditionally.
+    """
+
+    def test_majority_tile_gate_is_unchanged(self):
+        term = _cached_term(ncols=3)
+        state, diagnostics, forcing, _ = _term_inputs(ncols=3)
+        # Pure ocean, pure land, and a minority-land (30%) coastal cell.
+        terrain = types.SimpleNamespace(fmask=jnp.array([0.0, 1.0, 0.3]))
+        out = term(state, diagnostics, forcing, terrain)[1]
+        rough = np.asarray(out["surface"].roughness_length)
+        np.testing.assert_allclose(rough, [0.0001, 0.01, 0.0001])
+
+    def test_slim_land_publishes_the_roughness_its_exchange_uses(self):
+        """With SLIM the land value is ``momentum_roughness_fraction`` x vegetation height."""
+        from jcm.physics.surface.slim import SlimParameters
+        from jcm.physics.surface.slim.properties import MONTHLY_FIELDS
+        state, diagnostics, forcing, _ = _term_inputs(ncols=3)
+        props = {name: jnp.ones((3,)) for name in MONTHLY_FIELDS}
+        props["roughness"] = jnp.array([20.0, 20.0, 0.5])
+        props["glc_mask"] = jnp.zeros((3,))
+        forcing = forcing.copy(slim_properties=props)
+        terrain = types.SimpleNamespace(fmask=jnp.array([0.0, 1.0, 1.0]))
+        horizontal = types.SimpleNamespace(
+            latitudes=jnp.linspace(-1.2, 1.2, 3), longitudes=jnp.zeros(1), nodal_shape=(1, 3))
+        for fraction in (0.1, 0.05):
+            term = EchamBoundaryConditions(
+                slim_albedo="slim",
+                slim_params=SlimParameters.default().replace(momentum_roughness_fraction=fraction))
+            term.cache_coords(types.SimpleNamespace(horizontal=horizontal))
+            rough = np.asarray(term(state, diagnostics, forcing, terrain)[1]["surface"].roughness_length)
+            np.testing.assert_allclose(rough, [0.0001, 20.0 * fraction, 0.5 * fraction], rtol=1e-6)
+        assert EchamBoundaryConditions().slim_params is None
 
 
 class SolveTimeSurfaceOpticsTest(unittest.TestCase):

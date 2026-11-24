@@ -7,9 +7,8 @@ of that half level (l.658-700 and 777-799). The one ``zbuoy`` it obtains is
 both the numerator of the interior Richardson number ``zri = zbuoy /
 max(zshear, zepshr)`` and the buoyancy term of the TKE budget
 ``zzb = zshear*zsm - zbuoy*zsh``; this module is that quantity, so the two
-consumers here (``turbulence_coefficients.compute_richardson_number`` and the
-TKE source in ``vertical_diffusion.vertical_diffusion_column``) read the same
-value, as ECHAM's do.
+consumers here (the Richardson number and the TKE source of
+:func:`.closure.interior_closure`) read the same value, as ECHAM's do.
 
 The cloud-weighted multipliers :func:`cloud_weighted_buoyancy_multipliers` are
 the same arithmetic in ``vdiff.f90`` l.782-789 and in the surface layer's bulk
@@ -177,14 +176,3 @@ def richardson_number(buoyancy, shear):
     """ECHAM's ``zri = zbuoy / MAX(zshear, zepshr)`` (``vdiff.f90`` l.799)."""
     return buoyancy / jnp.maximum(shear, SHEAR_FLOOR)
 
-
-def interfaces_to_levels(interface_field):
-    """Assign each full level the interface above it: ``(ncol, nlev - 1) -> (ncol, nlev)``.
-
-    Level ``k`` takes the value of the interface between levels ``k - 1`` and
-    ``k``; the top level repeats the first interface. This is the alignment
-    of the mixing-length stability factor (``compute_mixing_length``) and of
-    the TKE source, so ``zbuoy`` and ``zshear`` enter the TKE budget at the
-    same level as ``ri`` enters the mixing length.
-    """
-    return jnp.concatenate([interface_field[:, :1], interface_field], axis=1)

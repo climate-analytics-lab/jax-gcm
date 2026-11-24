@@ -2,6 +2,7 @@
 
 import types
 import unittest
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -10,6 +11,7 @@ import numpy as np
 from jcm.physics.aerosol.jam.chemistry.aqueous import (
     AqueousSulfur,
     _aqueous_so4,
+    _simple_aqueous_so4,
     _CONV_SO2_SO4_MASS,
 )
 from jcm.physics.aerosol.jam.chemistry.oxidants import OxidantField
@@ -46,6 +48,58 @@ class AqueousKernelTest(unittest.TestCase):
     def test_o3_path_active_without_h2o2(self):
         # With H2O2 ~ 0 the O3 pathway still oxidises some SO2.
         self.assertGreater(float(_f(h2o2=0.0, o3=2.0e12)), 0.0)
+
+
+class AqueousGradientTest(unittest.TestCase):
+    """float32 reverse-mode gradients are finite at a degenerate air density.
+
+    ``rho = 0`` is never produced by the dycore (every real column has
+    positive air mass) but is reachable from an all-zero test/cold-start
+    state. Before ``_RHO_MIN`` (#971), ``_aqueous_so4``'s own
+    ``so2_rem = so2m * (MW/(_AVO_XTOC*rho))`` had NO floor at all, so this
+    was a NaN in the *value*, not only the gradient; ``_simple_aqueous_so4``
+    NaN'd only the gradient, through ``h2o2/max(n_air, _TINY)``.
+    """
+
+    def test_aqueous_so4_at_zero_air_density(self):
+        def loss(so2, so4, h2o2, o3, lwc, rho, t, dt):
+            return jnp.sum(_aqueous_so4(so2, so4, h2o2, o3, lwc, rho, t, dt))
+
+        args = dict(
+            so2=jnp.asarray(1.0e-9, jnp.float32), so4=jnp.asarray(0.0, jnp.float32),
+            h2o2=jnp.asarray(1.0e9, jnp.float32), o3=jnp.asarray(1.0e12, jnp.float32),
+            lwc=jnp.asarray(1.0e-7, jnp.float32), rho=jnp.asarray(0.0, jnp.float32),
+            t=jnp.asarray(280.0, jnp.float32), dt=jnp.asarray(1800.0, jnp.float32),
+        )
+        value = loss(*args.values())
+        self.assertTrue(np.isfinite(float(value)))
+        g = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3, 4, 5, 6)))(*args.values())
+        for leaf in g:
+            self.assertTrue(np.isfinite(float(leaf)))
+
+    def test_simple_aqueous_so4_at_zero_air_density(self):
+        def loss(so2, h2o2, rho):
+            return jnp.sum(_simple_aqueous_so4(so2, h2o2, rho))
+
+        args = (jnp.asarray(1.0e-9, jnp.float32), jnp.asarray(0.0, jnp.float32),
+                jnp.asarray(0.0, jnp.float32))
+        self.assertTrue(np.isfinite(float(loss(*args))))
+        g = jax.jit(jax.grad(loss, argnums=(0, 1, 2)))(*args)
+        for leaf in g:
+            self.assertTrue(np.isfinite(float(leaf)))
+
+    def test_realistic_air_density_unaffected(self):
+        """The `_RHO_MIN` floor (1e-5) must not move a value computed at the
+        model's thinnest captured layer (~2e-4 kg/m^3, ~4 Pa/70 K model
+        top, ~20x above the floor): the floored and unfloored forms agree
+        to float32 rounding there.
+        """
+        import jcm.physics.aerosol.jam.chemistry.aqueous as aq
+        rho = 2.0e-4
+        floored = float(_f(rho=rho))
+        with mock.patch.object(aq, "_RHO_MIN", 0.0):
+            unfloored = float(_f(rho=rho))
+        np.testing.assert_allclose(floored, unfloored, rtol=1e-6)
 
 
 class AqueousTermTest(unittest.TestCase):

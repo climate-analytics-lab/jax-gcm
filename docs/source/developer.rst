@@ -145,7 +145,7 @@ completion.
 Another job, ``extras-tests``, covers what the others cannot see. Every
 other job installs ``pip install -e .`` with no optional extras, so that
 coverage is measured against the default install, and every test that needs
-``jcm[pyses]``, ``jcm[mam4]``, ``jcm[cosp]`` or ``jcm[era5]`` skips there.
+``jcm[pyses]``, ``jcm[mam4]``, ``jcm[m7]``, ``jcm[cosp]`` or ``jcm[era5]`` skips there.
 ``extras-tests`` installs all of them and runs exactly those tests, fast and
 slow together, in one process (a pySES production-config chunk peaks near
 13 GB, which leaves no room for a second worker), with no coverage floor. It
@@ -182,8 +182,12 @@ dependency parity:
 
 .. code-block:: console
 
+   $ pip install -r tools/ci/extras_preinstall.txt
    $ pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
    $ JCM_REQUIRE_EXTRAS=1 pytest -rs -m requires_extra
+
+The first line installs the extras' dependencies that are not on PyPI, which
+``pyproject.toml`` names without a URL so the jcm wheel stays publishable.
 
 The workflow is triggered by pull requests, and by pushes to ``main`` and
 ``dev`` only. A branch with no open pull request gets no CI at all, so run the

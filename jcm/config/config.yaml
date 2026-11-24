@@ -18,6 +18,16 @@ defaults:
 #   python -m jcm.main +constants.grav=9.80665 +constants.rearth=6.4e6
 constants: {}
 
+# Virtual observers (jcm.observers): model fields sampled every timestep at
+# stations, along a track, or under a sun-synchronous swath, each written to
+# <output>_obs_<name>.nc (per chunk: <prefix>_day<N>_obs_<name>.nc). A mapping
+# of observer name to spec; kinds and keys are in jcm.observers.
+# observers_from_config and docs/source/design/observers.md. Example:
+#   python -m jcm.main +observers.arm.kind=stations \
+#       +observers.arm.file=/path/stations.csv \
+#       '+observers.arm.variables=[temperature,specific_humidity]'
+observers: {}
+
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}

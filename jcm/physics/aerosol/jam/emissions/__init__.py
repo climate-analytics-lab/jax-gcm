@@ -3,7 +3,8 @@
 Each natural source is a faithful port of its HAMMOZ scheme, as its own
 ``PhysicsTerm`` with a calibratable ``Parameters`` object:
 
-- :class:`SeaSaltEmissions` — Gong (2003) wind-driven sea salt.
+- :class:`SeaSaltEmissions` — Gong (2003) (default) or Long et al. (2011) +
+  Sofiev et al. (2011) SST correction, wind-driven sea salt (``scheme=``).
 - :class:`DmsEmissions` — Nightingale (2000) oceanic DMS → sulfate.
 - :class:`DustEmissions` — Tegen et al. (2002) wind-erosion flux.
 

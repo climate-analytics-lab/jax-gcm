@@ -87,6 +87,78 @@ class TestCloudUtils:
             assert jnp.all(got <= _P.cdnc_min_upper)
 
 
+class TestRimingCollectionEfficiencyGradients2M:
+    """#1130: ``riming_collection_efficiency``'s internal droplet-radius cube
+    root had the same quotient-with-floored-denominator overflow as
+    ``cloud_utils.eff_liquid_droplet_radius``, and -- unlike that one -- it
+    misbehaved at ORDINARY droplet numbers (1e6-1e10 m^-3), not only ones
+    sitting on the numerical floor: a trace of in-cloud liquid (q ~ 1e-30
+    kg/kg) made d/d(in_cloud_liquid)/d/d(droplet_number) NaN/+-inf there.
+    """
+
+    @pytest.mark.parametrize(
+        "droplet_number", [0.0, 1.0e-9, 1.0e-7, 1.0, 1.0e3, 1.0e6, 1.0e8, 1.0e10],
+    )
+    def test_gradient_finite_for_trace_liquid(self, droplet_number):
+        from jcm.physics.clouds.lohmann_2m.precip import riming_collection_efficiency
+        from .cloud_utils import air_dynamic_viscosity
+
+        mask = jnp.asarray(True)
+        rho = jnp.asarray(0.9, jnp.float32)
+        rho_rcp = jnp.asarray(1.0 / 0.9, jnp.float32)
+        visc = air_dynamic_viscosity(jnp.asarray(260.0, jnp.float32))
+        nn = jnp.asarray(droplet_number, jnp.float32)
+
+        def total(qc, n):
+            return jnp.sum(riming_collection_efficiency(
+                mask, rho, rho_rcp, qc, n, visc, _P))
+
+        # float32's smallest NORMAL value (~1.1755e-38) is included
+        # deliberately: ``6*pirho_rcp*rho*q`` underflows to exactly 0.0 at
+        # this magnitude (verified separately), which still passes the
+        # ``riming_mask`` the forward pass selects; a cube root taken of a
+        # numerator that can be exactly 0 on the selected branch needs its
+        # own ``numerator != 0`` re-guard (jcm #866), not just the floored
+        # denominator #1130 is otherwise about -- caught in review.
+        for qc in (1.0e-30, 1.0e-20, 1.0e-9, 1.0e-4, 3.0e-3,
+                   float(np.finfo(np.float32).tiny)):
+            qq = jnp.asarray(qc, jnp.float32)
+            g_q, g_n = jax.grad(total, argnums=(0, 1))(qq, nn)
+            assert np.isfinite(float(g_q)), (qc, droplet_number, "d/dq")
+            assert np.isfinite(float(g_n)), (qc, droplet_number, "d/dn")
+
+    def test_zdw_matches_previous_primal_to_rounding(self):
+        """The split ``zdw`` (droplet-radius proxy) differs from the pre-#1130
+        quotient form by rounding only -- same reasoning as
+        ``cloud_utils_test.TestEffLiquidDropletRadius.
+        test_matches_unsplit_quotient_form_to_rounding``. Checked on ``zdw``
+        itself (not the whole collection-efficiency fit downstream of it,
+        which #1130 does not touch) because that is the expression that
+        changed.
+        """
+        qc_grid = np.geomspace(1.0e-6, 3.0e-3, 8)
+        n_grid = np.geomspace(1.0e6, 1.0e9, 8)
+        qc, n = (jnp.asarray(x.ravel(), jnp.float32)
+                 for x in np.meshgrid(qc_grid, n_grid, indexing="ij"))
+        rho = jnp.full_like(qc, 0.9)
+        eps = jnp.float32(_P.eps)
+
+        def split_zdw(qc, n, rho):
+            numerator = 6.0 * _P.pirho_rcp * rho * qc
+            denominator = jnp.maximum(n, eps)
+            return jnp.maximum(
+                numerator ** (1.0 / 3.0) / denominator ** (1.0 / 3.0), 1.0e-6)
+
+        def unsplit_zdw(qc, n, rho):
+            zdw_base = 6.0 * _P.pirho_rcp * rho * qc / jnp.maximum(n, eps)
+            return jnp.maximum(zdw_base ** (1.0 / 3.0), 1.0e-6)
+
+        np.testing.assert_allclose(
+            np.asarray(split_zdw(qc, n, rho)), np.asarray(unsplit_zdw(qc, n, rho)),
+            rtol=2e-5,
+        )
+
+
 class TestFreezingBelow238K:
     """Unit tests for the freezing_below_238K function."""
 
@@ -1044,7 +1116,7 @@ class TestUpdateInCloudWater_2M:
         cloud_flag = jnp.tile(flag_pattern, (n + flag_pattern.size - 1) // flag_pattern.size)[:n]
         cloud_fraction = jnp.where(cloud_flag, _full(n, 0.2), _zeros(n))
         return dict(
-            pressure=_full(n, 8e4),
+            aerosol_number_available=_full(n, 8e4),
             activated_cdnc=_full(n, 1.0e6),
             condensation_rate=_zeros(n),
             deposition_rate=_zeros(n),
@@ -1072,7 +1144,7 @@ class TestUpdateInCloudWater_2M:
         outs = update_in_cloud_water(**inputs)
         assert isinstance(outs, tuple) and len(outs) == 8
         for out in outs:
-            assert out.shape == inputs["pressure"].shape
+            assert out.shape == inputs["aerosol_number_available"].shape
             assert jnp.all(jnp.isfinite(out))
 
     def test_cloud_creation_initializes_incloud_values(self):
@@ -1102,6 +1174,45 @@ class TestUpdateInCloudWater_2M:
         _, _, pqnuc_o, cdnc_o, _, _, _, _ = update_in_cloud_water(**inputs)
         assert jnp.all(cdnc_o >= before_cdnc)
         assert jnp.all(pqnuc_o >= before_pqnuc)
+
+    def test_reactivation_uses_the_full_potential_not_a_cover_scaled_value(
+            self):
+        """jax-gcm#1161: ECHAM F2594's ``ztmp1 = pcdncact - pcdnc`` has no
+        ``paclc``/cloud-fraction factor, so a partial-cover cell
+        (``cloud_fraction = 0.2``) whose droplet number has decayed below
+        ``pcdnc_min`` must re-activate up toward the FULL
+        ``activated_cdnc`` passed in, never toward
+        ``cloud_fraction * activated_cdnc``. The function receives
+        whatever its caller passes for ``activated_cdnc`` -- the caller
+        (``cloud_microphysics_2m``) now resolves that to the unmasked
+        ``activation_potential`` -- so this pins that the function itself
+        applies no additional cover scaling to it.
+        """
+        n = 1
+        inputs = self._base_inputs(n)
+        inputs["cloud_flag"] = jnp.array([True])
+        inputs["cloud_fraction"] = jnp.array([0.2], dtype=jnp.float32)
+        # In-cloud liquid well above cqtmin, so minimum_CDNC's floor stays
+        # far below the carried droplet_number set below.
+        inputs["cloud_liquid_in_cloud"] = jnp.array([5e-4], dtype=jnp.float32)
+        inputs["droplet_number"] = jnp.array([1.0], dtype=jnp.float32)
+        inputs["temp_prev"] = jnp.array([280.0], dtype=jnp.float32)  # > cthomi
+        # Comfortably above both the cloud-fraction-scaled value (1e8) and
+        # the default fixed floor (``cdnc_min_fixed`` = 40 cm^-3 = 4e7/m^3,
+        # :func:`minimum_CDNC`), so neither can mask whether the
+        # re-activation reached the full potential or only the scaled one.
+        potential = jnp.array([5.0e8], dtype=jnp.float32)
+        inputs["activated_cdnc"] = potential
+        inputs["nucleation_rate"] = _zeros(n)
+
+        _, _, _, cdnc_o, _, _, _, _ = update_in_cloud_water(**inputs)
+
+        cover_scaled = inputs["cloud_fraction"] * potential
+        assert jnp.all(cdnc_o > 4.0 * cover_scaled), (
+            "re-activation landed near the cloud-fraction-scaled value, "
+            "not the full potential")
+        np.testing.assert_allclose(
+            np.asarray(cdnc_o), np.asarray(potential), rtol=0.02)
 
     def test_icnc_minimum_enforced_when_ice_present(self):
         n = 4
@@ -1296,19 +1407,24 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
         assert jnp.isclose(grad, expected, rtol=1e-4), (grad, expected)
         check_gradients(icnc_of_ref, (r0,), rtol=1e-2, seed=0)
 
-    def test_nic_cirrus_2_uses_external_source_capped_by_pressure(self):
+    def test_nic_cirrus_2_uses_external_source_capped_by_aerosol_number(self):
+        """The nic_cirrus=2 cap, fixed (jax-gcm#552): capped by the real
+        "total number of aerosols available" (mo_cloud_micro_2m.f90:2520),
+        not by pressure -- the Fortran's own ``pap`` at this call site is a
+        number, never ``papm1``. See ``assembly.py``'s nic_cirrus==2 branch.
+        """
         n = 3
         inputs = self._inputs_with_ice(n)
         inputs["params"] = _P.replace(nic_cirrus=2)
-        # One column below the pressure cap, one above it (cap = pap*1e6).
-        cap = float(inputs["pressure"][0]) * 1e6
+        # One column below the aerosol-number cap, one above it.
+        cap = float(inputs["aerosol_number_available"][0])
         inputs["newly_formed_ice"] = jnp.array(
             [5e4, cap * 10.0, 0.0], dtype=jnp.float32
         )
         _, icnc_o, *_ = update_in_cloud_water(**inputs)
         # Below cap: candidate passes through (already >= icemin).
         assert jnp.isclose(icnc_o[0], 5e4)
-        # Above cap: clipped to pressure * 1e6.
+        # Above cap: clipped to the aerosol number available.
         assert jnp.isclose(icnc_o[1], cap, rtol=1e-6)
         # Zero source: enforced up to the icemin floor.
         assert jnp.isclose(icnc_o[2], _P.icemin)
@@ -1650,7 +1766,16 @@ class TestUpdateTendencies_2M:
         )
 
         assert float(out[9][0]) == 0.0
-        np.testing.assert_array_equal(np.asarray(out[9]), np.asarray(expected))
+        # #1130: ``eff_liquid_droplet_radius`` takes the cube root of the
+        # numerator and of the floored CDNC separately (a float32 reverse-
+        # mode overflow fix), not of their quotient as this inline
+        # transcription still does -- so the two are no longer BIT-identical,
+        # only equal to rounding (<= 2 ulp f32, pinned in
+        # ``cloud_utils_test.py::TestEffLiquidDropletRadius.
+        # test_matches_unsplit_quotient_form_to_rounding``).
+        np.testing.assert_allclose(
+            np.asarray(out[9]), np.asarray(expected), rtol=1e-6, atol=0.0,
+        )
 
 
 class TestIcon2MPipeline:
@@ -1836,7 +1961,8 @@ class TestColumnWaterConservation2M:
         params = CloudParams2M.default()
 
         (tend, rain_sfc, snow_sfc, _rl, _ri, _rfw, _rfm, _au, _ac, _wbf,
-         form, evap, _cf, _nmr, _ledger, rain_prof, snow_prof) = cloud_microphysics_2m(
+         form, evap, _cf, _nmr, _ledger, _pc, _pfr, _pfs,
+         rain_prof, snow_prof) = cloud_microphysics_2m(
             T, q, p, qc, jnp.zeros(nlev), qnc, jnp.zeros(nlev),
             cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1886,7 +2012,8 @@ class TestColumnWaterConservation2M:
         params = CloudParams2M.default()
 
         (tend, rain_sfc, snow_sfc, _rl, _ri, _rfw, _rfm, _au, _ac, _wbf,
-         form, evap, _cf, _nmr, _ledger, _rp, _sp) = cloud_microphysics_2m(
+         form, evap, _cf, _nmr, _ledger, _pc, _pfr, _pfs,
+         _rp, _sp) = cloud_microphysics_2m(
             T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), qni,
             cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1963,11 +2090,28 @@ class TestColumnWaterConservation2M:
         it, ending in a latent-heat NaN near day 110. Homogeneous
         nucleation physics forbids that state: above S_crit(T) =
         2.349 - T/259 (Koop et al. 2000), solution droplets freeze in
-        seconds. One microphysics step must bring S_ice at 190 K from
-        1.74 to at/below the threshold, with bounded latent heating. With
-        ``nic_cirrus = 1`` the ECHAM deposition branch alone already brings
-        it to ~1.01, so this checks the outcome rather than the floor, which
-        over-deposits to ~0.89 (#963).
+        seconds. One microphysics step must bring S_ice at 190 K down
+        towards the threshold, with bounded latent heating.
+
+        This also bounds S_ice from BELOW (#963): the floor must remove
+        only the vapor the branch-A/B/C deposition increment itself left
+        above S_crit, not re-test the pre-increment humidity and remove
+        that increment's vapor a second time. The upper-bound-only version
+        of this test passed even with the double-counting bug, because the
+        ECHAM deposition branch alone already pulls S_ice down near 1.0
+        (below ``scrit + 0.02``) -- it never caught the floor over-drying
+        the cell on top of that. The two ``nic_cirrus=1`` cases reproduce
+        #963's table (S_ice 1.74 and 2.2); ``expected_s_after`` is the
+        issue's "without floor" column -- what the branch increment alone
+        reaches once the floor stops double-removing it -- and the buggy
+        pre-fix formula instead landed at 0.887 / 0.429, well outside the
+        tolerance below.
+
+        At ``nic_cirrus=2`` there is no floor: ECHAM r7492 has none, and
+        Kaercher-Lohmann nucleation is the sink (checked end to end against
+        the compiled reference in ``cirrus_end_to_end_reference_test.py``).
+        This column carries no freezing aerosol, so nothing nucleates and the
+        vapour stays above the Koop threshold.
         """
         import numpy as np
         from jcm.physics import thermodynamics
@@ -1978,24 +2122,51 @@ class TestColumnWaterConservation2M:
         T = jnp.full(nlev, 190.2)
         p = jnp.linspace(3000.0, 4500.0, nlev)
         rho = p / (287.0 * T)
-        # The scheme's own ice saturation (ECHAM's ``ua`` table), so the
-        # start really is at S_ice = 1.74, above the 1.615 threshold.
+        # The scheme's own ice saturation (ECHAM's ``ua`` table).
         qsi = np.asarray(thermodynamics.saturation_specific_humidity(T, p))
-        q = jnp.asarray(1.74 * qsi)
         qi = jnp.full(nlev, 1.5e-4)
-        tend, _, _, *_ = cloud_microphysics_2m(
-            T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), jnp.zeros(nlev),
-            jnp.full(nlev, 0.287), rho,
-            jnp.full(nlev, 800.0), jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
-            jnp.zeros(nlev), jnp.zeros(nlev), 720.0, CloudParams2M.default(),
-        )
-        s_after = (np.asarray(q) + 720.0 * np.asarray(tend.dqdt)) / qsi
         scrit = 2.349 - 190.2 / 259.0
-        assert float(np.max(s_after)) <= scrit + 0.02, (
-            f"S_ice {s_after} not pulled to the Koop threshold {scrit:.3f}"
-        )
-        # Latent heating from the burst stays small (q is tiny at 190 K).
-        assert float(np.max(np.abs(720.0 * np.asarray(tend.dtedt)))) < 1.0
+
+        def run(s_start, nic_cirrus):
+            q = jnp.asarray(s_start * qsi)
+            params = CloudParams2M.default(nic_cirrus=nic_cirrus)
+            tend, _, _, *_ = cloud_microphysics_2m(
+                T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), jnp.zeros(nlev),
+                jnp.full(nlev, 0.287), rho,
+                jnp.full(nlev, 800.0), jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+                jnp.zeros(nlev), jnp.zeros(nlev), 720.0, params,
+            )
+            s_after = (np.asarray(q) + 720.0 * np.asarray(tend.dqdt)) / qsi
+            return s_after, tend
+
+        # (start S_ice, nic_cirrus, expected S_ice after [issue's "without
+        # floor" column], absolute tolerance).
+        cases = [
+            (1.74, 1, 1.012, 0.05),
+            (2.2, 1, 1.014, 0.05),
+        ]
+        s_after, _ = run(2.2, 2)
+        assert float(np.min(s_after)) > scrit + 0.1, (
+            f"nic_cirrus=2: the Koop floor acted (S_ice {s_after}); it is "
+            "nic_cirrus=1 only")
+        for s_start, nic_cirrus, expected, tol in cases:
+            s_after, tend = run(s_start, nic_cirrus)
+            s_after_max = float(np.max(s_after))
+            assert s_after_max <= scrit + 0.02, (
+                f"nic_cirrus={nic_cirrus}, S_ice0={s_start}: S_ice {s_after} "
+                f"not pulled to the Koop threshold {scrit:.3f}"
+            )
+            # Lower bound: the floor must not double-remove the branch
+            # increment's vapor. A regression back to the pre-fix formula
+            # over-dries to ~0.43-0.89 here, well below expected-tol.
+            assert abs(s_after_max - expected) <= tol, (
+                f"nic_cirrus={nic_cirrus}, S_ice0={s_start}: S_ice after "
+                f"{s_after_max:.3f} is not within {tol} of the expected "
+                f"{expected} (branch-increment-only outcome) -- the floor "
+                f"is removing more than the branch's own excess (#963)"
+            )
+            # Latent heating from the burst stays small (q is tiny at 190 K).
+            assert float(np.max(np.abs(720.0 * np.asarray(tend.dtedt)))) < 1.0
 
     def test_supercooled_stratus_rains(self):
         """Warm-rain coalescence must drain supercooled liquid decks.
@@ -2140,18 +2311,23 @@ class TestColumnEnthalpyConservation2M:
     DT = 1800.0
 
     @staticmethod
-    def _run(cols, **extra):
+    def _run(cols, params=None, **extra):
         """Run the column on ``cols``, the provisional state.
 
         ``extra`` may name the step-start condensate ``qc_m1``/``qi_m1`` and
         the detrainment ``detrained_qc``/``detrained_qi`` that ``cols``'s
         condensate holds; they become the column function's anchor, its
         increments (provisional less anchor less detrainment) and its
-        detrainment. Without them the anchor is ``cols`` itself.
+        detrainment. Without them the anchor is ``cols`` itself. ``params``
+        defaults to ``CloudParams2M.default()`` (ECHAM's ``lccnclim``
+        aerosol-free closure, #1149); a caller testing the ``ice_nuclei``-fed
+        DeMott closure (``cols[11]``) instead passes ``aerosol_free_freezing=
+        AerosolFreeFreezing.DEMOTT``, since ``lccnclim`` does not read it.
         """
         from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
         from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
 
+        params = CloudParams2M.default() if params is None else params
         T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke, inp = cols
         nlev = T.shape[0]
         z = jnp.zeros(nlev)
@@ -2164,7 +2340,7 @@ class TestColumnEnthalpyConservation2M:
         tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
             T, q, p, qc_m1, qi_m1, qnc, qni, cf, rho, dz, tke,
             jnp.full(nlev, 5e7), inp, z,
-            TestColumnEnthalpyConservation2M.DT, CloudParams2M.default(),
+            TestColumnEnthalpyConservation2M.DT, params,
             qc_increment=(qc - qc_m1) - det_qc,
             qi_increment=(qi - qi_m1) - det_qi,
             detrained_qc=det_qc, detrained_qi=det_qi,
@@ -2370,7 +2546,10 @@ class TestColumnEnthalpyConservation2M:
         import numpy as np
 
         cols = self._cloud_ice_above_freezing()
-        tend, rain_sfc, snow_sfc = self._run(cols)
+        # ECHAM's autoconversion rate: at the JAM default (30) the melt water
+        # rains out 0.4 % of itself and the column no longer melts in place.
+        tend, rain_sfc, snow_sfc = self._run(
+            cols, params=CloudParams2M.default(ccraut=15.0))
         _, _, _, _, qi, _, _, _, rho, dz, _, _ = cols
         mass = np.asarray(rho * dz)
 
@@ -2525,13 +2704,16 @@ class TestColumnEnthalpyConservation2M:
     def test_het_freezing_moves_mass_and_fusion_heat(self):
         """Immersion INP must freeze droplet MASS, not just crystal number.
 
-        The aerosol-free closure sets ICNC from the INP number and freezes
-        one mean-mass droplet per new crystal. That transfer was
-        applied to the local in-cloud arrays but never added to the freezing
-        accumulator the assembly ledger reads, so raising INP created
-        crystals with zero mass and destroyed droplets with zero mass — the
-        one finding that conserves water and so hides from every budget
-        check. Water conservation cannot see it; the Lf signature can.
+        The ``ice_nuclei``-fed closure (``AerosolFreeFreezing.DEMOTT`` -- an
+        explicit opt-in since #1149 made ECHAM's own ``lccnclim`` the
+        aerosol-free default, which does not read ``ice_nuclei`` at all) sets
+        ICNC from the INP number and freezes one mean-mass droplet per new
+        crystal. That transfer was applied to the local in-cloud arrays but
+        never added to the freezing accumulator the assembly ledger reads,
+        so raising INP created crystals with zero mass and destroyed
+        droplets with zero mass — the one finding that conserves water and
+        so hides from every budget check. Water conservation cannot see it;
+        the Lf signature can.
 
         WBF is suppressed here (strong turbulence shuts the threshold-
         velocity gate): with it active the whole liquid reservoir glaciates
@@ -2539,15 +2721,17 @@ class TestColumnEnthalpyConservation2M:
         """
         import numpy as np
         import jcm.constants as c
+        from jcm.physics.clouds.lohmann_2m_params import AerosolFreeFreezing, CloudParams2M
 
+        demott = CloudParams2M.default(aerosol_free_freezing=AerosolFreeFreezing.DEMOTT)
         cols = list(self._wbf_mixed_phase(tke=5.0))
         nlev = cols[0].shape[0]
         qc = cols[3]
 
         cols[11] = jnp.zeros(nlev)                       # no external INP
-        base, _, _ = self._run(tuple(cols))
+        base, _, _ = self._run(tuple(cols), params=demott)
         cols[11] = jnp.where(qc > 0, 1e6, 0.0)           # 1e6 /m³ immersion INP
-        high, _, _ = self._run(tuple(cols))
+        high, _, _ = self._run(tuple(cols), params=demott)
 
         d_qc = np.asarray(high.dqcdt - base.dqcdt)
         d_qi = np.asarray(high.dqidt - base.dqidt)
@@ -2684,6 +2868,105 @@ class TestColdChainSameStepCoupling2M:
             "has no cold-chain sink (#686)"
         )
 
+
+class TestWarmLevelMeltsBeforeSedimenting2M:
+    """A warm level's own in-cloud ice melts; it never sediments (#1116).
+
+    ECHAM's melt (`mo_cloud_micro_2m.f90` F 1170-1190) runs before
+    sedimentation (F 1221) and mutates `picnc`/`pxite` IN PLACE, so a
+    level with ``T_m1 > tmelt`` always enters section 4 with its own
+    in-cloud ice already gone — sedimenting a still-frozen flux out of a
+    warm level is a physical impossibility in the reference. A fixture-
+    free, differential check (no echam_cloud_reference data needed):
+    holding everything else fixed, adding a large amount of in-cloud ice
+    to a warm level must not change the frozen flux LEAVING that level —
+    if any of it sedimented instead of melting, the outgoing flux would
+    rise with it.
+    """
+
+    @staticmethod
+    def _column(qi_warm):
+        """4-level column: a cold ice-bearing level feeds a warm level below.
+
+        Level 0 (250 K, below ``cthomi``) holds ice and sediments a real
+        flux downward. Level 1 (280 K > ``tmelt``) receives that flux AND
+        holds ``qi_warm`` of its own in-cloud ice — the only thing that
+        varies between the two calls this test compares. Levels 2-3 are
+        warm and clear, so the flux and its melt heating have levels left
+        to propagate into (water conservation still has to hold end to
+        end).
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        nlev = 4
+        T = jnp.array([250.0, 280.0, 285.0, 290.0])
+        p = jnp.array([4.0e4, 6.0e4, 8.0e4, 1.0e5])
+        rho = p / (287.0 * T)
+        q = 0.8 * jax.vmap(saturation_specific_humidity)(p, T)
+        qi = jnp.array([3.0e-4, qi_warm, 0.0, 0.0])
+        qc = jnp.zeros(nlev)
+        cf = jnp.array([0.6, 0.5, 0.0, 0.0])
+        qni = jnp.where(qi > 0, 1.0e4, 0.0)
+        return dict(
+            T=T, q=q, p=p, qc=qc, qi=qi, qnc=jnp.zeros(nlev), qni=qni,
+            cf=cf, rho=rho, dz=jnp.full(nlev, 500.0),
+            tke=jnp.full(nlev, 0.1), act_cdnc=jnp.full(nlev, 5.0e7),
+        )
+
+    def _run(self, col):
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        nlev = col["T"].shape[0]
+        return cloud_microphysics_2m(
+            col["T"], col["q"], col["p"], col["qc"], col["qi"],
+            col["qnc"], col["qni"], col["cf"], col["rho"], col["dz"],
+            col["tke"], col["act_cdnc"],
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, CloudParams2M.default(),
+        )
+
+    def test_no_ice_flux_leaves_a_warm_level(self):
+        import numpy as np
+        baseline = self._run(self._column(qi_warm=0.0))
+        test = self._run(self._column(qi_warm=2.0e-4))
+        frozen_baseline = np.asarray(baseline[-1])
+        frozen_test = np.asarray(test[-1])
+        # Level 1 (the warm level) is where 2e-4 kg/kg of extra in-cloud
+        # ice was added: if ANY of it sedimented instead of melting, the
+        # flux LEAVING level 1 would rise well above the baseline's. It
+        # does not — to float64 round-off, not just "small compared to
+        # 2e-4": a warm level emits exactly the flux it received, melted,
+        # never more.
+        np.testing.assert_allclose(
+            frozen_test[1], frozen_baseline[1], rtol=1e-6, atol=1e-12,
+            err_msg="a warm level's own in-cloud ice reached the outgoing "
+                    "frozen flux instead of melting (#1116)")
+
+    def test_melt_heating_lands_in_the_warm_level(self):
+        """``dtedt`` at level 1 itself cools MORE with more ice to melt."""
+        baseline = self._run(self._column(qi_warm=0.0))
+        test = self._run(self._column(qi_warm=2.0e-4))
+        dtedt_base = float(baseline[0].dtedt[1])
+        dtedt_test = float(test[0].dtedt[1])
+        assert dtedt_test < dtedt_base - 1e-5, (
+            f"melting 2e-4 kg/kg of extra in-cloud ice did not cool the "
+            f"level that held it (dtedt {dtedt_base:.3e} -> {dtedt_test:.3e})"
+        )
+
+    def test_water_conserves_with_a_warm_in_cloud_melt(self):
+        import numpy as np
+        col = self._column(qi_warm=2.0e-4)
+        out = self._run(col)
+        tend, rain_sfc, snow_sfc = out[0], out[1], out[2]
+        mref = np.asarray(col["rho"] * col["dz"])
+        dw = np.asarray(tend.dqdt + tend.dqcdt + tend.dqidt)
+        precip = float(rain_sfc + snow_sfc)
+        gross = float(np.sum(np.abs(dw) * mref)) + abs(precip)
+        residual = float(np.sum(dw * mref) + precip)
+        assert gross > 0.0, "column did nothing — test is vacuous"
+        assert abs(residual) < max(1e-5 * gross, 1e-12), (
+            f"water budget open by {residual:.3e} kg/m2/s with a warm "
+            f"in-cloud melt (gross {gross:.3e})"
+        )
 
 
 class TestPrecipFluxProfiles2M:
@@ -2950,6 +3233,175 @@ class TestTotalCoverFollowsTheWriteBack2M:
         assert np.all(np.asarray(clouds.total_cloud_cover) < before)
 
 
+class TestDropletNumberPublishing2M:
+    """``clouds.droplet_number`` must carry the 2M's resolved CDNC (#1053).
+
+    Before this fix ``CloudData.droplet_number`` was created at zero
+    (``CloudData.zeros``) and only the 1-moment scheme filled it
+    (``echam_1m.py``'s ``cdnc_radiation``); the 2M scheme carries its number
+    as the prognostic ``qnc`` tracer instead, so this path left the
+    CF-advertised CDNC at that zero seed in every echam-2m / echam-jam /
+    echam-jam-m7 run.
+    """
+
+    NLEV, NCOLS = 8, 2
+    CLOUD = slice(5, 7)  # a warm liquid-cloud band near the surface
+
+    def _inputs(self):
+        from types import SimpleNamespace
+
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.convection.saturation import saturation_specific_humidity
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = self.NLEV, self.NCOLS
+        shape = (nlev, ncols)
+        col = lambda v: jnp.asarray(v)[:, None] * jnp.ones((1, ncols))  # noqa: E731
+        pressure = col(np.linspace(2.0e4, 9.5e4, nlev))
+        temperature = col(np.linspace(230.0, 288.0, nlev))
+        humidity = 0.6 * saturation_specific_humidity(
+            temperature, pressure, phase="water")
+        rho = pressure / (287.05 * temperature)
+
+        cloudy = np.zeros(nlev, dtype=bool)
+        cloudy[self.CLOUD] = True
+        cloud_mask = col(cloudy.astype(np.float64)) > 0.0
+
+        qc = jnp.where(cloud_mask, 4.0e-4, 0.0)
+        qi = jnp.zeros(shape)
+        # ~5e7 m^-3 in the cloud band, carried per kg of air (the tracer
+        # convention): the prescribed value a maritime 1M column would use,
+        # so the two schemes' numbers are of comparable magnitude here.
+        qnc = jnp.where(cloud_mask, 5.0e7 / rho, 0.0)
+        qni = jnp.zeros(shape)
+        cover = jnp.where(cloud_mask, 0.6, 0.0)
+
+        clouds = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=cover, qc=qc, qi=qi)
+        state = PhysicsState.zeros(
+            shape, temperature=temperature, specific_humidity=humidity,
+            tracers={"qc": qc, "qi": qi, "qnc": qnc, "qni": qni})
+        diagnostics = {
+            "_dt_seconds": 900.0, "pressure_full": pressure, "air_density": rho,
+            "layer_thickness": jnp.full(shape, 500.0), "clouds": clouds,
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "vertical_diffusion": SimpleNamespace(tke=jnp.full(shape, 0.1)),
+            "activated_cdnc": jnp.full(shape, 1.0e8),
+        }
+        return state, diagnostics, cloud_mask
+
+    def test_droplet_number_is_qnc_times_rho_in_cloud_zero_outside(self):
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+
+        state, diagnostics, cloud_mask = self._inputs()
+        dt = diagnostics["_dt_seconds"]
+        tendency, out = Lohmann2MMicrophysics()(state, diagnostics, None, None)
+        clouds = out["clouds"]
+
+        # The published value must be EXACTLY the tracer the host will save
+        # THIS step (step-start qnc plus this term's own tendency) times air
+        # density -- not the step-start tracer, which would date it a step
+        # behind (the trap the ``aerocom``/``cosp_cloudsat`` post-physics
+        # helpers exist to avoid).
+        qnc_saved = jnp.maximum(
+            state.tracers["qnc"] + dt * tendency.tracers["qnc"], 0.0)
+        expected = qnc_saved * diagnostics["air_density"]
+        np.testing.assert_allclose(
+            np.asarray(clouds.droplet_number), np.asarray(expected), rtol=1e-6)
+
+        # Nonzero where the liquid cloud is, and negligible (the scheme's
+        # cqtmin floor, 1e-12 m^-3) everywhere else -- the field must not be
+        # the identically-zero seed any more.
+        droplet_number = np.asarray(clouds.droplet_number)
+        in_cloud = np.asarray(cloud_mask)
+        assert np.all(droplet_number[in_cloud] > 1.0e6)
+        assert np.all(droplet_number[~in_cloud] < 1.0)
+
+    def test_droplet_number_is_grid_mean_not_in_cloud(self):
+        """Unlike the 1M field, this one is NOT divided by cloud fraction.
+
+        ECHAM-HAM hands its radiation the grid-mean number unmasked by
+        cover (``pacdnc = zcdnc``, ``mo_cloud_micro_2m.f90:1710``); dividing
+        by the 0.6 cover used here would inflate the in-cloud band's value
+        by 1/0.6, which this must not show.
+        """
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+
+        state, diagnostics, cloud_mask = self._inputs()
+        dt = diagnostics["_dt_seconds"]
+        tendency, out = Lohmann2MMicrophysics()(state, diagnostics, None, None)
+        clouds = out["clouds"]
+
+        qnc_saved = jnp.maximum(
+            state.tracers["qnc"] + dt * tendency.tracers["qnc"], 0.0)
+        grid_mean = qnc_saved * diagnostics["air_density"]
+        in_cloud_value = grid_mean / 0.6
+        droplet_number = np.asarray(clouds.droplet_number)[np.asarray(cloud_mask)]
+        np.testing.assert_allclose(
+            droplet_number, np.asarray(grid_mean)[np.asarray(cloud_mask)],
+            rtol=1e-6)
+        # Sanity: the (wrong) in-cloud form would be visibly different.
+        assert np.all(
+            np.abs(droplet_number
+                   - np.asarray(in_cloud_value)[np.asarray(cloud_mask)])
+            > 1.0)
+
+    def test_droplet_number_includes_an_upstream_qnc_tendency(self):
+        """A term upstream of the cloud scheme that also touches qnc must count.
+
+        Codex review on #1085: with no carried anchor, ``cloud_scheme_inputs``
+        gives ``inputs.provisional.tracers["qnc"]`` = ``state.tracers["qnc"]
+        + dt * diagnostics["_tendency_run"]["tracers"]["qnc"]`` -- exactly the
+        baseline the scheme's own CDNC ledger runs on (``qnc_raw`` /
+        ``tracer_tm1_cdnc``). Reconstructing the published value from
+        ``state.tracers["qnc"]`` alone, ignoring that running tendency, would
+        disagree with the saved tracer by exactly ``dt`` times it. No term in
+        the current codebase writes a ``qnc`` tendency ahead of the cloud
+        scheme (TTE-TKE and Tiedtke declare only qc/qi; JAM's tracer
+        diffusion list is built from JAM's own required tracers, never the
+        cloud scheme's) -- this pins the general case with a synthetic one
+        so a future upstream qnc-writer cannot silently go stale here.
+        """
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+
+        state, diagnostics, cloud_mask = self._inputs()
+        dt = diagnostics["_dt_seconds"]
+        shape = state.temperature.shape
+        zeros = jnp.zeros(shape)
+        # A synthetic upstream term halving the cloud-band qnc this step.
+        upstream_qnc_tendency = jnp.where(
+            cloud_mask, -0.5 * state.tracers["qnc"] / dt, 0.0)
+        diagnostics = {
+            **diagnostics,
+            "_tendency_run": {
+                "temperature": zeros, "specific_humidity": zeros,
+                "tracers": {"qnc": upstream_qnc_tendency,
+                            "qni": zeros, "qc": zeros, "qi": zeros},
+            },
+        }
+
+        tendency, out = Lohmann2MMicrophysics()(state, diagnostics, None, None)
+        clouds = out["clouds"]
+
+        provisional_qnc = state.tracers["qnc"] + dt * upstream_qnc_tendency
+        qnc_saved = jnp.maximum(
+            provisional_qnc + dt * tendency.tracers["qnc"], 0.0)
+        expected = qnc_saved * diagnostics["air_density"]
+        np.testing.assert_allclose(
+            np.asarray(clouds.droplet_number), np.asarray(expected), rtol=1e-6)
+
+        # The (bug) formula that drops the upstream tendency would disagree
+        # in the cloud band, where the synthetic upstream term is nonzero.
+        buggy = jnp.maximum(
+            state.tracers["qnc"] + dt * tendency.tracers["qnc"], 0.0
+        ) * diagnostics["air_density"]
+        in_cloud = np.asarray(cloud_mask)
+        assert np.all(
+            np.abs(np.asarray(clouds.droplet_number)[in_cloud]
+                   - np.asarray(buggy)[in_cloud]) > 1.0)
+
+
 class TestSpaConfigurationHandover:
     """SPA tuning is applied post-compose, so ``replace`` must carry it."""
 
@@ -2993,6 +3445,27 @@ class TestSchemeGradients2M:
     every one of those switches at once and has no two-sided derivative to
     compare against. That is the point, not the scheme; this fixture is off
     them.
+
+    The ``qi`` boost at levels 3:7 is 1.6e-4, not a rounder, larger number:
+    #972/#1110/#1116 moved this column's ice-sedimentation and melt flux
+    chain through three rounds of the same root cause (self-sublimation,
+    a snow double-spend a Codex review caught on the first fix, and
+    finally a warm level sedimenting its own in-cloud ice before melting
+    it, caught the same way on the second) to fully coupled, ECHAM-order
+    melt → sublimate → sediment at every level. Each round removed more
+    of an accidental smoothing the earlier, buggier orders gave this
+    exact 16-level central-difference check for free: at the un-reduced
+    2.3e-4 boost (and ``test_column_gradients_float32``'s original
+    ``seed=0``), the now-undamped chain's curvature along this fixture's
+    specific perturbation direction is sharp enough that no rung of the
+    float64 secant ladder converges within the 1e-4 tolerance either
+    (measured up to ~1.3e-4 across the several candidate boosts tried en
+    route to this one, as each round moved the operating point again).
+    Every number along the way is the SAME scheme correctly
+    differentiated at a harder point, not a regression in either the
+    physics or the AD; the boost and (float32 only) the seed are chosen
+    to land back on an operating point this check can resolve, exactly
+    as this docstring's own point above already requires.
     """
 
     NLEV = 16
@@ -3006,7 +3479,7 @@ class TestSchemeGradients2M:
         humidity = 0.93 * jax.vmap(saturation_specific_humidity)(
             pressure, temperature)
         qc = jnp.full(self.NLEV, 3.1e-5).at[9:13].set(1.1e-3)
-        qi = jnp.full(self.NLEV, 7.2e-6).at[3:7].set(2.3e-4)
+        qi = jnp.full(self.NLEV, 7.2e-6).at[3:7].set(1.6e-4)
         cloud_fraction = (jnp.full(self.NLEV, 0.14)
                           .at[3:7].set(0.55).at[9:13].set(0.65))
         # Number concentrations proportional to mass, so the two never
@@ -3075,7 +3548,7 @@ class TestSchemeGradients2M:
             "temperature", "humidity", "qc", "qi", "qnc", "qni",
             "cloud_fraction", "air_density"))
         check_gradients(self._scheme_fn(column), args,
-                        rtol=3e-2, seed=0, adjoint_rtol=1e-3)
+                        rtol=3e-2, seed=2, adjoint_rtol=1e-3)
 
     def test_gradients_are_finite_at_degenerate_operating_points(self):
         """Zero TKE, a clear column and zero droplet number stay finite.
@@ -3269,6 +3742,49 @@ class TestEchamUtilityWiring2M:
             np.testing.assert_allclose(
                 got[round(float(p[k]))], expected[k], rtol=1e-5, atol=1e-6)
 
+    def test_phase_criterion_includes_the_large_scale_omega_term(self, monkeypatch):
+        """``updraft_velocity`` is the full ECHAM ``zvervx`` (#705;
+        ``mo_cloud_micro_2m.f90:814-816``): ``-100·ω/(g·ρ)`` ADDED to the
+        turbulent term the sibling test above pins in isolation (there,
+        ``vertical_velocity`` defaults to zero). A per-level omega, mixed in
+        sign and distinct from the turbulent term's magnitude, isolates the
+        large-scale contribution rather than merely checking it is nonzero.
+        """
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m import scheme as scheme_mod
+        import jcm.constants as c
+        records = self._spy(
+            monkeypatch, scheme_mod, "mixed_phase_deposition_and_corrections",
+            # (pressure, ..., updraft_velocity is positional arg 17)
+            lambda a, k, out: (a[0], a[17]))
+        column = self._column()
+        n = self.NLEV
+        omega = jnp.linspace(-50.0, 80.0, n)   # Pa/s, mixed-sign, distinctive
+        cloud_microphysics_2m(
+            column["temperature_m1"], column["humidity"], column["pressure"],
+            column["qc"], column["qi"], column["qnc"], column["qni"],
+            column["cloud_fraction"], column["air_density"],
+            column["layer_thickness"], column["tke"],
+            jnp.full(n, 5.0e7), jnp.zeros(n), jnp.zeros(n),
+            1800.0, _P,
+            temperature_increment=(column["temperature"]
+                                   - column["temperature_m1"]),
+            vertical_velocity=omega,
+        )
+        got = {round(float(r[0])): float(r[1]) for r in records}
+        tke = np.asarray(column["tke"], dtype=np.float64)
+        rho = np.asarray(column["air_density"], dtype=np.float64)
+        om = np.asarray(omega, dtype=np.float64)
+        turbulent = 70.0 * np.sqrt(tke)
+        turbulent[-1] = 0.0         # levels are top-first; ECHAM zeroes the
+                                    # turbulent term at the lowest level (815)
+        expected = turbulent - 100.0 * om / (c.grav * rho)
+        p = np.asarray(column["pressure"])
+        assert len(got) == self.NLEV
+        for k in range(self.NLEV):
+            np.testing.assert_allclose(
+                got[round(float(p[k]))], expected[k], rtol=1e-5, atol=1e-6)
+
     def test_wbf_threshold_uses_schumann_radius(self, monkeypatch):
         """Every WBF threshold gets 0.9·r_eff, not the plate ``zrih`` radius.
 
@@ -3301,3 +3817,712 @@ class TestEchamUtilityWiring2M:
             # Ice-free levels sit on the lower clip, 0.9 x 10 um.
             np.testing.assert_allclose(radius.min(), 9.0e-6, rtol=1e-5,
                                        err_msg=name)
+
+
+class TestLargeScaleVerticalVelocityWiring:
+    """#705: the opportunistic ``diagnostics.get(...)`` reads inside
+    ``Lohmann2MMicrophysics.__call__`` -- ``diagnostics["_dycore_fields"]
+    ["omega"]`` and ``diagnostics["inversion_level"]`` -- actually reach
+    ``cloud_microphysics_2m``, not just the pure functions
+    (``lonacc_levels``, ``inversion_level_index``, ``cloud_microphysics_2m``
+    itself called with explicit keyword arguments) exercised elsewhere. A
+    typo in either key, or a wrong assumption about the ``_dycore_fields``
+    nesting, would silently fall back to "no large-scale contribution" with
+    every other existing test still green; this would not be.
+
+    Spies on ``jax.vmap`` at the point ``__call__`` invokes it (eager, no
+    outer jit/vmap here, so the captured arrays are concrete, not tracers)
+    rather than comparing physical tendencies: engineering a hand-built
+    column whose freezing/precipitation response to a few Pa/s of omega is
+    reliably measurable (not swamped or masked by the saturation closure)
+    is its own fragile exercise, and the reference comparison for the
+    *physics* of the omega-dependent terms already exists (section 6.2
+    against the compiled ECHAM Fortran, in
+    ``lohmann_2m_freezing_reference_test.py``). What is untested there is
+    the wiring from ``diagnostics`` to the function call, which this
+    isolates directly.
+
+    ``term._inversion_range`` is set directly rather than through
+    ``cache_coords`` (``sundqvist_test.py::test_inversion_levels_cached``
+    and the ``TestPostPhysicsAnchor`` fake-coords regression test already
+    cover that half independently) so the fixture's level count is free to
+    be small.
+    """
+
+    NLEV, NCOLS = 4, 2
+    JBMIN, JBMAX = 1, 3
+
+    def _inputs(self, omega, inversion_level):
+        from types import SimpleNamespace
+
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = self.NLEV, self.NCOLS
+        shape = (nlev, ncols)
+        temperature = jnp.full(shape, 260.0)
+        humidity = jnp.full(shape, 1.0e-3)
+        zeros = jnp.zeros(shape)
+        clouds = CloudData.zeros((ncols,), nlev)
+        state = PhysicsState.zeros(
+            shape, temperature=temperature, specific_humidity=humidity,
+            tracers={"qc": zeros, "qi": zeros, "qnc": zeros, "qni": zeros})
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": jnp.full(shape, 5.0e4),
+            "air_density": jnp.full(shape, 0.7),
+            "layer_thickness": jnp.full(shape, 500.0), "clouds": clouds,
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "vertical_diffusion": SimpleNamespace(tke=jnp.full(shape, 0.1)),
+            "activated_cdnc": jnp.full(shape, 5.0e7),
+            "_dycore_fields": {"omega": omega},
+            "inversion_level": inversion_level,
+        }
+        term = Lohmann2MMicrophysics()
+        term._inversion_range = (self.JBMIN, self.JBMAX)
+        return term, state, diagnostics
+
+    def _spy_on_vmap(self, monkeypatch):
+        """Capture the concrete args ``__call__`` hands to ``jax.vmap(...)``.
+
+        Patches ``jax.vmap`` globally for the duration of the test
+        (``monkeypatch`` reverts it after), but only wraps this one call:
+        ``Lohmann2MMicrophysics.__call__`` is the only ``jax.vmap`` site on
+        this path, and nothing here runs inside an outer jit/vmap, so the
+        args it is called with are plain concrete arrays, not tracers.
+        """
+        import jax
+        captured = {}
+        real_vmap = jax.vmap
+
+        def spy_vmap(fn, *a, **kw):
+            wrapped = real_vmap(fn, *a, **kw)
+
+            def call(*args, **kwargs):
+                # vertical_velocity / lonacc_mask sit fifth-/sixth-from-last:
+                # the #955 section-1 droplet-number sources' three args
+                # (cloud_fraction_prev, convective_base_activated_cdnc,
+                # has_convective_base) plus #1160's trailing
+                # ``activation_potential`` were appended after them (see
+                # ``Lohmann2MMicrophysics.__call__``'s ``jax.vmap`` call).
+                captured["vertical_velocity"] = args[-6]
+                captured["lonacc_mask"] = args[-5]
+                return wrapped(*args, **kwargs)
+            return call
+
+        monkeypatch.setattr(jax, "vmap", spy_vmap)
+        return captured
+
+    def test_the_real_omega_array_reaches_cloud_microphysics_2m(self, monkeypatch):
+        captured = self._spy_on_vmap(monkeypatch)
+        omega = jnp.arange(self.NLEV * self.NCOLS, dtype=jnp.float32).reshape(
+            self.NLEV, self.NCOLS) * 0.37 - 1.0   # distinctive, nonzero, mixed-sign
+        inversion_level = jnp.full((self.NCOLS,), -1, dtype=jnp.int32)
+        term, state, diagnostics = self._inputs(omega, inversion_level)
+
+        term(state, diagnostics, None, None)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["vertical_velocity"]), np.asarray(omega))
+
+    def test_lonacc_mask_matches_the_inversion_level_and_omega(self, monkeypatch):
+        from jcm.physics.clouds.echam_1m import lonacc_levels
+
+        captured = self._spy_on_vmap(monkeypatch)
+        # Positive (subsiding) at level 2, inside (jbmin=1, jbmax=3); zero
+        # elsewhere, so the expected mask is exactly {level 2, level 3}.
+        omega = jnp.zeros((self.NLEV, self.NCOLS)).at[2].set(3.0)
+        inversion_level = jnp.full((self.NCOLS,), 2, dtype=jnp.int32)
+        term, state, diagnostics = self._inputs(omega, inversion_level)
+
+        term(state, diagnostics, None, None)
+
+        expected = lonacc_levels(
+            inversion_level, omega, self.JBMIN, self.JBMAX, self.NLEV)
+        np.testing.assert_array_equal(
+            np.asarray(captured["lonacc_mask"]), np.asarray(expected))
+        assert bool(jnp.any(expected))   # the fixture actually exercises it
+
+    def test_missing_inversion_level_diagnostic_falls_back_to_no_exception(
+            self, monkeypatch):
+        """``diagnostics.get("inversion_level", ...)``'s soft-read default.
+
+        A composition without ``SundqvistCloudFraction`` (or any other
+        ``"inversion_level"`` publisher) must not raise, and must leave the
+        ``lonacc`` exception off everywhere rather than guessing.
+        """
+        captured = self._spy_on_vmap(monkeypatch)
+        omega = jnp.full((self.NLEV, self.NCOLS), 3.0)   # subsidence everywhere
+        term, state, diagnostics = self._inputs(omega, inversion_level=None)
+        del diagnostics["inversion_level"]
+
+        term(state, diagnostics, None, None)
+
+        assert not bool(jnp.any(captured["lonacc_mask"]))
+
+
+class TestCloudBaseActivationSensitivity955:
+    """#955's motivating case: a marine cloud-brightening sensitivity test.
+
+    Before this PR, a column whose CDNC is already above ``cdnc_min`` could
+    not respond to a larger aerosol-activated number at all: the only
+    reactivation path (``update_in_cloud_water``'s ``cdnc <= cdnc_min``
+    re-trigger) is closed. :func:`stratiform_activation_at_cloud_base`'s
+    "the cover grew" trigger opens a second path that a freshly-forming
+    cloud base takes regardless of where CDNC already sits, so doubling the
+    activated number now visibly raises the in-cloud CDNC one level above
+    the base, the signal a large sea-salt perturbation needs to be seen.
+    """
+
+    NLEV = 3
+    DT = 1800.0
+
+    def _column(self, activated_cdnc_value, *, cover_grew: bool):
+        """Build a warm, ice-free column: level 0 clear, 1-2 one cloud (base = 2).
+
+        ``qnc_m1`` gives a grid-mean CDNC of 6e7 /m^3, comfortably above the
+        default fixed floor (``cdnc_min_fixed`` = 40 cm^-3 = 4e7 /m^3): the
+        pre-#955 reactivation path is closed by construction.
+        """
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        # ECHAM's autoconversion rate: the JAM default (30) depletes the base's
+        # droplets below the start value within the step, hiding the activation.
+        p = CloudParams2M.default(ccraut=15.0)
+        nlev = self.NLEV
+        temperature = _full(nlev, 280.0)        # > tmelt: no ice/freezing path
+        pressure = jnp.array([3.0e4, 6.0e4, 9.0e4])
+        rho = pressure / (287.04 * temperature)
+        q = 0.5 * jnp.ones(nlev) * 1.0e-2        # subsaturated, well clear of RH=1
+        qc = jnp.where(jnp.arange(nlev) >= 1, 3.0e-4, 0.0)
+        qi = _zeros(nlev)
+        qni = _zeros(nlev)
+        cdnc_m3 = jnp.where(jnp.arange(nlev) >= 1, 6.0e7, 0.0)
+        qnc = cdnc_m3 / rho
+        cloud_fraction = jnp.where(jnp.arange(nlev) >= 1, 0.6, 0.0)
+        cloud_fraction_prev = (
+            # The base (level 2) had NO cover last step: it just formed.
+            jnp.array([0.0, 0.6, 0.0]) if cover_grew
+            # Already had this cover last step: no growth, no trigger.
+            else jnp.array([0.0, 0.6, 0.6]))
+        activated_cdnc = jnp.full(nlev, activated_cdnc_value)
+        tend, *_ = cloud_microphysics_2m(
+            temperature, q, pressure, qc, qi, qnc, qni,
+            cloud_fraction, rho, _full(nlev, 500.0), _zeros(nlev),
+            activated_cdnc, _zeros(nlev), _zeros(nlev),
+            self.DT, p,
+            cloud_fraction_prev=cloud_fraction_prev,
+        )
+        post_qnc = qnc + self.DT * tend.dqncdt
+        return post_qnc * rho   # CDNC [1/m^3] after the step
+
+    def test_doubling_the_activated_number_raises_cdnc_above_the_base(self):
+        baseline = 6.0e7   # the unperturbed grid-mean CDNC both columns start from
+        cdnc_1x = self._column(1.0e8, cover_grew=True)
+        cdnc_2x = self._column(2.0e8, cover_grew=True)
+        # Level 1 is strictly above the base (level 2); its CDNC is copied
+        # from the base's own activation (mo_cloud_micro_2m.f90:763-782) --
+        # the primary #955 claim this test exists to pin. (Autoconversion
+        # depletes some droplets downstream of activation at both levels,
+        # so the post-step values are not exactly the activated number;
+        # the comparison between the two columns is unaffected by that --
+        # the depletion is the same physics at the same operating point.)
+        assert float(cdnc_2x[1]) > float(cdnc_1x[1]) > baseline
+        # The base itself activated well above its unperturbed value, and
+        # more so for the doubled activated number.
+        assert float(cdnc_2x[2]) > float(cdnc_1x[2]) > baseline
+
+    def test_without_a_growing_base_doubling_has_no_effect(self):
+        """The control: CDNC already exceeds ``cdnc_min``, so without the
+        new "cover grew" trigger (#955) neither the old reactivation path
+        nor anything else responds to the aerosol number at all -- exactly
+        the gap the issue describes.
+        """
+        cdnc_1x = self._column(1.0e8, cover_grew=False)
+        cdnc_2x = self._column(2.0e8, cover_grew=False)
+        np.testing.assert_allclose(
+            np.asarray(cdnc_1x), np.asarray(cdnc_2x), rtol=1e-6)
+        # And CDNC stayed well below the activated number -- confirming
+        # activation did not run at all (only its own, N_act-independent,
+        # processes -- e.g. autoconversion depletion -- touched it).
+        assert float(cdnc_1x[1]) < 8.0e7
+
+
+class TestConvectiveCloudBaseWiring955:
+    """#955: the term-level plumbing to ``cloud_microphysics_2m`` for both sources.
+
+    Reuses :class:`TestLargeScaleVerticalVelocityWiring`'s spy-on-``vmap``
+    technique: the diagnostics-dict reads (``"cloud_fraction_prev"``,
+    ``"convection"``) must reach the function call with the right values
+    and the right fallback when their producer is absent, not just work in
+    the pure-function tests exercised elsewhere.
+    """
+
+    NLEV, NCOLS = 4, 2
+
+    def _inputs(self, *, cloud_fraction_prev=None, convection=None):
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = self.NLEV, self.NCOLS
+        shape = (nlev, ncols)
+        temperature = jnp.full(shape, 260.0)
+        humidity = jnp.full(shape, 1.0e-3)
+        zeros = jnp.zeros(shape)
+        clouds = CloudData.zeros((ncols,), nlev)
+        state = PhysicsState.zeros(
+            shape, temperature=temperature, specific_humidity=humidity,
+            tracers={"qc": zeros, "qi": zeros, "qnc": zeros, "qni": zeros})
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": jnp.full(shape, 5.0e4),
+            "air_density": jnp.full(shape, 0.7),
+            "layer_thickness": jnp.full(shape, 500.0), "clouds": clouds,
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "activated_cdnc": jnp.full(shape, 5.0e7),
+        }
+        if cloud_fraction_prev is not None:
+            diagnostics["cloud_fraction_prev"] = cloud_fraction_prev
+        if convection is not None:
+            diagnostics["convection"] = convection
+        term = Lohmann2MMicrophysics()
+        term._inversion_range = (1, nlev - 1)
+        return term, state, diagnostics
+
+    def _spy_on_vmap(self, monkeypatch):
+        import jax
+        captured = {}
+        real_vmap = jax.vmap
+
+        def spy_vmap(fn, *a, **kw):
+            wrapped = real_vmap(fn, *a, **kw)
+
+            def call(*args, **kwargs):
+                # Trailing positional order (scheme.py's vmap call, #1160
+                # appended ``activation_potential`` last):
+                # ..., cloud_fraction_prev, convective_base_activated_cdnc,
+                # has_convective_cloud_base, activation_potential.
+                captured["cloud_fraction_prev"] = args[-4]
+                captured["convective_base_activated_cdnc"] = args[-3]
+                captured["has_convective_cloud_base"] = args[-2]
+                captured["activation_potential"] = args[-1]
+                return wrapped(*args, **kwargs)
+            return call
+
+        monkeypatch.setattr(jax, "vmap", spy_vmap)
+        return captured
+
+    def test_published_cloud_fraction_prev_reaches_the_function(self, monkeypatch):
+        captured = self._spy_on_vmap(monkeypatch)
+        prev = jnp.full((self.NLEV, self.NCOLS), 0.3)   # distinctive, != this step's 0
+        term, state, diagnostics = self._inputs(cloud_fraction_prev=prev)
+
+        term(state, diagnostics, None, None)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["cloud_fraction_prev"]), np.asarray(prev))
+
+    def test_missing_cloud_fraction_prev_falls_back_to_this_steps_cover(
+            self, monkeypatch):
+        captured = self._spy_on_vmap(monkeypatch)
+        term, state, diagnostics = self._inputs()
+        assert "cloud_fraction_prev" not in diagnostics
+
+        term(state, diagnostics, None, None)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["cloud_fraction_prev"]),
+            np.asarray(diagnostics["clouds"].cloud_fraction))
+
+    def test_convective_base_activated_cdnc_is_gathered_at_cloud_base(
+            self, monkeypatch):
+        from types import SimpleNamespace
+        captured = self._spy_on_vmap(monkeypatch)
+        # A distinctive, level-varying activated_cdnc so the gather is
+        # identifiable; cloud_base picks level 2 in column 0, level 0 in
+        # column 1 (both ktype > 0, an active updraft).
+        activated = jnp.arange(
+            self.NLEV * self.NCOLS, dtype=jnp.float32).reshape(
+            self.NLEV, self.NCOLS) * 1.0e7
+        convection = SimpleNamespace(
+            cloud_base=jnp.array([2, 0], dtype=jnp.int32),
+            ktype=jnp.array([1, 2], dtype=jnp.int32))
+        term, state, diagnostics = self._inputs(convection=convection)
+        diagnostics["activated_cdnc"] = activated
+
+        term(state, diagnostics, None, None)
+
+        expected = jnp.array([activated[2, 0], activated[0, 1]])
+        np.testing.assert_allclose(
+            np.asarray(captured["convective_base_activated_cdnc"]),
+            np.asarray(expected))
+        np.testing.assert_array_equal(
+            np.asarray(captured["has_convective_cloud_base"]), [True, True])
+
+    def test_missing_convection_diagnostic_falls_back_to_no_convective_base(
+            self, monkeypatch):
+        captured = self._spy_on_vmap(monkeypatch)
+        term, state, diagnostics = self._inputs()
+        assert "convection" not in diagnostics
+
+        term(state, diagnostics, None, None)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["has_convective_cloud_base"]),
+            [False, False])
+        np.testing.assert_allclose(
+            np.asarray(captured["convective_base_activated_cdnc"]),
+            [0.0, 0.0])
+
+    def test_ktype_zero_column_has_no_convective_base_even_with_cloud_base_set(
+            self, monkeypatch):
+        """``convection.cloud_base`` means nothing where ``ktype == 0``."""
+        from types import SimpleNamespace
+        captured = self._spy_on_vmap(monkeypatch)
+        convection = SimpleNamespace(
+            cloud_base=jnp.array([2, 1], dtype=jnp.int32),
+            ktype=jnp.array([0, 0], dtype=jnp.int32))
+        term, state, diagnostics = self._inputs(convection=convection)
+
+        term(state, diagnostics, None, None)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["has_convective_cloud_base"]),
+            [False, False])
+
+
+class TestConvectiveDetrainmentReadsTheUnmaskedPotential1160:
+    """jax-gcm#1160: a Codex P1 on PR #1160's convective-base gather.
+
+    ``spa_activated_cdnc`` (the diagnostic that used to stand in for both
+    section-1 sources) is a cover-masked, GRID-MEAN floor -- exactly zero
+    in a clear cell (``cloud_fraction == 0``). A convective cloud base can
+    sit in a cell with little or no STRATIFORM cover, so gathering that
+    masked value there (pre-#1160) read a spurious zero and left the
+    detrained-liquid droplet source inactive. ``activation_potential`` is
+    the unmasked replacement (never zero merely because the cell is
+    clear); these tests pin the ``cloud_microphysics_2m``-level mechanism
+    directly, at the pure-function level ``TestCloudBaseActivationSensitivity955``
+    already uses for the sibling #955 source.
+    """
+
+    NLEV = 2
+    DT = 1800.0
+
+    def _column(self, *, activation_potential, convective_base_potential):
+        """Build a single warm, ice-free level: a near-clear stratiform
+        sky (``cloud_fraction`` just above ``clc_min`` -- "little or no
+        stratiform cover", the finding's own wording), an active
+        convective base, and detrained liquid this step.
+
+        ``cloud_fraction`` cannot be literally 0 here: with NO cloud cover
+        at all, this scheme (faithfully) re-evaporates the WHOLE of any
+        newly-arriving condensate back to vapour before it can carry a
+        droplet number anywhere (ECHAM's own ``(1-paclc)·max(increment,0)``
+        clear-sky-evaporation split, 1319-1345) -- there being no cloud at
+        all is a different, correct, no-op, not the bug. A SMALL cover
+        (0.05, ``clc_min`` is 0.01) is the "little stratiform cover" case
+        the finding describes and the one the masked ``activated_cdnc``
+        would read as a small FRACTION of the potential, not zero.
+        """
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        p = CloudParams2M.default()
+        nlev = self.NLEV
+        temperature = _full(nlev, 280.0)       # > tmelt: liquid, not ice
+        pressure = jnp.array([6.0e4, 9.0e4])
+        rho = pressure / (287.04 * temperature)
+        q = 0.5 * jnp.ones(nlev) * 1.0e-2
+        qc = _zeros(nlev)                       # NO pre-existing stratiform liquid
+        qi = _zeros(nlev)
+        floor = p.cdnc_min_fixed * 1.0e6        # cm^-3 -> m^-3
+        qnc_m3 = jnp.full(nlev, floor)           # at the fixed cdnc_min floor
+        qnc = qnc_m3 / rho
+        qni = _zeros(nlev)
+        cloud_fraction = jnp.array([0.0, 0.05])  # level 1: little stratiform cover
+        detrained_qc = jnp.array([0.0, 3.0e-5])  # convective detrainment at level 1
+        activated_cdnc = jnp.zeros(nlev)         # the (masked) SPA diagnostic: 0, cf small
+        tend, *_ = cloud_microphysics_2m(
+            temperature, q, pressure, qc, qi, qnc, qni,
+            cloud_fraction, rho, _full(nlev, 500.0), _zeros(nlev),
+            activated_cdnc, _zeros(nlev), _zeros(nlev),
+            self.DT, p,
+            detrained_qc=detrained_qc,
+            convective_base_activated_cdnc=convective_base_potential,
+            has_convective_cloud_base=jnp.array(True),
+            activation_potential=activation_potential,
+        )
+        post_qnc = qnc + self.DT * tend.dqncdt
+        return post_qnc * rho   # CDNC [1/m^3] after the step
+
+    def test_clear_sky_convective_base_still_gets_a_droplet_number(self):
+        """The fix: a nonzero ``activation_potential`` reaches the
+        detrainment source even though the stratiform ``activated_cdnc``
+        at this (little-cover) cell would have been a small fraction of
+        it, or exactly zero at literal ``cloud_fraction == 0``.
+        """
+        potential = jnp.full(self.NLEV, 2.0e8)   # a real, unmasked potential
+        baseline = self._column(
+            activation_potential=jnp.zeros(self.NLEV),
+            convective_base_potential=jnp.array(0.0))
+        fixed = self._column(
+            activation_potential=potential,
+            convective_base_potential=jnp.array(2.0e8))
+        # No potential at all -> no detrained-liquid droplet source ->
+        # CDNC stays at its unperturbed floor.
+        floor = CloudParams2M.default().cdnc_min_fixed * 1.0e6
+        np.testing.assert_allclose(
+            np.asarray(baseline[1]), floor, rtol=1e-3)
+        # The real potential -> the detrained liquid is credited a
+        # droplet number -> CDNC at the detraining level rises well
+        # above the floor, close to the activated potential itself.
+        assert float(fixed[1]) > 1.5e8 > float(baseline[1])
+
+    def test_pre_1160_masked_value_would_have_given_the_same_zero(self):
+        """Regression anchor: confirms WHY the baseline above is zero --
+        it is exactly what gathering the (clear-cell) masked
+        ``activated_cdnc`` would have given pre-#1160 (the bug), not a
+        coincidence of this test's setup. ``spa_activated_cdnc`` is
+        exactly 0 at ``cloud_fraction == 0`` by construction (see
+        ``spa_test.py``); this only confirms the WIRING consequence of
+        that zero.
+        """
+        from jcm.physics.aerosol.spa import spa_activated_cdnc
+        masked = spa_activated_cdnc(
+            jnp.full(self.NLEV, 500.0), jnp.zeros(self.NLEV),
+            jnp.asarray(2000.0), jnp.asarray(0.55))
+        assert bool(jnp.all(masked == 0.0))
+
+
+class TestMacv2SpConvectiveBasePublishesThePotential1160:
+    """jax-gcm#1160: end-to-end under the DEFAULT MACv2-SP (no JAM) route.
+
+    ``Lohmann2MMicrophysics.__call__`` must compute and gather
+    ``spa_activation_potential`` (unmasked), not ``spa_activated_cdnc``
+    (cover-masked), when wiring the convective-base source -- the SAME
+    spy-on-``vmap`` technique ``TestConvectiveCloudBaseWiring955`` uses,
+    exercised through the SPA branch that class's own fixture (which
+    always supplies ``activated_cdnc`` directly) never reaches.
+    """
+
+    NLEV, NCOLS = 2, 1
+
+    def _inputs(self, *, cloud_fraction_value, nccn_value):
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = self.NLEV, self.NCOLS
+        shape = (nlev, ncols)
+        temperature = jnp.full(shape, 280.0)
+        humidity = jnp.full(shape, 1.0e-3)
+        zeros = jnp.zeros(shape)
+        clouds = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=jnp.full(shape, cloud_fraction_value))
+        state = PhysicsState.zeros(
+            shape, temperature=temperature, specific_humidity=humidity,
+            tracers={"qc": zeros, "qi": zeros, "qnc": zeros, "qni": zeros})
+        diagnostics = {
+            "_dt_seconds": 1800.0,
+            "pressure_full": jnp.full(shape, 9.0e4),
+            "air_density": jnp.full(shape, 1.1),
+            "layer_thickness": jnp.full(shape, 500.0), "clouds": clouds,
+            "aerosol": AerosolData.zeros((ncols,), nlev).copy(
+                Nccn=jnp.full((ncols,), nccn_value)),
+        }
+        term = Lohmann2MMicrophysics()
+        term._inversion_range = (1, nlev - 1)
+        return term, state, diagnostics
+
+    def _spy_on_vmap(self, monkeypatch):
+        import jax
+        captured = {}
+        real_vmap = jax.vmap
+
+        def spy_vmap(fn, *a, **kw):
+            wrapped = real_vmap(fn, *a, **kw)
+
+            def call(*args, **kwargs):
+                captured["convective_base_activated_cdnc"] = args[-3]
+                captured["activation_potential"] = args[-1]
+                return wrapped(*args, **kwargs)
+            return call
+
+        monkeypatch.setattr(jax, "vmap", spy_vmap)
+        return captured
+
+    def test_macv2sp_gather_is_the_unmasked_potential_not_zero(
+            self, monkeypatch):
+        """A clear-sky (``cloud_fraction == 0``) column, MACv2-SP (no
+        ``activated_cdnc`` diagnostic) -- the exact cell the Codex review
+        on PR #1160 flagged. The gathered value must be
+        ``spa_activation_potential``, strictly positive, NOT
+        ``spa_activated_cdnc`` at ``cloud_fraction == 0`` (which is
+        exactly zero by construction).
+        """
+        from types import SimpleNamespace
+        from jcm.physics.aerosol.spa import spa_activation_potential
+
+        captured = self._spy_on_vmap(monkeypatch)
+        convection = SimpleNamespace(
+            cloud_base=jnp.array([0], dtype=jnp.int32),
+            ktype=jnp.array([1], dtype=jnp.int32))
+        term, state, diagnostics = self._inputs(
+            cloud_fraction_value=0.0, nccn_value=500.0)
+        diagnostics["convection"] = convection
+
+        term(state, diagnostics, None, None)
+
+        # ``Lohmann2MMicrophysics()``'s own SPA defaults (prefactor=1.0,
+        # exponent=0.5) -- NOT ``AerosolParameters.default()``'s Lin
+        # (2025) fit, which is only wired in via the ``echam_physics()``
+        # factory, not this bare construction.
+        expected_potential = spa_activation_potential(
+            jnp.full((self.NCOLS,), 500.0)[jnp.newaxis, :],
+            term._spa_prefactor.get_value(), term._spa_exponent.get_value(),
+            term._spa_cap_smoothing.get_value())
+        gathered = np.asarray(captured["convective_base_activated_cdnc"])
+        assert np.all(gathered > 0.0), (
+            "convective-base gather read zero at a clear-sky base -- "
+            "the exact #1160 regression")
+        np.testing.assert_allclose(
+            gathered, np.asarray(expected_potential[0]), rtol=1e-5)
+
+    def test_convective_base_above_level_zero_is_finite(self, monkeypatch):
+        """Codex P1 round 2 on #1160 (inline comment 4331398194): under
+        MACv2-SP, ``spa_activation_potential``'s raw output is shape
+        ``(1, ncols)`` -- unlike ``spa_activated_cdnc``, it has no
+        ``cloud_fraction`` factor to broadcast the column-mean ``Nccn``
+        against -- so before it is broadcast to the full ``(nlev, ncols)``
+        grid, gathering it at any base level above the surface (index > 0,
+        here ``NLEV - 1``) reads past the end of a size-1 level axis.
+        ``jnp.take_along_axis``'s default fill mode turns that into a
+        silent NaN rather than a raised error, which then entered the
+        detrained-liquid droplet-number blend. The earlier
+        ``test_macv2sp_gather_is_the_unmasked_potential_not_zero`` used
+        ``cloud_base=0``, which happens to stay in-bounds even on the
+        unbroadcast array and so never exercised this.
+        """
+        from types import SimpleNamespace
+        from jcm.physics.aerosol.spa import spa_activation_potential
+
+        captured = self._spy_on_vmap(monkeypatch)
+        base_level = self.NLEV - 1
+        assert base_level > 0, "the regression needs a base above level 0"
+        convection = SimpleNamespace(
+            cloud_base=jnp.array([base_level], dtype=jnp.int32),
+            ktype=jnp.array([1], dtype=jnp.int32))
+        term, state, diagnostics = self._inputs(
+            cloud_fraction_value=0.0, nccn_value=500.0)
+        diagnostics["convection"] = convection
+
+        term(state, diagnostics, None, None)
+
+        expected_potential = spa_activation_potential(
+            jnp.full((self.NCOLS,), 500.0)[jnp.newaxis, :],
+            term._spa_prefactor.get_value(), term._spa_exponent.get_value(),
+            term._spa_cap_smoothing.get_value())
+        gathered = np.asarray(captured["convective_base_activated_cdnc"])
+        assert np.all(np.isfinite(gathered)), (
+            "convective-base gather above level 0 was NaN -- the "
+            "unbroadcast (1, ncols) activation_potential shape bug")
+        np.testing.assert_allclose(
+            gathered, np.asarray(expected_potential[0]), rtol=1e-5)
+
+    def test_section_5_5_site_receives_the_unmasked_potential(
+            self, monkeypatch):
+        """jax-gcm#1161: ``scheme.py``'s ``scan_inputs`` feeds the per-level
+        scan's section-5.5 re-activation (``update_in_cloud_water``) from
+        the SAME ``activation_potential`` array ``vmap`` passes to
+        ``cloud_microphysics_2m`` (its own trailing argument, the one this
+        spy captures as ``"activation_potential"``) -- not the raw
+        ``activated_cdnc``, absent here under MACv2-SP. A clear-sky
+        (``cloud_fraction == 0``) column must therefore see it strictly
+        positive, matching ``spa_activation_potential``, not
+        ``spa_activated_cdnc``'s cover-masked zero.
+        """
+        from jcm.physics.aerosol.spa import spa_activation_potential
+
+        captured = self._spy_on_vmap(monkeypatch)
+        term, state, diagnostics = self._inputs(
+            cloud_fraction_value=0.0, nccn_value=500.0)
+
+        term(state, diagnostics, None, None)
+
+        expected_potential = spa_activation_potential(
+            jnp.full((self.NCOLS,), 500.0)[jnp.newaxis, :],
+            term._spa_prefactor.get_value(), term._spa_exponent.get_value(),
+            term._spa_cap_smoothing.get_value())
+        fed_to_scan = np.asarray(captured["activation_potential"])
+        assert fed_to_scan.shape == (self.NLEV, self.NCOLS)
+        assert np.all(fed_to_scan > 0.0), (
+            "activation_potential fed to the scan (section 5.5's own "
+            "input) was zero at a clear-sky cell -- looks cover-masked")
+        np.testing.assert_allclose(
+            fed_to_scan,
+            np.broadcast_to(np.asarray(expected_potential), fed_to_scan.shape),
+            rtol=1e-5)
+
+
+class TestUpdateInCloudWaterWiringReadsActivationPotential1161:
+    """jax-gcm#1161: ``cloud_microphysics_2m`` must thread its OWN resolved
+    ``activation_potential`` into the per-level scan's section-5.5 call
+    (``update_in_cloud_water``'s second positional argument,
+    ``activated_cdnc`` in that function's own signature) -- not the raw
+    ``activated_cdnc`` parameter ``cloud_microphysics_2m`` itself takes.
+    Gives the two deliberately DIFFERENT values so a wiring regression
+    (the scan's own input reverting to ``activated_cdnc``) is unambiguous,
+    using the same ``jax.debug.callback``-based spy
+    ``lohmann_2m_ice_sources_test.py`` already relies on to see inside a
+    ``lax.scan`` at runtime.
+    """
+
+    def test_activation_potential_not_activated_cdnc_reaches_the_call(
+            self, monkeypatch):
+        import jax
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m import scheme as scheme_mod
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 4
+        temperature = jnp.full(nlev, 280.0)
+        pressure = jnp.linspace(6.0e4, 1.0e5, nlev)
+        air_density = pressure / (287.0 * temperature)
+        humidity = 0.5 * jax.vmap(saturation_specific_humidity)(
+            pressure, temperature)
+        zeros = jnp.zeros(nlev)
+        params = CloudParams2M.default()
+
+        # Deliberately different: a wiring regression that reverts the
+        # scan's own input to ``activated_cdnc`` would make the spy see
+        # 1e6, not 9e8.
+        activated_cdnc = jnp.full(nlev, 1.0e6)
+        activation_potential = jnp.full(nlev, 9.0e8)
+
+        records = []
+        original = scheme_mod.update_in_cloud_water
+
+        def wrapper(*args, **kwargs):
+            out = original(*args, **kwargs)
+            jax.debug.callback(
+                lambda v: records.append(np.asarray(v)), args[1])
+            return out
+
+        monkeypatch.setattr(scheme_mod, "update_in_cloud_water", wrapper)
+
+        cloud_microphysics_2m(
+            temperature, humidity, pressure, zeros, zeros, zeros, zeros,
+            zeros, air_density, jnp.full(nlev, 500.0),
+            jnp.full(nlev, 0.1), activated_cdnc,
+            zeros, zeros,
+            1800.0, params,
+            activation_potential=activation_potential,
+        )
+
+        assert len(records) == nlev, "update_in_cloud_water was not called"
+        seen = np.asarray(records).reshape(-1)
+        np.testing.assert_allclose(seen, 9.0e8, rtol=1e-5)

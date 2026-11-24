@@ -12,8 +12,8 @@ ECHAM reference bound:
 * #676.4 — the SURFACE layer receives a convective tendency (ECHAM's
   ``jk == klev`` cudtdq branch), no longer identically zero.
 * #676.2 — momentum transport (cududv) carries a surface-layer term and a
-  sub-cloud taper; the ``_DTDT_MAX`` cap scales dudt/dvdt consistently with
-  the rest of the ledger.
+  sub-cloud taper, built from the same mass fluxes that drive T/q/qc/qi so
+  dudt/dvdt stay proportional to the rest of the ledger.
 * #669 — organized entrainment/detrainment are the metre-based fractional
   rates capped at ``centrmax`` (3.0e-4 m⁻¹); the cap engages on a deep plume.
 """

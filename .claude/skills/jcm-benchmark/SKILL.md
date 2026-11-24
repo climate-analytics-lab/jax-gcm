@@ -19,7 +19,7 @@ $PY tools/benchmark.py --preset t63-echam-rrtmgp --months 1 --gpu 1 \
     --label baseline
 
 # Long: 12 months. Use for provisioning and drift, not for A/B.
-$PY tools/benchmark.py --preset t63-echam-jam --months 12 --gpu 3 \
+$PY tools/benchmark.py --preset t63-echam-jam-mam4 --months 12 --gpu 3 \
     --chunk-days 30 --label jam-year
 
 # A/B a library version without touching the shared editable install
@@ -176,6 +176,18 @@ output times dies in `to_xarray()` with an opaque
 working tree is the running code.** Never `git checkout` a different branch in
 the shared clone to benchmark it; that silently changes the code under anyone
 else's concurrent run.
+
+`--pythonpath` selects a **jcm worktree** the same way it selects a library
+worktree — point it at a checkout containing a `jcm/` package to benchmark
+that branch instead of the clone, without touching the shared install. The
+tool now verifies the override actually took: it probes `import jcm` with
+the exact interpreter/env the model subprocess will use and refuses to start
+if the resolved path isn't under the requested `--pythonpath`, naming both
+paths. (The historical trap, jax-gcm#1111: `python -m jcm.main` ran with
+`cwd=REPO`, which for `-m` sits on `sys.path` ahead of `PYTHONPATH`, so a
+`--pythonpath` naming a jcm worktree was silently ignored for `jcm` itself —
+caught only because the report happened to record the resolved tree. Fixed
+by running the child with `-P`, which keeps `cwd` off `sys.path`.)
 
 Instead make a worktree and point the benchmark at it:
 

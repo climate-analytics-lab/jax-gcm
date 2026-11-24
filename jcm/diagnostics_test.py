@@ -75,6 +75,30 @@ class TestCheckHealth(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any("NaN" in reason for reason in report["reasons"]))
 
+    def test_configurable_temperature_ceiling_fails_below_absolute_cap(self):
+        # #1145: a drifting-but-not-blown-up core (420 K, below the fixed
+        # T_max > 500 cap) must still fail the gate via the new configurable
+        # ceiling — this is exactly the Lott-Miller investigation's signature.
+        ds = _make_dataset(T_min=240.0, T_max=420.0)
+        ok, report = check_health(ds, 0, 10.0, max_temperature=400.0)
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("T_max" in reason and "400" in reason
+                for reason in report["reasons"]))
+
+    def test_configurable_temperature_ceiling_none_disables_it(self):
+        ds = _make_dataset(T_min=240.0, T_max=420.0)
+        ok, _ = check_health(ds, 0, 10.0, max_temperature=None)
+        self.assertTrue(ok)
+
+    def test_healthy_dataset_under_1145_defaults(self):
+        # The gate's defaults must not trip a normal run with no u_wind/v_wind
+        # at all (e.g. a Held-Suarez or single-column dataset).
+        ds = _make_dataset(T_min=240.0, T_max=310.0)
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertTrue(ok)
+        self.assertNotIn("wind_speed_max", report)
+
 
 class TestCheckHealthOptionalDiagnostics(unittest.TestCase):
     """Radiation / surface-T / convective-precip report fields.
@@ -232,6 +256,124 @@ class TestEmissionWindProvenance(unittest.TestCase):
         ds = self._ds(0.0)
         ds["temperature"] = ds["temperature"] * 0.0 + 600.0
         self.assertFalse(check_health(ds, 0, 5.0)[0])
+
+
+class TestWindSpeedCeiling(unittest.TestCase):
+    """#1145: a wind-speed ceiling, following the same report/reason pattern
+    as the existing temperature/humidity checks.
+    """
+
+    def _ds_with_wind(self, u_max: float, T_max: float = 300.0):
+        ds = _make_dataset(T_min=240.0, T_max=T_max)
+        nt, nx, ny = ds["temperature"].shape
+        rng = np.random.default_rng(1)
+        u = u_max * rng.random((nt, nx, ny))
+        v = u_max * rng.random((nt, nx, ny))
+        ds["u_wind"] = (("time", "lon", "lat"), u)
+        ds["v_wind"] = (("time", "lon", "lat"), v)
+        return ds
+
+    def test_drifting_lid_winds_fail_the_gate(self):
+        # The 2026-10-16 Lott-Miller investigation's signature: ~520-672 m/s
+        # top-level winds that every chunk reported OK because no ceiling
+        # existed at all.
+        ds = self._ds_with_wind(u_max=520.0)
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("wind_speed_max" in reason for reason in report["reasons"]))
+
+    def test_held_suarez_scale_winds_pass(self):
+        # Held-Suarez on the same core settles at ~78 m/s (#1145) — the
+        # default ceiling must not trip a healthy run.
+        ds = self._ds_with_wind(u_max=78.0)
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertTrue(ok)
+        self.assertLess(report["wind_speed_max"], 250.0)
+
+    def test_ceiling_is_configurable(self):
+        ds = self._ds_with_wind(u_max=100.0)
+        ok, _ = check_health(ds, 0, 10.0, max_wind_speed=50.0)
+        self.assertFalse(ok)
+
+    def test_none_disables_the_ceiling(self):
+        ds = self._ds_with_wind(u_max=520.0)
+        ok, _ = check_health(ds, 0, 10.0, max_wind_speed=None)
+        self.assertTrue(ok)
+
+    def test_absent_wind_fields_are_not_reported(self):
+        ds = _make_dataset(T_min=240.0, T_max=300.0)
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertTrue(ok)
+        self.assertNotIn("wind_speed_max", report)
+
+    def test_print_report_shows_wind_speed(self):
+        import contextlib
+        import io
+        ds = self._ds_with_wind(u_max=100.0)
+        _, report = check_health(ds, 0, 10.0)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            print_report(report)
+        self.assertIn("Wind speed", buf.getvalue())
+
+
+class TestBoundaryStateOverridesAveragedDataset(unittest.TestCase):
+    """Codex review finding on #1145: under ``run.output_averages=true``
+    ``ds`` is the chunk's INTERVAL MEAN, which can hide an instantaneous
+    blowup entirely -- alternating-sign wind components average toward a
+    small resultant, and a transient temperature spike is smoothed away.
+    ``boundary_state`` (the instantaneous chunk-boundary gridpoint state)
+    must override the averaged fields for every extreme-value check when
+    supplied.
+    """
+
+    def _benign_averaged_dataset(self):
+        # An interval mean with nothing alarming in it: small wind
+        # components, moderate temperature -- the published numbers an
+        # averaged chunk's blowup would hide behind.
+        ds = _make_dataset(T_min=270.0, T_max=290.0)
+        nt, nx, ny = ds["temperature"].shape
+        ds["u_wind"] = (("time", "lon", "lat"), np.full((nt, nx, ny), 1.0))
+        ds["v_wind"] = (("time", "lon", "lat"), np.full((nt, nx, ny), 1.0))
+        return ds
+
+    def _extreme_boundary_state(self):
+        from types import SimpleNamespace
+        shape = (4, 4)
+        return SimpleNamespace(
+            temperature=np.full(shape, 285.0),
+            u_wind=np.full(shape, 400.0),   # well past the 250 m/s default
+            v_wind=np.zeros(shape),
+            specific_humidity=np.full(shape, 0.01),
+        )
+
+    def test_benign_average_passes_with_no_boundary_state(self):
+        ds = self._benign_averaged_dataset()
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertTrue(ok)
+        self.assertLess(report["wind_speed_max"], 250.0)
+
+    def test_extreme_boundary_state_fails_even_though_the_average_is_benign(self):
+        ds = self._benign_averaged_dataset()
+        boundary_state = self._extreme_boundary_state()
+        ok, report = check_health(ds, 0, 10.0, boundary_state=boundary_state)
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("wind_speed_max" in reason for reason in report["reasons"]))
+        # The report reflects the boundary state's wind speed, not the
+        # averaged dataset's (which would have read ~1.4 m/s).
+        self.assertAlmostEqual(report["wind_speed_max"], 400.0)
+
+    def test_boundary_temperature_also_overrides_the_averaged_one(self):
+        ds = self._benign_averaged_dataset()
+        boundary_state = self._extreme_boundary_state()
+        boundary_state.temperature = np.full((4, 4), 420.0)
+        ok, report = check_health(
+            ds, 0, 10.0, boundary_state=boundary_state, max_wind_speed=None)
+        self.assertFalse(ok)
+        self.assertAlmostEqual(report["T_max"], 420.0)
+        self.assertTrue(any("T_max" in r for r in report["reasons"]))
 
 
 class TestAerosolBudgetReport(unittest.TestCase):

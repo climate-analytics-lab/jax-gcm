@@ -41,10 +41,23 @@ class TestHeldSuarezUnit(unittest.TestCase):
     def test_held_suarez_model(self):
         """A full Held-Suarez integration leaves every prognostic finite.
 
-        Slow because the 36-step run takes ~3 min — the largest single test in
-        the suite. The forcing itself is covered by the unit test above and
-        ``model.run`` by ``model_test``/``runners_test``, so the fast gate
-        loses no unique lines to the move.
+        2026-10 shrink pass (#1143): ``total_time=36`` is DAYS, not steps —
+        the previous docstring's "36-step run" was stale/wrong; at this
+        default T31L8 grid's auto-selected 12-minute step that was actually
+        4320 steps (~36 days / 6 saves), making this the single biggest test
+        in the shard. Held-Suarez is the textbook-robust dry-dynamics +
+        Newtonian-relaxation benchmark: unlike the orography-coupled T63
+        land case (``echam_with_land_test.py``), nothing here is known to
+        need a long spin-up before a numerical problem would show up — a
+        bad coupling between the forcing and the spectral filters blows up
+        fast, not slowly, and there is no other test in this suite covering
+        a long Held-Suarez integration specifically for finiteness. 4 days
+        (2 save intervals, 480 steps instead of 4320) keeps a genuine
+        multi-save-interval ``model.run()`` integration — not a single-step
+        smoke test — at roughly a tenth of the previous wall time. The
+        forcing itself is covered by the unit test above and ``model.run``
+        by ``model_test``/``runners_test``, so the fast gate loses no
+        unique lines to the move.
         """
         from jcm.model import Model
         from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
@@ -53,7 +66,7 @@ class TestHeldSuarezUnit(unittest.TestCase):
         coords = get_held_suarez_coords()
         model = Model(coords=coords, physics=held_suarez_physics())
 
-        _ = model.run(total_time=36, save_interval=6)
+        _ = model.run(total_time=4, save_interval=2)
 
         final_state = model._final_dycore_state
 

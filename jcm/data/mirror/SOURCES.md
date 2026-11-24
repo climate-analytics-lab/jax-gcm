@@ -10,7 +10,9 @@ Levante the input4MIPs products below live under
 the HAMMOZ and ECHAM6 input pools under `/pool/data/ECHAM6-HAMMOZ` and
 `/pool/data/ECHAM6`; there is no RDA ERA5 archive, so Tier A is pulled from the
 published mirror (`--stage pull`) instead of rebuilt. Roots can be overridden
-per build: `JCM_HAMMOZ_DIR` (HAMMOZ pool layout), `JCM_CESM_INPUTDATA` (a CESM
+per build: `JCM_HAMMOZ_DIR` (HAMMOZ pool layout), `JCM_HAM_EMISSIONS_DIR` (an
+ECHAM-HAM emissions tree, `hammoz/T63/aerocom_II/...`), `JCM_MACV2_DIR` (a copy
+of MPI-M's MACv2 `for_ICON` tree), `JCM_CESM_INPUTDATA` (a CESM
 inputdata tree; the WACCM oxidants then resolve under its `atm/cam/ozone`) and
 `JCM_WACCM_OXIDANTS_DIR` (the oxidant directory alone).
 
@@ -24,6 +26,10 @@ inputdata tree; the WACCM oxidants then resolve under its `atm/cam/ozone`) and
 | Dust inputs, T63 (HAMMOZ/Tegen) | Levante `/pool/data/ECHAM6-HAMMOZ/v0007/hammoz/T63/`: `dust_potential_sources_T63.nc` (`pot_source`, 12 monthly records), `dust_preferential_sources_T63.nc` (`source`, paleolakes), `soil_type_all_T63.nc` (`type2/3/4/6` global Zobler + `type13..17` East-Asian), `dust_regions_T63.nc` (`regions`, integers 1-8), `surface_rough_12m_T63.nc` (`surfrough`, **centimetres**, 12 monthly records) | T63 Gaussian |
 | Dust inputs, T127 | `/pool/data/ECHAM6-HAMMOZ/v0003/hammoz/T127/` — the same five files `*_T127.nc` (same 2016 processing; identical copies in `v0002`) | T127 Gaussian |
 | Dust inputs, T255 | `/pool/data/ECHAM6-HAMMOZ/v01_001/hammoz/T255/` — older names for the same products: `ndvi_lai_eff.12m.T255.nc` (`laieff` = `pot_source`), `pot_sources.T255.nc` (`source` = preferential sources), `soil_type{2,3,4,6,13..17}.T255.nc` (`type`). No roughness or region file | T255 Gaussian |
+| HAM biogenic OC (AeroCom II, #1017) — **Tier A** `products/ham_biogenic_oc_aerocom2_t63_2000.nc` | `hammoz/T63/aerocom_II/T63/2000/emiss_aerocom_OC_monthly_2000_T63.nc` under an ECHAM-HAM emissions tree (`JCM_HAM_EMISSIONS_DIR`; the UCSD devbox copy is `/data/climate-analytics-lab-shared/ECHAM_emissions_v0006`), variable `emiss_biogenic`. Neither Glade nor Levante declares the tree, so `--stage biogenic` there fetches the published copy. Published verbatim by maintainer decision (2026-10-13) | T63 Gaussian, 12 monthly records (year-2000 climatology) |
+| Volcanic SO₂ (#1190) — `products/volcanic_so2_cmip.nc`, built by `--stage volcanic` | Continuous degassing: CESM inputdata `atm/cam/chem/emis/CMIP6_emissions_1750_2015/emissions-cmip6_SO2_contvolcano_vertical_850-5000_0.9x1.25_c20170724.nc` (`contvolcano`, molecules cm⁻³ s⁻¹), NCAR's build (`create_files.ncl`) of the AeroCom continuous inventory: Diehl's `volc_continuous.nc` ×2.6325 = 12.6 Tg S/yr, 97.5 % of it as SO₂, on 500 m layers stored as `1013.25·exp(−z/7600)` hPa. Eruptions: input4MIPs `CMIP7/CMIP/uoexeter/UOEXETER-CMIP-2-2-1/atmos/day/utsvolcemis` (Aubry et al. 2026). Both are reduced to point sources (`jcm/data/mirror/volcanic.py`), the degassing inverted to the inventory's total sulfur as SO₂ | Grid-free: 43 degassing source cells × 20 layers (0–10 km), 25.22 Tg SO₂/yr; 463 eruptions, 1750–2023 |
+| Dust MSG-SEVIRI source-activation map, T63 (`ndust = 5`, #1017) | `hammoz/T63/msg_pot_sources_T63.nc` under an ECHAM-HAM emissions tree (`JCM_HAM_EMISSIONS_DIR`; the UCSD devbox copy is `/data/climate-analytics-lab-shared/ECHAM_emissions_v0006`), variable `dsaf`; ECHAM opens it as `dust_msg_pot_sources.nc`. Neither Glade nor Levante declares the tree, so the `dust-msg` stage (not in `--stage all`) runs on the devbox, with `JCM_MIRROR_ROOT` set (the site falls back to Glade's, whose default root is not writable there) | T63 Gaussian, no time axis |
+| HAM nucleation inputs (Kazil–Lovejoy, #1017) — **Tier A** `products/ham_input/` | `hammoz/T63/hammoz/` under an ECHAM-HAM emissions tree (`JCM_HAM_EMISSIONS_DIR`; the UCSD devbox copy is `/data/climate-analytics-lab-shared/ECHAM_emissions_v0006`): the PARNUC table `parnuc.15H2SO4.A0.total.nc` and the O'Brien solar-min/max GCR ion-pair tables, published as `gcr_ipr_solmin.txt`/`gcr_ipr_solmax.txt` whichever README_GCR or ECHAM name the tree uses. Built by `--stage ham-input` (not in `--stage all`). Published verbatim by maintainer decision (2026-10-14) | PARNUC axes; GCR 15×110 (rigidity × column) |
 | DMS seawater (Lana 2011) | `.../inputdata/atm/cam/chem/ocnexch/Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc` (also public: `https://svn-ccsm-inputdata.cgd.ucar.edu/trunk/inputdata/`, same path; reproduces the Glade-built t63 `dms.nc` exactly) | 0.9×1.25° |
 | Oxidants OH/HO2/NO3/H2O2/O3, full lid (BUNDLED) | `/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone/oxid_ozone_WACCM_CCMI_REFC1_f.e11.FWTREFC1.<decade>.f19_f19.ccmi34.001_monthly.nc` (decades 1850s–2000s; the builder uses 1850-1859 and 2000-2009). **Not on the public CESM server** — for a Levante build copy those two into `$JCM_MIRROR_ROOT/sources/cesm_inputdata/atm/cam/ozone/`. The public `oxid_ozone_WACCM_CCMI_{1850,REFC1_2000}_cycle_3D_monthly_c20160531.nc` are a different run (ccmi30, 1995-2004 mean) and must not be substituted | 1.9×2.5°, L66 to ~6e-6 hPa |
 | Oxidants, year-specific fallback | `.../inputdata/atm/cam/chem/trop_mozart_aero/oxid/oxid_1.9x2.5_L26_1850-2015_c20181106.nc` (`--oxid-source cam`) | 1.9×2.5°, L26 |
@@ -31,6 +37,7 @@ inputdata tree; the WACCM oxidants then resolve under its `atm/cam/ozone`) and
 | CESM ne30 topography | `.../inputdata/atm/cam/topo/se/ne30np4_gmted2010_modis_bedmachine_nc3000_Laplace0100_noleak_greenlndantarcsgh30fac2.50_20250825.nc` | native ne30np4 |
 | CEDS ne30 (MAM4-processed, native) | `/glade/campaign/cesm/cesmdata/cseg/inputdata/atm/cam/chem/emis/cmip7/ne30/CEDS-CMIP-2025-04-18_20251030` | native ne30 |
 | ECHAM T127/T255 boundary files | `/glade/derecho/scratch/duncanwp/ECHAM_T127`; on Levante `/pool/data/ECHAM6/T127` and `/pool/data/ECHAM6/T255` (`T127GR15_jan_surf.nc` / `T255_jan_surf.nc` carry the full SSO + soil/veg set; `T127L95_jan_spec.nc` A/B table; CMIP5 ozone decades) | T127 (384×192), T255 (768×384) — SSO cross-check only; GMTED remains the primary source on every grid |
+| MACv2 natural aerosol background (Kinne 2019) — `bundles/{grid}/macv2_natural_aerosol.nc`, built by `--stage macv2` | MPI-M's public server, `ftp://ftp-projects.mpimet.mpg.de/aerocom/climatology/MACv2_2018/for_ICON` (data statement: Kinne 2019, ACP 19, 10919): `spec_2005/aeropt_kinne_sw_b14_coa.nc` (coarse mode), `spec_2005/aeropt_kinne_sw_b14_fin_pre.nc` (pre-industrial fine mode), `spec_2005/aeropt_kinne_lw_b16_coa.nc` (coarse mode, longwave) — `aod`/`ssa`/`asy` per band along an unlabelled `record` axis in ascending wavelength — and `altitude/aeropt_{coa,fin}_alt_km20.nc` (`zkm_aer_{coarse,fine}_mo`, the fraction of column optical depth per layer, with `ztop`/`zbot`). No site mounts it: download a copy and set `JCM_MACV2_DIR`; the stage is not in `--stage all`. Published by maintainer decision (2026-11-12) | 1°×1°, 12 monthly means; 14 shortwave + 16 longwave RRTMG bands; 20 layers to 20 km |
 | MACv2-SP simple plumes (SPv2.1, CMIP7) — **repo-packaged, NOT mirrored** | Zenodo https://zenodo.org/records/15283189 (`SPv2.1_18502023_CMIP7.nc`; Fiedler & Azoulay, Univ. Heidelberg 2025 — CEDS-scaled 1850–2023 successor to Stevens et al. 2017 v1). sha256 `1070a0c47b9a4a7417c112fc2e395e89f9306454225dde9a62565f76327810dd` | grid/level-free single file (~19 KB: plume geometry + `year_weight`/`ann_cycle`). Resolution-invariant, so it ships in the wheel at `jcm/data/bc/` (see `jcm.forcing.packaged_macv2_path`) rather than on the HF mirror |
 Surveyed and ruled out first: `/glade/campaign/acom/acom-climate/cesm2/inputdata/atm/waccm/`
 — the SC-WACCM forcing files carry O3/O/O2/H/NO/CO2 + heating but no
@@ -57,7 +64,7 @@ the CR-CMIP GHGs (trend-extrapolated past 2022, stamped in file attrs).
 ERA5 is Copernicus-licensed; derived redistributions carry attribution
 in the file attributes.
 
-The five dust files (`--stage dust`, issue #802) are the HAMMOZ input set for
+The five pool dust files (`--stage dust`, issue #802) are the HAMMOZ input set for
 the MPI-BGC/Tegen emission scheme from the ECHAM-HAMMOZ input pool, supplied by
 the maintainer and confirmed to carry no licence restriction for this use (unlike
 the `mo_ham_dust.f90` source they drive, which is reference-only and never enters
@@ -76,3 +83,6 @@ the builder can see. The same sets also ship `soilpHfrac_*.nc` and
 not mirrored. They replace the CAM geomorphic erodibility map
 (`dst_0.23x0.31_c130710.nc`) that used to be published as
 `bundles/<grid>/dust.nc`; that product and that path are retired.
+The sixth dust product, the MSG-SEVIRI map `ndust = 5` reads, comes from the
+ECHAM-HAM emissions tree instead (row above), through its own `dust-msg` stage,
+and is remapped from its one T63 file to every other grid the same way.

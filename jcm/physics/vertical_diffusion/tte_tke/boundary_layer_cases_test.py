@@ -65,12 +65,8 @@ import numpy as np
 import jcm.constants as c
 from .vertical_diffusion_types import VDiffParameters, VDiffState
 from .vertical_diffusion import vertical_diffusion_column
-from .turbulence_coefficients import (
-    compute_richardson_number,
-    compute_mixing_length,
-    compute_exchange_coefficients,
-)
-from .tke_budget import compute_tke_diagnostics
+from .closure import closure_constants, interior_closure
+from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
 
 KAPPA = float(c.karman_const)
 G = float(c.grav)
@@ -206,7 +202,7 @@ def _integrate(state, params, dt, nsteps, evolve_winds=False, evolve_temp=False,
                freeze_winds=False):
     """Advance a column ``nsteps`` times applying the vdiff tendencies.
 
-    TKE is always evolved (and floored at the 0.01 m^2/s^2 ECHAM bound, as the
+    TKE is always evolved (and floored at ECHAM's ``ztkemin``, as the
     composable term does). ``u``/``v``/``T`` are evolved only when requested,
     so diagnostics-only tests can let TKE adjust to the regime while holding
     the mean state fixed. ``freeze_winds`` re-imposes the initial winds each
@@ -216,7 +212,10 @@ def _integrate(state, params, dt, nsteps, evolve_winds=False, evolve_temp=False,
     s = state
     for _ in range(nsteps):
         tend, _ = _vdc(s, params, dt)
-        updates = {"tke": jnp.maximum(s.tke + dt * tend.tke_tendency, 0.01)}
+        updates = {"tke": jnp.maximum(s.tke + dt * tend.tke_tendency,
+                                      params.totte_min),
+                   "thv_variance": jnp.maximum(
+                       s.thv_variance + dt * tend.thv_var_tendency, params.totte_min)}
         if evolve_winds:
             updates["u"] = s.u + dt * tend.u_tendency
             updates["v"] = s.v + dt * tend.v_tendency
@@ -228,20 +227,36 @@ def _integrate(state, params, dt, nsteps, evolve_winds=False, evolve_temp=False,
     return s
 
 
-def _closure_diagnostics(state, params):
-    """Recompute Ri, mixing length, exchange coefficients and the TKE-budget
-    terms exactly as ``vertical_diffusion_column`` does internally.
+def _interior(tke):
+    """TKE of the interior interfaces (the last column is the surface layer's)."""
+    return tke[:, :-1]
 
-    Returns ``(ri, mixing_length, km, kh, kq, shear_prod, buoy_prod, diss)``,
-    all as plain numpy arrays for the single column (top-first ordering).
+
+def _closure_diagnostics(state, params):
+    """Recompute ECHAM's closure of the interior interfaces as
+    ``vertical_diffusion_column`` does (:func:`.closure.interior_closure`).
+
+    Returns ``(ri, mixing_length, km, kh, kh, shear_prod, buoy_prod, diss)``
+    of the interior interfaces, as plain numpy arrays for the single column
+    (top-first ordering), with the budget terms at the carried TKE ``e``:
+    shear production ``K_m·S²``, buoyancy production ``−K_h·N²`` and
+    dissipation ``e^{3/2}/(zda1·l)``.
     """
-    ri = compute_richardson_number(state)
-    pbl_guess = jnp.full(state.u.shape[0], 1000.0)  # matches the scheme's guess
-    ml = compute_mixing_length(state.height_full, state.height_half, ri, pbl_guess)
-    km, kh, kq = compute_exchange_coefficients(state, params, ml, ri)
-    shear_prod, buoy_prod, diss, _ = compute_tke_diagnostics(state, params, km, kh, ml)
-    out = (ri, ml, km, kh, kq, shear_prod, buoy_prod, diss)
-    return tuple(np.asarray(a[0]) for a in out)
+    buoyancy, shear = interior_buoyancy_and_shear(state)
+    ri = richardson_number(buoyancy, shear)
+    out = interior_closure(
+        temperature=state.temperature.T, qv=state.qv.T, qc=state.qc.T, qi=state.qi.T,
+        pressure_full=state.pressure_full.T, pressure_half=state.pressure_half.T,
+        geopotential=state.geopotential.T, buoyancy=buoyancy.T, shear=shear.T,
+        ri=ri.T, prev_tke=state.tke.T[:-1], prev_thv_variance=state.thv_variance.T[:-1],
+        friction_velocity=jnp.ones(state.u.shape[0]),
+        coriolis=jnp.full(state.u.shape[0], 1.0e-4), dt=DT, params=params)
+    e = jnp.maximum(state.tke.T[:-1], params.totte_min)
+    shear_prod = out.km * shear.T
+    buoy_prod = -out.kh * buoyancy.T
+    diss = e ** 1.5 / (closure_constants(params).da1 * out.mixing_length)
+    res = (ri.T, out.mixing_length, out.km, out.kh, out.kh, shear_prod, buoy_prod, diss)
+    return tuple(np.asarray(a)[:, 0] for a in res)
 
 
 # Reusable canonical profiles. A modest linear jet (0 -> 12 m/s over the
@@ -278,7 +293,7 @@ class TestNeutralBoundaryLayerAndren:
     """Neutral-regime behaviours (Andren et al. 1994)."""
 
     def test_tke_spins_up_to_steady_state(self):
-        """TKE grows from a tiny seed and plateaus under steady neutral shear.
+        """TKE grows from a small seed and plateaus under steady neutral shear.
 
         Andren Fig. 2 tracks the vertically-integrated TKE approaching a
         steady value. With surface forcing held fixed, a healthy closure must
@@ -291,11 +306,11 @@ class TestNeutralBoundaryLayerAndren:
         mid = _integrate(state, params, DT, 80, freeze_winds=True)
         late = _integrate(mid, params, DT, 70, freeze_winds=True)
 
-        tke_mid = float(jnp.max(mid.tke))
-        tke_late = float(jnp.max(late.tke))
+        tke_mid = float(jnp.max(_interior(mid.tke)))
+        tke_late = float(jnp.max(_interior(late.tke)))
 
         assert tke_late > 0.2, (
-            f"TKE failed to spin up from the 0.01 seed: max={tke_late:.4f}"
+            f"TKE failed to spin up from the 0.01 m²/s² seed: max={tke_late:.4f}"
         )
         # Plateau: the last 70 steps should barely change the maximum.
         assert abs(tke_late - tke_mid) / tke_mid < 0.1, (
@@ -317,30 +332,37 @@ class TestNeutralBoundaryLayerAndren:
         strong = _integrate(_neutral_column(jet=16.0, tke0=0.01),
                             params, DT, 150, freeze_winds=True)
 
-        ratio = float(jnp.max(strong.tke)) / float(jnp.max(weak.tke))
+        ratio = float(jnp.max(_interior(strong.tke))) / float(jnp.max(_interior(weak.tke)))
         assert 2.5 < ratio < 5.5, (
             f"Equilibrium TKE should scale ~quadratically with shear; "
             f"TKE(2S)/TKE(S) = {ratio:.2f} (expected ~4)"
         )
 
     def test_surface_mixing_length_is_kappa_z(self):
-        """The lowest-level mixing length equals the von Karman length kappa*z.
+        """Near the ground the mixing length is the von Karman length kappa*z.
 
-        ``l = kappa*z`` in the surface layer is what makes the non-dimensional
-        wind shear ``Phi_M -> 1`` (Andren Fig. 4a) and underpins the log-law.
+        ``l = kappa*z/(1 + kappa*z/clam)`` (Blackadar, ``vdiff.f90`` l.815-817)
+        tends to ``kappa*z`` close to the surface, what makes the
+        non-dimensional wind shear ``Phi_M -> 1`` (Andren Fig. 4a) and
+        underpins the log-law. ``z`` of the lowest interior interface is the
+        mean height of the two lowest levels.
         """
         params = VDiffParameters.default()
         state = _neutral_column(jet=10.0, tke0=0.5)
         _, diag = _vdc(state, params, DT)
 
         ml = np.asarray(diag.mixing_length[0])              # top-first
-        z_above_sfc = float(state.height_full[0, -1] - state.height_half[0, -1])
-        l_surface = float(ml[-1])                            # lowest level
+        hf = np.asarray(state.height_full[0])
+        z = 0.5 * (hf[-1] + hf[-2])                          # above the surface (0 m)
+        l_surface = float(ml[-1])                            # lowest interface
 
-        assert abs(l_surface / (KAPPA * z_above_sfc) - 1.0) < 0.05, (
-            f"Surface mixing length should be kappa*z = {KAPPA * z_above_sfc:.3f} m, "
+        assert z < 30.0
+        assert abs(l_surface / (KAPPA * z) - 1.0) < 0.1, (
+            f"Surface mixing length should be ~kappa*z = {KAPPA * z:.3f} m, "
             f"got {l_surface:.3f} m"
         )
+        blackadar = KAPPA * z / (1.0 + KAPPA * z / 150.0)
+        assert abs(l_surface / blackadar - 1.0) < 0.02
 
     def test_neutral_diffusivity_has_boundary_layer_profile(self):
         """Neutral K_m rises from the surface, peaks aloft, then decreases.
@@ -386,8 +408,8 @@ class TestStableBoundaryLayerGabls1:
 
         km_neutral = float(jnp.max(_closure_diagnostics(neutral, params)[2]))
         km_stable = float(jnp.max(_closure_diagnostics(stable, params)[2]))
-        tke_neutral = float(jnp.max(neutral.tke))
-        tke_stable = float(jnp.max(stable.tke))
+        tke_neutral = float(jnp.max(_interior(neutral.tke)))
+        tke_stable = float(jnp.max(_interior(stable.tke)))
 
         assert km_neutral > 5.0 * km_stable, (
             f"Stable stratification should strongly suppress K_m: "
@@ -422,11 +444,16 @@ class TestStableBoundaryLayerGabls1:
         )
 
     def test_strong_stability_collapses_turbulence(self):
-        """Strong stratification + weak shear drives TKE back to the floor.
+        """Strong stratification + weak shear lets the turbulence die away.
 
         Seeded with elevated TKE, a strongly stable column with little shear
-        should see buoyancy destruction win and TKE decay to the 0.01 m^2/s^2
-        floor — the nocturnal "turbulence collapse" GABLS1 probes.
+        should see buoyancy destruction win and TKE decay towards the floor —
+        the nocturnal "turbulence collapse" GABLS1 probes. At this Richardson
+        number (~10³) Louis's stable functions leave almost no shear or
+        buoyancy term, so the decay is the dissipation's,
+        ``d(e^{-1/2})/dt = 1/(2·zda1·l)``: from 1 m²/s² at l ≈ 85 m, ~0.1 after
+        40 one-minute steps and ~0.01 after 200. The surface-layer row is the
+        surface's own TKE (Mailhot-Benoit), so the interior is what collapses.
         """
         params = VDiffParameters.default()
         z = _stretched_grid()
@@ -436,10 +463,15 @@ class TestStableBoundaryLayerGabls1:
         state = _make_column(290.0 + 0.03 * zf, np.linspace(5.0, 7.0, n),
                              np.zeros(n), z, tke0=1.0)
 
-        evolved = _integrate(state, params, DT, 40)
-        assert float(jnp.max(evolved.tke)) < 0.1, (
+        evolved = _integrate(state, params, DT, 200)
+        # Above the lowest ~50 m, which the surface layer's own TKE (the fixed
+        # bottom row of the TKE transport) keeps stirred.
+        hf = np.asarray(evolved.height_full[0])
+        aloft = 0.5 * (hf[:-1] + hf[1:]) > 50.0
+        interior = _interior(evolved.tke)[0][aloft]
+        assert float(jnp.max(interior)) < 0.02, (
             f"TKE should collapse toward the floor under strong stability, "
-            f"got max={float(jnp.max(evolved.tke)):.4f}"
+            f"got max={float(jnp.max(interior)):.4f}"
         )
 
     def test_buoyancy_is_a_tke_sink_when_stable(self):
@@ -490,7 +522,7 @@ class TestConvectiveBoundaryLayerWangara:
             f"Unstable mixing should exceed neutral: "
             f"unstable K_m={km_unstable:.3f}, neutral K_m={km_neutral:.3f}"
         )
-        assert float(jnp.max(unstable.tke)) > float(jnp.max(neutral.tke)), (
+        assert float(jnp.max(_interior(unstable.tke))) > float(jnp.max(_interior(neutral.tke))), (
             "Unstable TKE should exceed neutral TKE"
         )
 
@@ -513,8 +545,8 @@ class TestConvectiveBoundaryLayerWangara:
         unstable = _integrate(unstable, params, DT, 40)
         neutral = _integrate(neutral, params, DT, 40)
 
-        tke_unstable = float(jnp.max(unstable.tke))
-        tke_neutral = float(jnp.max(neutral.tke))
+        tke_unstable = float(jnp.max(_interior(unstable.tke)))
+        tke_neutral = float(jnp.max(_interior(neutral.tke)))
         assert tke_unstable > 0.05, (
             f"Free convection should sustain TKE without shear, got {tke_unstable:.4f}"
         )
@@ -546,35 +578,41 @@ class TestTurbulenceClosureInvariants:
         }
         km = {k: float(jnp.max(_closure_diagnostics(s, params)[2]))
               for k, s in cols.items()}
-        tke = {k: float(jnp.max(s.tke)) for k, s in cols.items()}
+        tke = {k: float(jnp.max(_interior(s.tke))) for k, s in cols.items()}
 
         assert km["unstable"] >= km["neutral"] > km["stable"], f"K_m ordering: {km}"
         assert tke["unstable"] >= tke["neutral"] > tke["stable"], f"TKE ordering: {tke}"
         assert km["neutral"] > 3.0 * km["stable"], f"K_m contrast too weak: {km}"
 
-    def test_turbulent_prandtl_number_is_constant(self):
-        """K_m / K_h = c_m / c_h = 0.8 wherever the closure is active.
+    def test_turbulent_prandtl_number_is_the_neutral_ratio(self):
+        """K_m / K_h = zsmn / zshn = zm1·zm2/zm4 ≈ 0.796 in a neutral column.
 
-        The scheme uses ``K_m = 0.4*l*sqrt(e)`` and ``K_h = 0.5*l*sqrt(e)``,
-        so the turbulent Prandtl number is a constant 0.8 in the turbulent
-        interior (away from the background-diffusivity clip).
+        Louis's functions are 1 at ``Ri = 0`` (``vdiff.f90`` l.819-832), so in
+        a neutral column the turbulent Prandtl number is the ratio of ECHAM's
+        neutral coefficients; it rises in stable air, where heat is suppressed
+        more than momentum, and falls in unstable air.
         """
         params = VDiffParameters.default()
         state = _integrate(_neutral_column(jet=14.0, tke0=0.01),
                            params, DT, 40, freeze_winds=True)
         _, _, km, kh, _, _, _, _ = _closure_diagnostics(state, params)
-
-        active = (km > 0.05) & (km < 999.0)  # exclude clipped background/ceiling
-        ratio = km[active] / kh[active]
-        assert np.allclose(ratio, 0.8, atol=0.01), (
-            f"Turbulent Prandtl number K_m/K_h should be 0.8, got "
-            f"range [{ratio.min():.3f}, {ratio.max():.3f}]"
+        ratio = km / kh
+        expected = 1.24 * 2.37 / 3.69
+        # |Ri| <~ 1e-3 in this column (round-off in a constant θ), which moves
+        # the ratio by < 1 %.
+        assert np.allclose(ratio, expected, rtol=1e-2), (
+            f"Turbulent Prandtl number K_m/K_h should be {expected:.4f}, got "
+            f"range [{ratio.min():.4f}, {ratio.max():.4f}]"
         )
+        stable = _closure_diagnostics(_stable_column(jet=12.0), params)
+        unstable = _closure_diagnostics(_unstable_column(jet=12.0), params)
+        assert np.all(stable[2] / stable[3] > expected)
+        assert np.all(unstable[2] / unstable[3] < expected)
 
     def test_shear_and_dissipation_are_nonnegative(self):
         """Shear production and dissipation are sign-definite (>= 0).
 
-        Shear production ``K_m * S^2`` and dissipation ``c_d * e^1.5 / l`` can
+        Shear production ``K_m * S^2`` and dissipation ``e^1.5 / (zda1*l)`` can
         never be negative; only buoyancy production changes sign with stability.
         """
         params = VDiffParameters.default()

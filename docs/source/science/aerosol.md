@@ -1,18 +1,47 @@
 # Aerosol
 
-Two aerosol paths exist: the prescribed MACv2-SP simple plumes (the default
-optics source) and the prognostic JAM modal aerosol package. The provenance here
-is deliberately hybrid, and several sites carried an inherited reference label
-that does not match the code; this section records the *true* reference and the
-deviations, which is the whole reason the living document exists.
+Aerosol in jcm comes from one of two places:
+
+- **JAM**, the JAX Aerosol Module: an online, prognostic aerosol process
+  harness (emissions, transport, chemistry, activation, ice nucleation,
+  optics, deposition, scavenging) around a swappable microphysics core. Two
+  populations ship on it, both release-validated at T63 L47:
+  - **M7** (``physics=echam-jam-m7``; the default JAM configuration,
+    ``+configuration=t63-echam-jam``) — ECHAM6.3-HAM2.3's seven-mode
+    population and native M7 microphysics, with HAM's own activation,
+    nucleation, emissions, dust and wet deposition: the HAM-faithful
+    configuration. See [HAM M7 modal aerosol](#ham-m7-modal-aerosol) and
+    {doc}`../design/jam_m7_configuration`.
+  - **MAM4** (``physics=echam-jam``, ``+configuration=t63-echam-jam-mam4``) —
+    the E3SM/CAM6 four-mode population and the MAM4-JAX core inside the same
+    HAMMOZ-lineage harness, with an explicit cloud-borne aerosol phase (M7
+    has none, like HAM). It costs about 0.7x M7 per simulated day at T63L47. See
+    [JAM prognostic modal aerosol](#jam-prognostic-modal-aerosol) below.
+- **MACv2-SP**, the prescribed simple plumes (Stevens et al. 2017): the
+  default of the bare ``echam_physics()`` factory and of the non-aerosol
+  presets, with an SPA droplet-number floor for 2M clouds. See
+  [MACv2-SP simple plumes](#macv2-sp-simple-plumes). On RRTMGP the plumes sit
+  on a prescribed natural background, the coarse mode and pre-industrial fine
+  mode of the MACv2 climatology: see
+  [MACv2 natural aerosol background](#macv2-natural-aerosol-background).
+
+The JAM sections below describe the shared harness in the context of its
+first population, MAM4, then what M7 adds or does differently. The
+provenance here is deliberately hybrid, and several sites carried an
+inherited reference label that does not match the code; this section records
+the *true* reference and the deviations, which is the whole reason the living
+document exists.
 
 ## JAM prognostic modal aerosol
 
-**What we do.** JAM is an online, prognostic modal aerosol package built on the
-**MAM4-MOM 4-mode** population (accumulation, Aitken, coarse, primary-carbon),
-with the interstitial mass/number (``m_``/``n_``) and gas precursors (``g_``)
-carried as flat ``state.tracers`` keys, and the cloud-borne mirrors
-(``mc_``/``nc_``) living in the cross-step physics carry rather than the tracer
+**What we do.** JAM is an online, prognostic modal aerosol package. This
+section describes its harness on the
+**MAM4-MOM 4-mode** population (accumulation, Aitken, coarse, primary-carbon);
+M7's seven-mode population is described in
+[HAM M7 modal aerosol](#ham-m7-modal-aerosol). The
+interstitial mass/number (``m_``/``n_``) and gas precursors (``g_``) are
+carried as flat ``state.tracers`` keys; under MAM4 the cloud-borne mirrors
+(``mc_``/``nc_``) live in the cross-step physics carry rather than the tracer
 set (see the cloud-borne store below). It is assembled as an ordered
 HAMMOZ-style ``PhysicsTerm`` chain by
 ``jcm/physics/aerosol/jam/jam_terms.py::jam_aerosol_physics`` and spliced into
@@ -64,7 +93,8 @@ See {doc}`../design/jam_carbon_aging`.
   precision. Gas tracers into the core are ``h2so4`` / ``soag`` only (SO₂/DMS
   oxidation is jcm-side).
 
-**Status & known limitations.** Every shipped ``echam-jam*`` configuration pins
+**Status & known limitations.** Every shipped MAM4 configuration (``echam-jam``
+and its AeroCom/ACI variants; ``echam-jam-m7`` pins ``m7_jax`` instead) pins
 ``jam_microphysics: mam4_jax`` (requiring ``jcm[mam4]``, MAM4-JAX 0.5.1), the
 fixed-substep core through which ``jax.grad`` runs; ``mam4_jax_astem`` selects
 CAM's adaptive ASTEM corrector, which conserves the organic budget in warm
@@ -75,13 +105,14 @@ zero-tendency κ-Köhler placeholder is the bare-factory default and the
 documented fallback when the GPL extra is unavailable. The core's cloudy ``amicphys``
 sub-area is not ported upstream, so cloud-borne activation is the harness's job
 (``ArgActivation`` / ``CloudBorneExchange``) and the core runs clear-sky. Aerosol
-burdens and lifetimes of the shipped configuration, from a 365-day T63 L47 year
-(``jam_cloud_ss4`` of {doc}`../design/jam_aerosol_retune`; the settled last 195
-days): sulphate 4.1 mg SO4/m² (ion basis; AeroCom mean 3.9, sanity band
-1.95-5.85) with a 3.3 d lifetime (4.1), sea salt 16.4 mg/m² (AeroCom mean 14.7,
-median 12.5) and 0.37 d (0.48), BC a 4.3 d lifetime (7.1), dust 20.9 mg/m² (mean
-37.6, median 40.2) and 1.6 d (4.1); the total AOD is 0.074 against 0.145 observed
-(ESA-CCI SU v4.21). Dust is the species that stays far from AeroCom. See {doc}`../design/dinosaur_sl_jam_configuration`.
+burdens and lifetimes of the shipped configuration, from its 365-day T63 L47
+confirmation year ({doc}`../design/jam_aerosol_retune`, "The v3.1 refit"):
+sulphate 5.8 mg SO4/m² (ion basis; AeroCom mean 3.9, sanity band 1.95-5.85)
+with a 3.7 d lifetime (4.1), sea salt 22.3 mg/m² (AeroCom mean 14.7, median
+12.5) and 0.89 d (0.48), BC a 4.2 d lifetime (7.1), dust 37.3 mg/m² (mean 37.6,
+median 40.2) and 4.2 d (4.1); the total AOD is 0.132 against 0.145 observed
+(ESA-CCI SU v4.21). Sulphate sits at the top of its sanity band, the leading
+suspect for this host's bright clouds (#1184). See {doc}`../design/dinosaur_sl_jam_configuration`.
 
 ### Online aerosol optics
 
@@ -154,27 +185,71 @@ number field carries.
 in-repo pathway has no core–shell treatment of black carbon, so BC's imaginary
 index is smeared over the whole particle by the volume mixing rule above. An
 alternative bulk-optics pathway — a core–shell treatment, or a neural emulator
-of the mode integral — is supplied out-of-tree against the per-mode seam in
-{doc}`../design/jam_optics_mode_seam`, which is why no second Mie pathway is
-carried here. Per-species optics are an apportionment of the mixed mode's
-extinction, not a decomposition — see
-{doc}`../design/aerosol_optics_diagnostics`.
+of the mode integral — can be supplied out-of-tree against the per-mode seam
+in {doc}`../design/jam_optics_mode_seam`; the volume mixing, size integral and
+AeroCom apportionment above apply to any such pathway unchanged, since the
+seam delegates only the mode-integrated optical question itself. Per-species
+optics are an apportionment of the mixed mode's extinction, not a
+decomposition — see {doc}`../design/aerosol_optics_diagnostics`.
 
-The default optics now preserve the mass response on a mode whose ``dg``
-sits on a size bound (#823): at fixed geometry and composition, doubling
-mass doubles optical depth before the existing layer cap. Size bounds still
-limit the shape of the distribution; volume normalization does not remove
-that limitation or refresh a radius that lags the microphysics update. The
-MAM4-JAX core does adjust number in ``calcsize``; the placeholder is an
-equilibrium size diagnosis without that tendency.
+**HAM's own Mie-table pathway (`HamLutOpticsTerm`, #1017).** A second,
+in-tree backend against the same seam: rather than the 8-node Gauss–Hermite
+quadrature above, it reproduces ECHAM-HAM's own `ham_rad_fitplus`
+(`mo_ham_rad.f90:1264-1419`) — a **nearest-neighbour** read (no
+interpolation; HAM's own `loint=.FALSE.`) of a table of Qext·x²/(4π) (SW) or
+Qabs·x²/(4π) (LW — HAM's own LW tables hold **absorption**, matching
+ECHAM's non-scattering LW solver, not extinction; see
+`ham_mie_tables.py`'s module docstring) pre-integrated over the lognormal at
+HAM's own σ_g (1.59 fine, 2.0 coarse), real refractive index and imaginary
+refractive index, selected by whichever of HAM's two σ_g a mode's own
+`geom_std_dev` is nearer to. `HamLutOpticsTerm` prefers HAM's authentic
+`lut_optical_properties_M7.nc` / `lut_optical_properties_lw_M7.nc`, loaded
+at construction (`ham_mie_tables.py::load_ham_mie_tables`, from
+`ham_optics_tables_dir`/`jam_optics_tables_dir` or, by default, the
+`HAM_INPUT_DIR` environment variable), and FALLS BACK to a built
+approximation (`ham_mie_tables.py::default_ham_mie_tables`, this
+repository's own Bohren–Huffman kernel, `optics/mie.py`, on HAM's own axes
+— `mo_ham_rad_data.f90:95-102,420-433` — via the same 8-node Gauss–Hermite
+lognormal quadrature `JamOpticsTerm`'s default backend runs per mode per
+step, evaluated once per table point instead) when the authentic files are
+not reachable: the real tables are a nice-to-have, not a hard requirement,
+for a term that otherwise runs identically either way. Which table source
+was actually used is logged once at construction and recorded on the
+instance (`term.table_source`: `"authentic"`, `"jcm_built"` or
+`"explicit"` for a test-injected table). The built approximation's LW
+tables hold absorption, as HAM's do (its LW tables are absorption, not
+extinction); the built tables disagree with the authentic ones at a level documented and measured
+in `ham_mie_tables.py`'s and `ham_mie_tables_test.py`'s own docstrings
+(`test_built_tables_vs_authentic_measured_tolerance`) — numerics from a
+different Mie code and quadrature, not a definitional mismatch (the
+small-x corner of every table agrees to ~1e-6 either way). The nucleation
+mode carries no optics (HAM's `nrad(1)=0`, `mo_ham.f90:583-585`) — gated on
+the population's own `ModalAerosolSpec.nucleation_mode` identity (M7's
+`"ns"`), not on mode index 0: MAM4 has no nucleation mode at all (its own
+mode 0 is accumulation) and leaves `nucleation_mode` unset, so this gate
+never fires for it. Selected
+via `jam_aerosol_physics(optics_backend="ham_lut")` /
+`echam_physics(jam_optics_backend="ham_lut")` — the one in-tree exception to
+the seam's "no registry" design, see
+{doc}`../design/jam_optics_mode_seam`.
+
+The default optics preserve the mass response on a mode whose ``dg`` sits on
+a size bound: at fixed geometry and composition, doubling mass doubles
+optical depth before the existing layer cap, via the volume normalization
+described above. Size bounds still limit the shape of the distribution;
+volume normalization does not remove that limitation or refresh a radius
+that lags the microphysics update. The MAM4-JAX core does adjust number in
+``calcsize``; the placeholder is an equilibrium size diagnosis without that
+tendency.
 
 ### Cloud-droplet activation (ARG)
 
 **What we do.** Abdul-Razzak & Ghan (2000) closed-form maximum-supersaturation
 activation for the log-normal modes, using the **κ-Köhler** critical
 supersaturation with κ read from the MAM4 core's per-mode volume-weighted
-hygroscopicity, and a single characteristic updraft ``w = √(2·TKE/3)`` from the
-previous step's TTE-TKE. The droplet-growth coefficient uses CAM's local-state
+hygroscopicity, and a single characteristic updraft ``w = √(tke_factor·TKE)``
+from the previous step's TTE-TKE; ``tke_factor`` is 2/3 in the class (the
+isotropic value) and **0.246** in the ``echam-jam`` preset. The droplet-growth coefficient uses CAM's local-state
 transport coefficients — water-vapour diffusivity
 ``Dv = 2.11e-5·(1013.25 hPa/p)·(T/273 K)^1.94`` and dry-air conductivity
 ``Ka = (5.69 + 0.017·(T − 273 K))·4.186e-3`` W m⁻¹ K⁻¹ (Pruppacher & Klett 13.3,
@@ -184,9 +259,11 @@ level-independent. The saturation vapour pressure in the growth coefficient
 is evaluated with the temperature held to CAM's saturation-table range,
 127.16-375.16 K (``wv_saturation.F90`` ``tmin``/``tmax``): no liquid-water
 activation happens outside it, and below about 80 K the float32 Magnus value
-underflows and the closed form returns NaN. Two shape-coefficient variants are selectable: every shipped ``echam-jam*``
-configuration pins ``ghosh2025`` (the revised coefficients); ``arg2000`` (the
-original paper's) is the bare-factory default.
+underflows and the closed form returns NaN. Two shape-coefficient variants are selectable: the MAM4 presets
+(``echam-jam`` and its aerocom/aci children) pin ``ghosh2025`` (Ghosh et al.
+2025, Eq. 5); ``arg2000`` (the original paper's) is the bare-factory default.
+``echam-jam-m7`` uses HAM's own activation (``ham_arg``; see *HAM activation*
+below).
 (``jcm/physics/aerosol/jam/activation/arg.py``, ``arg_term.py``.)
 
 **What ECHAM/CAM does.** This is CAM's ``ndrop.F90`` structure
@@ -198,6 +275,11 @@ but with a **van 't Hoff electrolyte "B" (soluble-ion) Köhler** hygroscopicity 
 a ``0.7·√TKE`` updraft.
 
 **Why we differ.**
+- `science` (calibration) — the ``echam-jam`` preset's ``tke_factor`` of 0.246
+  (a characteristic updraft 0.61 times the isotropic ``√(2/3·TKE)``) is a lever
+  of the v3.1 joint fit ({doc}`../design/jam_aerosol_retune`, "The v3.1
+  refit"): MAM4's activated droplets make wetter, brighter cloud than M7's at
+  the same cloud levers, and a weaker updraft activates fewer of them.
 - `science` — the transport coefficients follow the local T and p because the
   sea-level constants (2.11e-5 m² s⁻¹, 0.024 W m⁻¹ K⁻¹) under-state ``Dv`` aloft
   by up to ~2x and bias activation high, increasingly with altitude (~4 % at
@@ -211,8 +293,14 @@ a ``0.7·√TKE`` updraft.
   is correct as written; the historical HAM citation was a mislabel corrected as
   part of this document.
 
-**Status & known limitations.** The ``ghosh2025`` variant's coefficients are
-fitted to the paper's tables (flagged in code) and off by default. A negative
+**Status & known limitations.** The ``ghosh2025`` variant implements the Eq. 5
+closed forms of Ghosh et al. (2025), GMD 18, 4899, for the accumulation-mode width:
+``f = 0.0135·exp(2.367 σ)``, ``g = 1.1058 − 0.315 σ``, and the exponent
+``p = −0.5073 + 1.5088 σ − 0.3699 σ²`` where ``ζ/η > 1`` (kinetically limited),
+``p = 1.5`` otherwise. The width is clamped to the paper's fitted range
+1.4–2.1, outside which the paper does not claim validity. Eq. 5 agrees with the
+paper's Table 3 to within 0.015 in ``f`` and ``g`` and 0.005 in ``p`` (Table 3
+is printed to two decimals). A negative
 floor is applied before the number-weighted fraction to survive spectral ringing
 on the cold-start aerosol field. The per-mode activated number is also HAM's
 ``nact_strat`` in the aerosol inputs to ice formation (next section).
@@ -248,8 +336,9 @@ The **MAM4 → HAM mapping** (``MAM4_FREEZING_CLASSES``) is:
   HAM's exclusion of the soluble Aitken black carbon changes nothing;
 - primary carbon is HAM's insoluble Aitken mode (fresh, hydrophobic BC and OC),
   and the only insoluble class;
-- MAM4 has no insoluble dust. The dust contact inputs are therefore zero, and
-  because ECHAM disables black-carbon contact freezing, the JAM mixed-phase
+- MAM4 has no insoluble dust. Under MAM4 the dust contact inputs are therefore
+  zero (under M7 contact freezing is active; see *Contact freezing under M7*), and
+  because ECHAM disables black-carbon contact freezing, the MAM4 mixed-phase
   freezing is immersion freezing of dust- and BC-bearing droplets.
 
 **What ECHAM/CAM does.** ECHAM-HAM's ``cloud_subm_1`` calls ``ham_IN_setup`` on
@@ -286,16 +375,31 @@ removal (sedimentation plus surface deposition) takes 79 % of the sink against
 HAM's 39 %. That removal belongs to the deposition, sedimentation and
 wet-scavenging schemes (see *Emissions, deposition, sedimentation, wet
 scavenging* above), which keep their present form for v3. ECHAM's immersion
-rate needs the cooling of the large-scale vertical motion as well as the
-turbulent updraft; only the latter reaches the 2M scheme (#705). The cirrus
-inputs of ``ham_IN_setup`` (the soluble aerosol number ``zascs`` and the
-freezing-mode number and radius) are not computed; their consumers, cirrus
-nucleation ``zninucl`` and the Kärcher–Lohmann scheme, are absent (#955, #552).
+rate's cooling is the large-scale vertical motion plus the turbulent updraft,
+both of which reach the 2M scheme (see {doc}`clouds_microphysics`). The cirrus
+inputs of ``ham_IN_setup`` -- the soluble aerosol number ``pascs``/``papnx``
+(``ham_cirrus_aerosol``, sourced from a population's own
+``ModalAerosolSpec.cirrus_aerosol_modes``, M7: soluble Aitken/accumulation/
+coarse) and the Kärcher-Lohmann cirrus scheme itself
+(``jcm/physics/clouds/lohmann_2m/cirrus.py``) that consumes them -- are now
+computed for M7 (``nic_cirrus = 2``; see {doc}`clouds_microphysics`).
+The ``ld_het = .TRUE.`` branch of ``ham_IN_setup`` (feeding ``ndusol_strat``
+instead of ``papnx = ρ·pascs``) is not ported, for the same reason
+``cirrus.py`` does not port ``XFRZHET``: ``lhetfreeze`` is an ``em_error``
+unless ECHAM is compiled with ``-DWITH_LHET``. The ``nic_cirrus = 1`` cap
+``zninucl`` is a separate, still-absent consumer of ``zascs`` (#1159).
 
 The partition is compared with the compiled ``ham_IN_setup`` in
 ``ham_freezing_reference_test.py`` (exact on nine designed M7 cells); the MAM4
 mapping, a hand-computed cell and the gradients are in
-``ice_nucleation_test.py``.
+``ice_nucleation_test.py``. ``m7_freezing_chain_reference_test.py`` chains
+``ham_freezing_aerosol`` to ``het_mxphase_freezing`` on one M7 cell
+(``ham_IN_setup``'s own output fed straight to ``het_mxphase_freezing``,
+rather than each routine's reference data choosing its inputs independently)
+against the compiled Fortran run end to end, confirming contact freezing is
+genuinely non-zero under M7 — not just finite — to 1e-8/1e-4 relative
+(float64/float32); ``m7_chain_test.py`` repeats that check through the live,
+scan-based composed-physics model with seeded dust tracers.
 
 ### Cloud-borne aerosol store
 
@@ -327,20 +431,50 @@ cloud scheme's grid-mean condensate, so an ice cloud is never read as a droplet
 cloud. The exchange records each reservoir's droplet-held share,
 ``(1 − p_ice)·f_ARG / f``, for the whole reservoir at the current condensate's
 split: the aerosol sits in the hydrometeors the cell holds now, as HAM splits
-its in-cloud aerosol by the current ``pice`` each step. Wet deposition removes that share at the per-step
-liquid conversion ``c_wat`` and the crystal-held rest at the ice conversion
+its in-cloud aerosol by the current ``pice`` each step.
+
+Wet deposition removes the droplet-held share at the per-step liquid
+conversion ``c_wat`` and the crystal-held rest at the ice conversion
 ``c_ice`` (HAM's ``peffwat`` / ``peffice``), as HAM scavenges the two phases
-apart. Aqueous sulfate forms on the droplet-held part only, and counts as
-droplet-held in its reservoir's share, so it is removed at ``c_wat``. A population
-without the explicit phase is scavenged by the same split directly,
-``cf·[(1 − p_ice)·f_ARG·c_wat + p_ice·f_ice·c_ice]``.
+apart — but, by default, each conversion is additionally weighted by
+ECHAM-HAM's mode-wise stratiform fraction
+(``mo_ham_wetdep.f90::get_icscavfrac`` ``kscavICtype = 2``, tabulated per M7
+class and condensate regime): a mode's whole in-droplet or in-crystal
+reservoir does not rain out in full just because it is in-droplet —
+precipitation formation does not sweep out a proportionate share of the
+in-cloud aerosol load. Aqueous sulfate forms on the droplet-held part
+only, and counts as droplet-held in its reservoir's share, so it is
+removed at the weighted ``c_wat``. A population without the explicit phase
+is scavenged directly by the SAME temperature-regime table in place of
+``f_ARG``/``f_ice`` — not multiplying them, replacing them —
+``cf·[(1 − p_ice)·w_liq·c_wat + p_ice·w_ice·c_ice]``, with ``w_liq``/``w_ice``
+substituting for the implicit treatment's own activated-fraction cap
+(``f_ARG``/``f_ice`` themselves, under
+``stratiform_nucleation="activated_fraction"``). A mode ARG never
+activates at all (MAM4's primary carbon, M7's KI/AI/CI) has no ``f_ARG``
+term to replace in the first place, so its interstitial aerosol reads the
+same table unconditionally — whether or not the population carries an
+explicit cloud-borne phase, since such a mode never populates one.
+``physics.jam_stratiform_nucleation`` exposes the previous, uncapped
+weighting (``f_ARG``/``f_ice`` alone, ``w_liq = w_ice = 1``) as
+``"activated_fraction"`` for comparison — which has no such universal
+per-mode fallback for a non-activating mode, so that alternative leaves
+its interstitial aerosol with impaction removal only, as pre-#1080; see
+{ref}`mode-wise stratiform nucleation fractions <jcm-stratiform-nucleation>`
+for the mode mapping, the temperature-regime select and the measured
+motivation.
 
 The cloud fraction sets the relaxation rate. Under ice cloud with fewer
 crystals than particles the partition is small, so the reservoir drains to the
 interstitial phase on the resuspension timescale. Where the whole cover has
 gone in the step, the microphysics' evaporation and formation ledger decides:
 evaporated droplets release their aerosol, and rained- or snowed-out ones leave
-it to wet deposition.
+it to wet deposition. The ledger is the sum of the liquid and ice evaporation,
+so a mixed-phase cell that loses one phase releases a fraction of the whole
+reservoir rather than of that phase's share. This is an accepted limitation:
+the per-phase form was measured at +0.3–0.6 % of the global aerosol burdens
+and +0.6 % AOD in a 30-day January A/B (design page
+``jam_cloud_borne_ice_phase``), too small to carry its machinery.
 
 **What ECHAM/CAM does.** This is CAM's ``qqcw``-in-``pbuf`` pattern (cloud-borne
 aerosol in the physics buffer, not advected). ECHAM-HAM (M7/TOMAS-style,
@@ -383,7 +517,11 @@ no aerosol is held in ice cloud at all.
 
 **Status & known limitations.** HAM's in-cloud scavenged fraction is nucleation
 *plus* impaction. This reservoir carries the nucleation half; the impaction of
-the interstitial aerosol by droplets and crystals is the next section.
+the interstitial aerosol by droplets and crystals is the next section. The
+mode-wise stratiform fraction above is independent of aerosol size and
+activation state by construction (HAM's own simplification, not a jcm
+shortcut) — a mode's whole population is weighted alike regardless of how
+polluted or clean the cell is.
 
 ### In-cloud impaction scavenging
 
@@ -428,14 +566,19 @@ the phase's in-cloud tracer. ``ic_scav_imp`` reads the 2M ``reffl`` / ``reffi``
 interstitial aerosol (``sol_facti = 0``).
 
 **Why we differ.**
-- `science` (decision) — three defects of the r7492 lookup are corrected:
+- `science` (decision) — four defects of the r7492 lookup are corrected:
   - ``cdroprad(6)`` reads 0 µm where the 5 µm droplet axis gives 30 µm;
   - ``ic_scav_imp`` fills the two off-diagonal interpolation corners
     transposed relative to ``scavcoef_bilinterp``, so the result is not an
     interpolation of the table;
   - above 50 µm the plate node pair is ``8 + ⌊reffi/50⌋`` on an axis spaced
     25 µm, so crystals of 50-150 µm extrapolate from a bracket that does not
-    contain them.
+    contain them;
+  - the aerosol-radius pair comes from the axis's nominal ``2^(1/3)``
+    spacing, while the table's nodes are that series rounded to four digits,
+    so next to a node the pair is the neighbouring bracket and the fraction
+    jumps there (up to ~6 % for crystals). The corrected pair brackets the
+    axis itself; it changes 0.03-0.04 % of radii, by at most 4·10⁻⁴.
 
   With the corrections the lookup is the continuous piecewise-bilinear
   interpolant of the tables. On the real cells of the reference below, the
@@ -482,9 +625,11 @@ as HAM reads them for M7's.
 phase and moment with ``ic_scav_imp`` compiled from r7492, unmodified and with
 the three corrections, on real T63 L47 cells and designed edge cells
 (``jcm/data/test/echam_cloud_reference/hamimpaction_T63L47.npz``): the
-fractions agree to round-off (largest difference 8·10⁻¹⁷). The same file
-checks gradients against central differences and their finiteness at the table
-edges.
+fractions agree to round-off (largest difference 8·10⁻¹⁷). Its ``ham_r7492``
+variant also reproduces a second compiled reference, the unmodified
+``ic_scav → get_icscavfrac`` chain on 27 designed M7 cases with HAM's nucleation
+scavenging (``icscavimp.npz``), to rtol 10⁻¹². The same file checks gradients
+against central differences and their finiteness at the table edges.
 
 On the first-step fields of the January and July T63 L47 states, impaction
 alone removes, burden-weighted, coarse dust with an e-folding time of 26-27
@@ -584,6 +729,11 @@ and size (M7 boundaries at dry radii of 5 nm, 50 nm and 500 nm):
 | coarse (d 1-4 µm) | CS | 0.99 | soluble, coarse size |
 | Aitken (d 9-52 nm) | KS | 0.60 | soluble, Aitken size |
 | primary carbon (d 10-100 nm) | KI | 0.20 | insoluble, Aitken size |
+
+Under M7 no mapping is needed: each mode carries HAM's own ``csr_conv``
+(NS 0.20, KS 0.60, AS 0.99, CS 0.99, KI 0.20, AI 0.40, CI 0.40;
+``m7_data.py``), and the table above is consulted only for a mode whose own
+``csr_conv`` is unset.
 
 MAM4 carries dust and sea salt internally mixed in the soluble accumulation and
 coarse modes, so they take 0.99.
@@ -731,13 +881,26 @@ cancels and its below-cloud term acts on the grid mean.
 differentiable jittable forms. Gong sea salt is computed **online** from the 10 m
 wind and open-water fraction, so it needs no input file; DMS reads a prescribed
 seawater-concentration field and dust the five prescribed soil/source fields
-below, and both are inert until those are supplied. Anthropogenic emissions are either bulk
+below, and both are inert until those are supplied. A second sea-salt scheme,
+Long et al. (2011) with the Sofiev et al. (2011) SST correction (HAM
+``nseasalt=7``), is selectable with ``jam_seasalt_scheme="long"``
+(``echam_physics``) / ``seasalt_scheme="long"`` (``jam_aerosol_physics``); unlike
+Gong, its source function does not factorise into wind-only per-class constants
+(the SST correction's shape varies with particle size), so it is evaluated per
+bin against the actual SST field (``forcing.sea_surface_temperature``) every
+call, and it ports HAM's own fixed two-class (accumulation, coarse) AS/CS split
+rather than Gong's population-size-range partition — it therefore requires the
+population's ``ss`` species to carry exactly two classes of different size, the
+smaller taking the AS flux (MAM4's three, including an Aitken-mode sea-salt
+tracer HAM's M7 configuration does not have, do not qualify). Its scale
+defaults to 1, HAM's native source; Gong's calibration below does not carry
+over, and the ``echam-jam-m7`` preset sets its own (below). Anthropogenic emissions are either bulk
 super-sectors with in-model differentiable speciation or CAM6/MAM4-faithful
 already-speciated per-tracer fields. Dry deposition
-(``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme with a
-Slinn & Slinn (1980) sub-layer resistance; sedimentation
+(``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme over CAM's eleven land-cover classes with
+the Zhang et al. (2001) surface-collection law; sedimentation
 (``sedimentation/``) is per-moment Stokes settling with Cunningham slip; wet
-scavenging (``wetdep/``) is in-cloud nucleation + in-cloud impaction +
+scavenging (``jcm/physics/aerosol/jam/wetdep/``) is in-cloud nucleation + in-cloud impaction +
 below-cloud impaction + a **re-evaporation re-injection ledger** that returns carried aerosol to the
 interstitial phase where precip evaporates, and it deliberately excludes the
 sedimenting cloud-ice flux from the in-cloud carrier flux.
@@ -748,57 +911,72 @@ scavenging ``mo_hammoz_wetdep`` / ``mo_ham_wetdep`` (``peffwat`` / ``peffice``
 re-evaporation ledger).
 
 **Why we differ.**
-- `science` (calibration) — the Gong sea-salt source is scaled by **2.57**
+- `science` (calibration) — the Gong sea-salt source is scaled by **1.53**
   (``SEASALT_SCALE_DEFAULT``, ``physics.seasalt.scale``), where the Fortran
   applies none. HAM's unscaled function emits 2057 Tg/yr at T63 L47 against the
-  AeroCom median of 6280 (mean 16 600) and leaves a sea-salt burden of
-  6.6 mg/m² against 14.7 (AeroCom mean; median 12.5). The JAM aerosol retune
-  ({doc}`../design/jam_aerosol_retune`) swept the scale, with the dust threshold
-  scale, as one of the aerosol levers of a loss that includes the ESA-CCI total
-  AOD (SU v4.21) and the cloud radiative terms, with the burden as a monitor. The
-  loss reads the scale through the total AOD and keeps asking for more sea salt
-  past any burden the AeroCom models carry (the loss constrains it from below
-  only: the optimum sat on the upper edge of every range up to [1, 4]), so the
-  value is set on the burden instead, in Stage 2c, which swept it over [2, 8]
-  with the Sundqvist T63 cover set ({doc}`clouds_microphysics`) in place and the
-  cloud-borne aerosol held by liquid cloud only: the two-window sea-salt burden
-  is linear in the scale (0.65 + 5.44 s + 0.14 d mg/m², R² 0.999, nearly
-  independent of the dust scale d) and crosses the AeroCom mean of 14.7 mg/m²
-  at 2.57. The cover set's larger cloud fraction removes sea salt faster, which
-  is why the scale is larger than the one fitted on ECHAM's cover parameters
-  (2; the sea-salt lifetime is 0.60 d on those and 0.37 d with the cover set).
-  A 365-day T63 L47 year at 2.57 has a burden of 14.5 mg/m² (15.0 over the
-  last 195 days) and a lifetime of 0.36 d (AeroCom 0.48); the total AOD it
-  gives is 0.096 against 0.145 observed, so the AOD deficit that remains is
-  not a burden deficit. The scale is a T63 L47 calibration against this host's
-  10 m wind and its wet removal and is applied at every resolution, since no
-  other has been validated.
-- `science` (decision) — the DMS flux scale (``physics.dms.flux_scale``), the
-  wet-removal scales (``physics.wetdep.incloud_scale`` / ``impact_scale``,
-  ``physics.conv_transport.conv_scav_scale``) and every convection and
-  microphysics field keep their ECHAM-HAM / ECHAM defaults (the Sundqvist cover
-  parameters are the one cloud field that does not: {doc}`clouds_microphysics`).
-  The retune swept them; the
-  weak DMS lever and a wet-removal corner that raised sulphate out of the
-  AeroCom band are the reasons given in the design page.
-- `science` (provenance correction) — dry deposition is a **HAMMOZ/Ganzeveld
-  (Slinn & Slinn) resistance-in-series** scheme specialised to the aquaplanet ocean
-  surface, *not* a CAM ``aero_model_drydep`` port; ``r_a`` uses a neutral log-law
-  (a Monin-Obukhov stability correction is a noted future refinement). Convectively
-  scavenged aerosol is deposited directly (convection exposes no evaporation
-  profile).
+  AeroCom median of 6280 (mean 16 600). The scale is a lever of the v3.1 joint
+  fit of the JAM hosts ({doc}`../design/jam_aerosol_retune`, "The v3.1
+  refit"), whose loss reads it through the total AOD, the cloud radiative
+  terms and the AeroCom sea-salt burden (14.7 mg/m², with the model diversity,
+  54 %, as its error). The 365-day T63 L47 year at the shipped values has a
+  sea-salt burden of 21.8 mg/m², 1.5 times the AeroCom mean, with a lifetime of
+  0.85 d (AeroCom 0.48), and a total AOD of 0.19 against 0.145 observed. The
+  scale is a T63 L47 calibration against this host's 10 m wind and its wet
+  removal and is applied at every resolution, since no other has been
+  validated.
+- `science` (calibration) — the ``echam-jam-m7`` preset scales HAM's Long
+  sea-salt source by **1.85** and HAM's regional dust threshold vector by
+  **1.16**, where ECHAM-HAM applies neither. The port's source functions match
+  compiled HAM, but under this host's weak surface winds (#1058) the unscaled
+  sources leave M7's sea-salt burden several times below AeroCom's and
+  HAM2.3's ({doc}`../design/jam_m7_configuration`, *Dust and sea-salt
+  calibration*), while the SLIM land's roughness (a tenth of the vegetation
+  height) and its bucket-based dust gates raise the Saharan emission above
+  AeroCom's at HAM's thresholds, so the dust vector is scaled up. Both are
+  levers of the v3.1 structural refit ({doc}`../design/jam_aerosol_retune`,
+  "The structural refit"), inside their ranges. They are this population's
+  values: MAM4's (1.53 on Gong, 0.85 on the dust vector) belong to a
+  different source function and lifetimes.
+- `science` (calibration) — one wet-removal scale multiplies the stratiform
+  in-cloud scavenging (``physics.wetdep.incloud_scale``), the inertial-impaction
+  efficiency of the Slinn below-cloud collection (``impact_scale``) and the
+  convective in-plume scavenging (``physics.conv_transport.conv_scav_scale``)
+  together, where ECHAM-HAM applies none: **1.22** in the ``echam-jam`` preset
+  (the v3.1 release fit) and **1.59** in ``echam-jam-m7`` (the v3.1 structural
+  refit). On
+  ``echam-jam`` the Slinn collection carries both stratiform and convective
+  below-cloud removal; on ``echam-jam-m7`` (``jam_wetdep_scheme: ham``) it
+  carries the convective share only, since HAM's Croft tables, which tabulate
+  the whole collection rate with no separable impaction term, carry the
+  stratiform share unscaled. The class defaults stay 1,
+  so a composition built without a preset removes at ECHAM-HAM's rates. The
+  DMS flux scale (``physics.dms.flux_scale``) and every convection and ice
+  microphysics field keep their ECHAM-HAM / ECHAM defaults: the v3.0 retune
+  swept DMS and found it a weak lever (see the design page).
+- `science` (provenance correction) — dry deposition is resistance-in-series
+  over CAM's eleven land-cover classes (the official CAM land-use map,
+  conservatively remapped at construction) with the Zhang et al. (2001)
+  impaction, interception, diffusion and rebound law; ``r_a`` uses a neutral
+  log-law (a Monin-Obukhov stability correction is a noted future refinement);
+  the prognostic cloud-borne phase still uses aerosol-mode collection
+  velocities. This replaced an earlier ocean-only law applied over deserts and
+  vegetation; see {doc}`../design/jam_soa_dust` for the source, reference
+  comparisons and measured limitations.
 
 **Code pointers (JAM).**
 - ``jcm/physics/aerosol/jam/jam_terms.py`` — ``jam_aerosol_physics`` (the ordered
   chain and its options).
 - ``jcm/physics/aerosol/jam/microphysics/`` — ``mam4_data.py`` (population),
-  ``mam4_jax.py`` (real core), ``placeholder.py`` (κ-Köhler core); ``species.py``,
+  ``mam4_jax.py`` (real MAM4 core and its adaptive-ASTEM variant),
+  ``m7_data.py`` / ``m7_jax.py`` (M7 population and core), ``placeholder.py``
+  (κ-Köhler core); ``species.py``,
   ``gas_species.py``.
 - ``jcm/physics/aerosol/jam/activation/`` — ``arg.py``, ``arg_term.py``.
 - ``jcm/physics/aerosol/jam/cloud_borne_store.py``, ``cloud_borne.py``.
 - ``jcm/physics/convection/tracer_transport.py`` — ``ConvectiveTracerTransport``.
 - ``jcm/physics/aerosol/jam/emissions/`` (seasalt, dms, dust, anthropogenic,
-  prescribed); ``drydep/``; ``sedimentation/``; ``wetdep/``; ``ice_nucleation/``;
+  prescribed, volcanic); ``drydep/``; ``sedimentation/``;
+  ``jcm/physics/aerosol/jam/wetdep/``; ``ice_nucleation/``;
   ``optics/optics_term.py``.
 
 #### Sea-salt and DMS emission wind
@@ -859,7 +1037,9 @@ exactly zero on every chunk thereafter.
 #### Dust emission (Tegen / HAMMOZ)
 
 **What we do.** A port of the MPI-BGC dust scheme as HAM2 configures it
-(``ndust = 4``). A 191-class soil size grid spanning 0.2-1262 µm carries a
+(``ndust = 4``, the default; ``ndust = 5`` additionally gates the Sahara on
+the MSG-SEVIRI dust-source-activation map, HAM's own reference-run choice —
+`jam_dust_preset`, below). A 191-class soil size grid spanning 0.2-1262 µm carries a
 Marticorena & Bergametti (1995) threshold friction velocity ``u*t(D)``; ``u*``
 comes from the diagnosed **10 m wind** through the fixed log law
 ``u* = vk·U10/ln(1000 cm/z0)`` with ``z0 = ndurough = 0.001 cm``, not from the
@@ -945,9 +1125,8 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   supported-but-untuned grids by design (see {doc}`configurations`). The
   regional ``ndust = 4`` vector is likewise set only at T63; every other
   resolution, the cubed sphere included, takes the Fortran's uniform
-  ``CASE DEFAULT`` 0.86. Every shipped JAM configuration is T63, so this
-  bounds what an unsupported composition would do rather than describing
-  one the model ships. There are no ne30 dust products on the data mirror at
+  ``CASE DEFAULT`` 0.86. The calibrated vector exists only at T63; the
+  shipped T106, T119 and ne30 JAM configurations take that untuned 0.86. There are no ne30 dust products on the data mirror at
   all, so a shipped ne30 configuration runs with the dust emission term composed
   but inert — see {doc}`boundary_conditions` for what that means for the inputs
   and for the column sampling a hand-supplied file gets.
@@ -984,19 +1163,52 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   ``DustParameters.preset(3)`` selects Stier et al. (2005) instead. HAM tunes
   that vector twice — ``(0.95, 1.25)`` for nudged simulations against
   ``(1.05, 1.45)`` free-running — and jcm carries both, selected by
-  ``physics.jam_dust_nudged``. ``null`` (the shipped value) means "follow the
-  run": ``runners.py::_resolve_nudging_dependent_physics`` fills it from
+  ``physics.jam_dust_nudged``. ``null`` (the shipped value in both the MAM4
+  and the M7 preset) means "follow the run": ``runners.py::_resolve_nudging_dependent_physics`` fills it from
   ``nudging.enabled``, because the nudging term is appended after physics is
   composed and the dust term cannot otherwise see it. An explicit ``true`` or
   ``false`` wins.
+- **``ndust = 5``: the MSG-SEVIRI Saharan override.** HAM's own reference run
+  (`setup_templates/run_examples/run_transient_echam6-hamm7`) selects
+  ``ndust = 5``, not 4: everywhere the Schepanski et al. (2007, GRL; 2012, RSE)
+  MSG-SEVIRI dust-source-activation frequency (``forcing.dust_msg``, HAM's
+  ``mat_msg``, in [0, 1]) is positive, the cell's Zobler/East-Asian soil
+  mixture (``mat_s1..mat_s6``) is zeroed in favour of it: `0 < dust_msg < 0.01`
+  zeroes the preferential source too (the cell emits nothing from this term),
+  `dust_msg ≥ 0.01` forces the full preferential-source spectrum
+  (``psrc = 1``). This override block (`mo_ham_dust.f90:685-740`) is
+  wind- and soil-moisture-**independent** — it runs once, at annual-field
+  read time — so it is validated once, against the compiled, unmodified
+  Fortran, in `jcm/data/test/echam_cloud_reference/hamdustmsg.npz`
+  (`dust_test.py::MSGSourceTest`); the shared saltation/threshold chain it
+  feeds is `ndust = 4`'s own, unchanged. The override shares `ndust = 4`'s
+  East-Asia soil replacement (`k_dust_easo = 2`) but runs AFTER it and does
+  not special-case the interaction: a cell that is both East-Asian and
+  MSG-active (geographically disjoint in practice — the map is Saharan) has
+  its East-Asia-replaced residual zeroed by the MSG block while its
+  East-Asian texture fractions themselves are untouched, which can drive the
+  *reported* residual negative exactly as HAM's own literal
+  `mat_s1 - mat_s2 - ... - mat_s17` arithmetic would — reproduced, not
+  clipped. The MSG map is the mirror's `dust_msg_sources` bundle
+  (`jcm/data/mirror/dust.py`). Only `ndust = 5` reads it, so
+  `forcing.dust_msg_file` defaults to `null` and an `ndust = 5`
+  configuration sets it to `auto` (as `t63-echam-jam` does).
 - **The one scalar jcm calibrates.** ``NDUSCALE_JCM_T63_SCALE`` multiplies the
   whole ``ndust = 4`` T63 vector, and is exposed per run as
   ``physics.jam_dust_nduscale_scale``. It is one number rather than eight
   because HAM's eight regional parameters cannot be identified from a
   global-mean and a zonal-mean dust AOD: the regional *ratios* stay HAM's and
-  only the level moves. It applies at T63, which is every resolution the model ships JAM
-  at; a composition built at another resolution keeps HAM's untuned
-  ``0.86``, since its source fields are interpolated from T63 anyway.
+  only the level moves. ``ndust = 5`` shares ``ndust = 4``'s T63 regional
+  vector bit-for-bit (`get_dust_namelist_defaults`'s ``CASE (4, 5)``), and the
+  scale itself corrects a mismatch between jcm's simulated 10 m wind climate
+  and the one HAM's vector was tuned against — a property of the host model,
+  not of which soil-source variant is active. It is a calibration of the MAM4
+  configuration's dust AOD with no counterpart in ECHAM-HAM, so the
+  ``echam-jam-m7`` preset sets its own, 1.16, fitted with the rest of its
+  structural refit (``ndust = 5`` shares the vector; see *Why we differ* under the emission
+  schemes above). It applies at T63, the only resolution ``nduscale_reg`` is tuned at; a
+  composition built at another resolution (the shipped T106, T119 and ne30
+  JAM configurations included) keeps HAM's untuned ``0.86``.
 
   **The parent model's budget, converted to this port's size window,** is the
   reference the shipped value is read against. ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day and 923
@@ -1034,76 +1246,71 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
 
   The release gate ``DUST_EMISSION_TG_PER_YR`` is **400-2600 Tg/yr**. It
   spans the parent model's converted values (485 pre-industrial, 642
-  present-day) and the shipped calibration's 2351 Tg/yr year. Its upper edge is
-  1.11 times that year, against a run-to-run spread of about 6 %, so the
-  calibrated configuration passes with a margin of under two spreads; the band
-  as a whole spans a factor of 6.5, which is why it is exempt from the
-  regression tier. It is the check that dust has neither vanished
-  (HAM's untuned threshold gives 5.7 Tg/yr here) nor run away (the same parent
-  model's last-glacial-maximum run emits 5159 Tg/yr in HAM's own size window,
-  about 2700 in this one, 4 % above the upper edge, which is why the band is
-  not widened to give the calibrated year more room).
+  present-day) and the shipped calibration's years: 1614 Tg/yr in the
+  ``echam-jam-t63-l47`` release year and 1019 in the ``echam-jam-t63-l95``
+  year. For the ``echam-jam-m7`` configuration the same statistic covers M7's
+  own size window (its AI and CI modes, to the ``M7_CI_UM`` edge in
+  ``jcm/physics/aerosol/jam/emissions/dust.py``), which is HAM's, so
+  no window conversion applies: its references are the HAM2.3 budgets
+  directly, 1124 Tg/yr (Tegen et al. 2019) and 1221 (Krätschmer et al. 2022),
+  and its confirmation year emits 864 Tg/yr (1237 in the year before it on
+  the same land, at nearly the same levers: a few events set a year's
+  total). The upper edge is 1.6 times the
+  JAM-MAM4 year, against a run-to-run spread of about 6 %; the band as a whole
+  spans a factor of 6.5, which is why it is exempt from the regression tier.
+  It is the check that dust has neither vanished (HAM's untuned threshold
+  gives 5.7 Tg/yr here) nor run away (the same parent model's
+  last-glacial-maximum run emits 5159 Tg/yr in HAM's own size window, about
+  2700 in this one, 4 % above the upper edge, which is why the band is no
+  wider).
 
-  **The value is 0.485, set by the annual AeroCom dust burden in Stage 2c of
-  the retune, with the Sundqvist T63 cover set in place and the cloud-borne
-  aerosol store that holds aerosol in liquid cloud only.** The retune
-  ({doc}`../design/jam_aerosol_retune`) minimised a loss over the SW and LW
-  cloud radiative effects, total cloud cover, zonal precipitation, ocean liquid
-  water path, total AOD (ESA-CCI SU v4.21) and dust AOD (ESA-CCI SLSTR SU
-  v1.12), each as a global-mean bias and a 10-degree zonal-mean error divided
-  by the larger of the observation's inter-annual spread and a floor: a 40-arm
-  Sobol sweep (14-day windows) and a 25-arm Gaussian-process
-  expected-improvement sweep (30-day windows), January and July, over the dust
-  scale, the sea-salt scale, the DMS flux scale and the wet-removal scale, on
-  ECHAM's cover parameters, and then, in Stage 2c, a 20-arm Gaussian-process
-  expected-improvement sweep (30-day windows, January and July, from states
-  spun up on the same tree) over the dust scale (0.3-1.0) and the sea-salt
-  scale (2-8) alone, with the five cover parameters at their shipped values.
-  The dust scale is the only lever that moves the dust AOD (its standardised
-  effect on the global dust AOD is -3.2 in both windows of the Stage-1 sweep,
-  against at most 0.3 for any of the seven other levers), but the loss does
-  not set it: the January window's dust-AOD terms are a few dust events, and
-  the loss minimum (0.727) has dust nearly off, a burden of 13-17 mg/m²
-  against the AeroCom mean of 37.6. The scale is set on that burden, a monitor
-  of the sweep that never enters the loss, as the annual mean AeroCom reports
-  and the release matrix scores: the fitted two-window burden crosses
-  37.6 mg/m² at 0.522 (bootstrap 16-84 % 0.518-0.527, independent of the
-  sea-salt scale), but the two 30-day windows sample the dusty seasons (a
-  365-day year at 0.522 reads 27.3 mg/m²), and so does the health statistics'
-  window, the last 195 days of a year started from a dust-free state, which
-  excludes the spring dust season (a year at 0.465 reads 34.1 there but 43.8
-  over the year, with March and May at 87 and 98 mg/m², and emits 2715 Tg/yr,
-  above the 2600 Tg/yr upper edge of the release band
-  ``DUST_EMISSION_TG_PER_YR``). The annual sensitivity between those two years,
-  d ln B / d scale = -8.3, puts 37.6 at 0.483, and the year at 0.485 confirms
-  it. Four 365-day ``echam-jam-t63-l47`` years on that tree, differing in the
-  threshold scale (the first also carries the sea-salt scale 4; the sea-salt
-  scale does not enter dust), give
+  **The gate is scored on the run directory's whole trailing year, not on
+  whatever window ``--last-n`` was asked to score.** The band's anchors are
+  whole-year totals. A mean burden over a window that includes a cold start's
+  dust-free spin-up months is biased low; this statistic integrates a
+  whole-year flux and has no corresponding bias to correct for. Reading the statistic from a
+  ``--last-n`` slice short of a year would therefore not make it more
+  representative, only shorter; ``tools/release_validation/
+  aerosol_stats.py``'s ``annual_window_bounds`` reads the run directory's
+  last 365 days (or the whole directory, if it holds less) for this one
+  statistic regardless of ``--last-n``, while the drift, ledger and burden
+  statistics above keep reading whatever window was asked for. The reported
+  statistic set carries this window's length alongside the statistic
+  (``dust_window_days``, next to the ``record_days`` the drift/ledger window
+  used), so a reader of ``health.py``'s JSON report or its printed table can
+  tell the two windows apart rather than assuming they match.
 
-  | | year at 0.344 | year at 0.522 | year at 0.465 | year at 0.485 | reference |
-  |---|---|---|---|---|---|
-  | dust AOD 550 nm, annual | 0.045 | 0.0151 | 0.0247 | 0.0198 | 0.0213 (ESA-CCI SLSTR) |
-  | dust burden, mg/m², annual / last 195 days | - / 94.1 | 27.3 / 24.6 | 43.8 / 34.1 | 36.2 / 29.9 | 37.6 (AeroCom mean), 40.2 (median) |
-  | D < 10 µm emission, Tg/yr | - | 1702 | 2715 | 2270 | 642 (parent model, converted); 1640 (AeroCom median, mixed cut-offs) |
-  | dust lifetime, d, annual | 2.8 (last 195 days) | 3.0 | 3.0 | 3.0 | 4.1 (AeroCom) |
-
-  The emission rises 1.6-fold for an 11 % lower threshold (0.522 to 0.465),
-  because saltation samples the far tail of the wind distribution and jcm's
-  tail is thin; that steepness is why the scalar is fitted to a run and not
-  inherited, and why the same scale on a tree with a different wind climate
-  gives a different budget (the dust climate of the earlier cloud-borne store
-  and circulation is tabulated on the design page). One year's annual burden
-  carries the sampling noise of its dust events, so the value is read from
-  the sensitivity across the years rather than from any one spring.
-  What is left of the dust-AOD error is a short lifetime (3.0 d against 4.1)
-  and the regional source balance (in the review of the earlier-tree sweep
-  arms that reached the observed global dust AOD, the modelled-to-observed
-  regional dust AOD of the best arm was 0.84 in January and 0.51 in July over
-  the Sahara/Sahel, 1.65 and 1.88 over Arabia, 3.9 and 1.1 over Asia and 4.1
-  and 0.38 over Australia), neither of which a global scalar can move. The
-  shipped emission is 3.5 times the parent model's converted budget and above
-  the AeroCom medians (1640; 1123): at this lifetime the emission that matches
-  the burden is that large, which is what the lower threshold encodes.
+  **The value is 0.85, set on the SLIM land.** The v3.1 joint fit of the JAM
+  hosts ({doc}`../design/jam_aerosol_retune`, "The v3.1 refit") gave 0.720 on
+  the prescribed-moisture land. SLIM's roughness (a tenth of the vegetation
+  height) and its bucket-based gates raise the source-region wind and the
+  emitting area, and an equilibrated ``echam-jam-t63-l47`` year at 0.720 emits
+  2703 Tg/yr with a burden of 98 mg/m². Two equilibrated years (0.720, and
+  0.80 with 1910 Tg/yr and 63 mg/m²) give an annual response log-linear in the
+  scale, -4.3 per unit for the emission and -5.5 for the burden, and 0.85 puts
+  the burden inside the release band at both vertical resolutions. The 365-day
+  ``echam-jam-t63-l47`` year at it emits 1614 Tg/yr of D < 10 µm dust (AeroCom
+  median 1640 at mixed size cut-offs; the parent model's converted budget is
+  642) with a burden of 55.5 mg/m² (AeroCom mean 37.6, median 40.2) and a
+  lifetime of 6.1 d (AeroCom 4.1); the ``echam-jam-t63-l95`` year emits 1019
+  Tg/yr with 32.7 mg/m² and 5.9 d. At L47 the emission is AeroCom's and the
+  burden is above it because the lifetime is long, which a threshold scale
+  cannot move: the host's other levers keep the v3.1 fit's values and are not
+  refitted on the SLIM land ({doc}`../design/jam_aerosol_retune`, "The
+  structural refit"). The value rests on annual means because one season
+  misjudges a threshold: from 0.720 to 0.80 the January emission rate falls by
+  63 % and the annual emission by 29 %, the boreal spring and summer sources
+  sitting further above their thresholds than January's. Emission
+  samples the far tail of the wind distribution, so the scalar moves with the
+  host's wind and cover climate and is fitted to a run of the current tree
+  rather than inherited. What is left of
+  the dust error is the regional source balance (in the review of the
+  earlier-tree sweep arms that reached the observed global dust AOD, the
+  modelled-to-observed regional dust AOD of the best arm was 0.84 in January
+  and 0.51 in July over the Sahara/Sahel, 1.65 and 1.88 over Arabia, 3.9 and
+  1.1 over Asia and 4.1 and 0.38 over Australia) and the season: against SLSTR
+  the model is too dusty in January at 20-40°N and over Australia and too clean
+  in July. A global scalar moves neither.
 
   The same scheme driven offline with ERA5 6-hourly 10 m winds regridded to
   T63 — every other input the model's own — gives 125 Tg/yr at 1.00, 421 at
@@ -1158,7 +1365,83 @@ transcription of the Fortran loops for all twelve mixture rows, the East-Asia
 overlap guards, the region vector, the snow and saturation cut-offs, the
 emitted ``D_eff`` (0.5698 / 1.9125 µm for a medium soil, against MAM4's own
 0.310 / 5.64 µm), the gradients through α and ``nduscale_reg``, and the shipped
-threshold scale (0.485, the digits the confirmation year ran).
+threshold scale (0.85).
+
+#### Volcanic SO₂
+
+**What we do.** Both JAM presets (``jam_volcanic``) emit two volcanic SO₂
+sources from one grid-free product, ``forcing.volcanic_file``
+(``products/volcanic_so2_cmip.nc``), whose point sources are mapped onto the
+model's columns when the forcing loads. Each source's mass rate is divided by
+the area of the cell it falls in, so the model's own global integral returns
+the inventory's mass on any grid.
+
+- **Continuous degassing** is the AeroCom continuous-degassing inventory
+  (Dentener et al. 2006) as CESM2 builds it for CMIP6: 12.6 Tg S/yr (25.2 Tg
+  SO₂/yr), constant in time. That is Diehl's ``volc_continuous`` (after Andres &
+  Kasgnoc 1998) scaled ×2.6325 to include the non-SO₂ sulfur and Textor's ×1.5
+  correction for an underestimate. CESM's build spreads each volcano evenly
+  over the 500 m layers from two-thirds of its vent altitude up to the vent
+  (0–10 km a.s.l.; mass-weighted mean 2.2 km). Each inventory layer is split
+  over the model layers it overlaps in geopotential height a.s.l. A share below
+  the model's smoothed surface goes into the lowest layer.
+  - 2.5 % is emitted as primary sulfate, the share CESM's files carry as SO₄:
+    by mass, MAM4's ``primary_split`` (half Aitken, half accumulation), and on
+    M7 HAM's default sector class (half soluble Aitken at 30 nm, half soluble
+    accumulation at 75 nm).
+  - The rest goes to ``g_so2``.
+- **Eruptions** are the CMIP7 ``utsvolcemis`` list (UOEXETER-CMIP-2-2-1; Aubry
+  et al. 2026), 463 eruptions from 1750 to 2023, injected as the dataset paper
+  recommends:
+  - over the 24 hours of the eruption's UTC day;
+  - in the column containing the volcano;
+  - with the profile ``exp(−((z − H)/D)²)`` around the injection altitude
+    ``H`` a.s.l. (``D`` the inventory's depth), integrated exactly over each
+    layer.
+
+  Eruptions emit SO₂ only. The model calendar picks each year's eruptions;
+  ``forcing.volcanic_eruption_year`` instead replays one year's every model
+  year.
+
+The degassing and eruption scales and the primary-sulfate fraction are
+differentiable parameters (``volcanic_params``), as are the forcing's injection
+heights.
+
+**What ECHAM/CAM does.** CESM2 reads the same degassing build as 3-D external
+forcings, 97.5 % as SO₂ and 2.5 % as SO₄ in its ``a1``/``a2`` modes (with
+the particle number of a single 0.134 µm size, where JAM uses each mode's own).
+ECHAM-HAM reads the AeroCom volcanic inventory (Dentener et al. 2006),
+continuous and explosive. The
+AeroCom AP4-CTRL protocol asks models to inject SO₂ from Carn (2022) rather
+than prescribe stratospheric aerosol; the CMIP7 list's satellite era is
+Carn's MSVOLSO2L4.
+
+**Why we differ.**
+- `science` (inventory) — degassing reads CESM2's CMIP6 build of the AeroCom
+  continuous inventory rather than HAM's own input files (maintainer decision,
+  2026-11-02): the same AeroCom total, with CESM's vertical spread below each
+  vent. It is the CMIP input that sits beside the CEDS and BB4CMIP7 emissions
+  JAM reads.
+- `science` (vertical placement) — CESM's layers are 500 m altitudes a.s.l.,
+  which its file stores as the pressures ``1013.25·exp(−z/7600)`` hPa over a
+  fixed surface. A volcano whose vent is below the model's surface at that cell
+  emits into the lowest layer instead of being lost.
+- `compute` — one point-source file serves every resolution and the pySES
+  columns, and no daily eruption field is stored: the term selects the day's
+  eruptions from ``forcing.solar``.
+
+The design, the sources' magnitude and their measured effect on the aerosol
+forcing are in {doc}`../design/jam_volcanic_so2`.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/emissions/volcanic.py`` — ``VolcanicEmissions``,
+  ``VolcanicParameters``, ``layer_overlap_fractions``,
+  ``gaussian_layer_fractions``.
+- ``jcm/forcing.py`` — ``read_volcanic_emissions``, ``gaussian_grid_columns``;
+  ``jcm/forcing_assembly.py`` — ``_attach_volcanic``;
+  ``jcm/dycore/pyses/forcing.py`` — ``attach_jam_forcing``, and
+  ``jcm/dycore/pyses/physics_grid.py`` — ``FVPhysicsGrid``, for pySES.
+- ``jcm/data/mirror/volcanic.py`` — ``build_volcanic_product``.
 
 ### Aqueous sulfate chemistry: in-cloud SO₂ oxidation
 
@@ -1168,42 +1451,39 @@ threshold scale (0.485, the digits the confirmation year ran).
 H₂O₂ and the O₃ oxidation pathways are integrated over ``niter=5``
 sub-steps with the cloud-droplet pH solved each sub-step from the
 sulfate/SO₂ charge balance. It runs in the post-cloud block, alongside wet
-deposition, and is shared by every JAM composition (MAM4 and the
-placeholder core alike).
+deposition, and is shared by every JAM composition (MAM4, M7 and the
+placeholder core). Five of its module constants carry r7492's own
+compiled values rather than a recomputed/rounded equivalent: the SO₂
+Henry's-law pair (``_H_SO2_0, _H_SO2_ACT = 1.36, 4250.0`` —
+``speclist(id_so2)%henry``, ``mo_ham_species.f90:181``; the dominant term in
+the routine's sulfate yield), the gas constant (``_ZRGAS = 8.2e-2``,
+``mo_ham_chemistry.f90:209``), Avogadro's number and its separately-rounded
+``xtoc``/``ctox`` factor (``_AVO``/``_AVO_XTOC``,
+``mo_physical_constants.f90:58``), and SO₂'s molar mass (``_MW_SO2 =
+64.0643``, ``mo_ham.f90:310``). The routine's ``xtoc`` conversion for the
+produced-sulfate mass consistently uses the ``mw_so4`` function parameter
+below rather than a module constant.
 
 **What ECHAM-HAM does.** ``mo_ham_chemistry.f90::ham_wet_chemistry``.
 
-**Why we differ.** ``science`` (defect, jax-gcm#1031, fixed here) — five of
-the routine's literal constants read from jcm's own constants/species
-tables rather than r7492's own compiled values: the SO₂ Henry's-law pair
-(``_H_SO2_0, _H_SO2_ACT``, now ``1.36, 4250.0`` — ``speclist(id_so2)%henry``,
-``mo_ham_species.f90:181``; the dominant term, -9% to -52% of produced
-sulfate across 16 designed reference cells before the fix), the gas
-constant (``_ZRGAS = 8.2e-2``, ``mo_ham_chemistry.f90:209``'s own rounding),
-Avogadro's number and its separately-rounded ``xtoc``/``ctox`` factor
-(``_AVO``/``_AVO_XTOC``, ``mo_physical_constants.f90:58``), and SO₂'s molar
-mass (``_MW_SO2 = 64.0643``, ``mo_ham.f90:310``). All five are now
-``_aqueous_so4``'s own module constants at r7492's values — a **deliberate
-change to the ``echam-jam``/MAM4 default path** (maintainer decision
-2026-10-06), not an optional override, since no second (M7) population
-exists on this branch to carry one. SO₄'s own molar mass stays jcm's MAM4-
-MOM value (115 g/mol, ``_MW_SO4``) — a jcm species-table choice, not a HAM
-literal, and outside jax-gcm#1031's scope — but is kept as a function
-parameter (``mw_so4``) rather than a bare module constant, so a future
-population with its own SO₄ species (M7's 96.0631 g/mol) can still supply
-it. The routine's ``xtoc`` conversion for the produced-sulfate mass now
-consistently uses that same ``mw_so4`` parameter rather than the module
-constant unconditionally, fixing a related inconsistency found while
-tracing the literal fix through.
+**Why we differ.** ``science`` — SO₄'s own molar mass is the population's
+rather than one r7492 literal: jcm's MAM4-MOM value (115 g/mol, ``_MW_SO4``)
+for MAM4, a jcm species-table choice and the one constant in the routine that
+does not carry r7492's own value, and HAM's 96.0631 g/mol for M7.
+``AqueousSulfur`` passes it as the ``mw_so4`` parameter from
+``spec.species_props("so4")``, and the produced sulfate's ``xtoc`` conversion
+uses the same value. The MAM4 value is a **deliberate choice on the
+``echam-jam``/MAM4 default path** (maintainer decision 2026-10-06), not an
+oversight.
 
 **Status & known limitations.** ``_aqueous_so4`` matches the compiled,
 unmodified ``ham_wet_chemistry`` at float64 rtol=1e-12 on every one of 16
 designed reference cells (``jcm/data/test/echam_cloud_reference/
-hamaqueous_M7.{npz,README.md}``), called directly with M7's own SO₄ molar
-mass (the fixture's species) since no M7 population exists here to carry
-it through the full term. See the pull request closing jax-gcm#1031 for
-the measured change in ``echam-jam``'s in-cloud sulfate production and
-burden.
+hamaqueous_M7.{npz,README.md}``), both as the bare kernel with M7's SO₄
+molar mass and as the full ``AqueousSulfur`` term on ``M7_SPEC`` (HAM's
+number-fraction AS/CS split included). That split puts the sulfate on
+interstitial number, as HAM does, so it requires a population without an
+explicit cloud-borne phase; ``AqueousSulfur`` refuses the combination.
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/chemistry/aqueous.py`` — ``_aqueous_so4``,
@@ -1240,6 +1520,56 @@ the cloudy interstitial aerosol meets one collector; in-cloud impaction is small
 enough (see that section) that the overlap does not matter. The convective
 carrier acts in HAMMOZ's updraft-area footprint (see [convective tracer
 transport](#convective-tracer-transport--in-plume-scavenging)).
+
+`WetScavenging(scheme="ham_below_cloud")` is an alternative to the CAM/Slinn
+pathway above for the STRATIFORM carrier only: ECHAM-HAM r7492's own
+`nwetdep=3` scheme, a bilinear lookup against Betty Croft's aerosol
+size-dependent rain and snow collection tables (`mo_ham_wetdep.f90::bc_rain`/
+`bc_snow`, `mo_ham_wetdep_data.f90`), weighted by the stratiform
+precipitating-area fraction and the in-cloud rain/snow flux the cloud scheme
+publishes on request (`configure_wetdep_hydro_diagnostics`). The convective
+below-cloud pathway and every in-cloud pathway are unaffected by this
+selector; see
+{ref}`below-cloud scavenging <ham-below-cloud-scheme>`
+for the scheme and its two reference-harness findings.
+
+**Why we differ** (below-cloud rain lookup). `science` — two defects of r7492's
+`bc_rain` lookup are corrected (`jam_below_cloud_lookup=ham`, the default;
+`ham_r7492` reproduces the compiled routine). `bc_rain` fills the two
+off-diagonal interpolation corners transposed relative to `scavcoef_bilinterp`,
+as `ic_scav_imp` does, so the result is not an interpolation of the table and an
+axis at its table end is not interpolated at all. Below ~0.0032 mm/h both
+rain-rate indices clip to the zero-rain node, so the removal is 0 there instead
+of following the interpolation to the first node (0.01 mm/h). The aerosol-radius
+pair is the table's own bracket, as in the in-cloud lookup above. With the
+corrections the rain lookup is the bilinear interpolant of the tables. Over
+0.0004-3.6 mm/h and wet radii of 0.01-10 µm the corrected rate is 0.56-2.0 times
+the r7492 one (5th-95th percentiles, median 0.96), and below 0.0032 mm/h it is
+no longer 0. `bc_snow` reads one table row; only its radius pair changes.
+
+`scheme="ham"` also replaces the stratiform in-cloud nucleation pathway with
+ECHAM-HAM's own aerosol-size-dependent `ic_scav_nuc` (jax-gcm#1017): a per-mode
+critical-radius inversion against the step's in-cloud droplet or crystal number,
+for the three M7 soluble activating modes only. In-cloud impaction is the shared
+`ic_scav_imp` of [in-cloud impaction scavenging](#in-cloud-impaction-scavenging)
+under every selector, summed with the nucleation fraction per phase and capped at
+one as `get_icscavfrac` does, so `scheme="ham"` with the default
+`jam_incloud_impaction=ham` is HAM's full `nwetdep = 3`. `"ham_below_cloud"` is a
+separate, narrower selector (below-cloud only). See
+{ref}`HAM in-cloud nucleation scavenging <ham-nucleation-scavenging>` for the
+formulas, the two supported activation pairings (HAM's own ARG or
+Lin & Leaitch) and the validation scope.
+
+The default `scheme="jcm"` instead weights its stratiform nucleation
+removal (the explicit cloud-borne reservoir, or the implicit
+activated-fraction treatment without one) by ECHAM-HAM's *mode-wise*
+fraction — `get_icscavfrac`'s OTHER option, `kscavICtype = 2`, independent
+of aerosol size or activation state — rather than `ic_scav_nuc`'s
+size-dependent one; see [cloud-borne aerosol store](#cloud-borne-aerosol-store)
+above and {ref}`mode-wise stratiform nucleation fractions
+<jcm-stratiform-nucleation>` for the mapping and the motivating AeroCom
+black-carbon finding. `stratiform_nucleation="activated_fraction"` keeps
+the previous, uncapped weighting.
 
 CAM's coarse-mode asphericity drag factor (0.8, Huang et al. 2020,
 doi:10.1029/2019GL086592) reduces gravitational velocity for both number and
@@ -1365,6 +1695,323 @@ Separate `sed_du` and `turb_dry_du` diagnostics attribute the combined `dry_du`
 loss to gravitational settling and turbulent surface collection. See
 [SOA and dust design](../design/jam_soa_dust.md).
 
+## HAM M7 modal aerosol
+
+A second population on the same, core-agnostic JAM harness: ``echam-jam-m7``
+(``jcm/config/physics/echam-jam-m7.yaml``) runs the ordered process chain
+described above with ECHAM6.3-HAM2.3's own **M7** aerosol model instead of
+CAM's MAM4 — a different population (``M7_SPEC``), a different microphysics
+core, and a set of HAM-faithful process variants the preset turns on. The
+harness, the emission/deposition/sedimentation/scavenging/transport
+machinery and the activation→ice-nucleation coupling above are unchanged;
+this section covers what M7 adds or does differently. Design and the full
+reference table: {doc}`../design/jam_m7_configuration`.
+
+### M7 population and core
+
+**What we do.** ``M7_SPEC`` (``jcm/physics/aerosol/jam/microphysics/m7_data.py``)
+is HAM's seven log-normal modes (NS, KS, AS, CS soluble; KI, AI, CI
+insoluble), each with HAM's own σ_g (1.59 fine, 2.0 coarse), species
+membership and ``csr_conv``/``caccso4``, and HAM's own species table (``so4`` at
+96.0631 g/mol, not MAM4's 115 g/mol ammonium bisulfate; a new ``oc`` token
+distinct from MAM4's ``poa``, since HAM's OC tracer holds primary and
+biogenic organic matter alike with ``nsoa = 0``). ``cloud_borne = False``: HAM
+scavenges interstitial aerosol by its activated fraction rather than
+carrying an explicit cloud-borne phase. The microphysics is the complete
+native ``m7`` call, through an adapter (``M7JaxMicrophysics``,
+``jcm/physics/aerosol/jam/microphysics/m7_jax.py``) over the upstream
+``m7-jax`` package (BSD-3, the ``jcm[m7]`` extra, at a validated upstream
+commit until ``m7-jax`` 0.2.0 is released) — ``calcsize``-equivalent
+sizing, κ-Köhler hydration against
+the authentic ``lut_kappa.nc`` table, binary/ion-mediated nucleation,
+coagulation and the cloud-free modal redistribution, all in M7's own units
+(SO₄ in molecules cm⁻³, other species in µg m⁻³, number in cm⁻³) so every
+HAM threshold (``cmin_aernl``, ``cmin_aerml``, …) stays at its native value. The
+adapter reproduces ECHAM's operator-split call exactly: it builds M7's
+input from ``state + running_tendency·Δt``, passes the H2SO4 gas at its
+step-start value with the accumulated tendency as the production rate
+(ECHAM's ``zgso4m1``/``zdgso4``), and returns ``(x_M7 − (x₀ + run·Δt))/Δt`` so the
+step's summed tendency is ``(x_M7 − x₀)/Δt``.
+
+**What ECHAM-HAM does.** ``mo_ham_m7ctl.f90`` (mode table), ``mo_ham.f90``
+(species, ``nham_subm = HAM_M7``), ``mo_ham_subm.f90::ham_subm_interface`` (the
+host↔core boundary this adapter reproduces).
+
+**Why we differ.**
+- ``science`` (reference correction, F1) — ``m7-jax``'s own SALSA-box copy of
+  ``m7_averageproperties`` takes the cube root of an insoluble mode's
+  *density* as if it were its mean particle volume (≈0.57 cm radius for
+  every insoluble mode); r7492, the reference this preset is held to,
+  computes the radius from the volume instead. The ``m7-jax`` build restores
+  the r7492 text at build time (recorded in its own provenance), so the
+  package stays byte-identical to its pinned hash and the reference the
+  port is held to is r7492's, not the shipped default's.
+- ``compute`` — both cores default to float64 and support an independent,
+  opt-in ``core_dtype="float32"`` scoped-precision path (the M7 adapter's
+  own, built correctly from the start under #1017's W1 task 3; MAM4's
+  analogous option needed pull request 1071 to fix it). Before that fix,
+  MAM4's casts back to the host dtype ran *inside* the scoped
+  ``jax.enable_x64(False)`` block and so silently stayed float32 on a
+  float64 host; both adapters now apply those casts after the block
+  closes, so this is no longer a difference between them.
+
+**Status & known limitations.** The preset's reference configuration is
+``nsnucl = 2`` (Kazil–Lovejoy ion-mediated nucleation, fed by GCR ionisation —
+see below), selected through ``jam_microphysics_options:
+{nucleation_scheme: 2}`` and validated against compiled reference Fortran at
+float64 round-off. This is the *shipped default*: its PARNUC and O'Brien
+tables come from the data mirror (its Tier A ``ham_input`` product) or, when set,
+``HAM_INPUT_DIR``, and it needs an ``m7-jax`` build with Kazil/Lovejoy
+support; construction raises, naming whichever is missing, rather than
+silently falling back. ``physics.jam_microphysics_options.nucleation_scheme=1``
+opts into binary nucleation explicitly where that data is unavailable.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/microphysics/m7_data.py`` — ``M7_SPEC``,
+  ``M7_FREEZING_ROLES``.
+- ``jcm/physics/aerosol/jam/microphysics/m7_jax.py`` — ``M7JaxMicrophysics``.
+
+### HAM activation: Köhler A/B, ARG, updraft PDF, Lin–Leaitch
+
+**What we do.** ``HamActivation`` (``jcm/physics/aerosol/jam/activation/
+ham_activation_term.py``) is HAM's own activation closed form, selected by
+``jam_activation_scheme="ham_arg"`` and distinct from the CAM-faithful
+``ArgActivation`` the MAM4 presets use: the Köhler ``A`` term uses the local
+temperature and HAM's own moist-air-corrected thermal conductivity, and the
+Köhler ``B`` term comes from each mode's electrolyte species (``nion``,
+osmotic coefficient) rather than a precomputed κ — ``koehler_ab``
+(``activation/ham_activation.py``). The ARG size-dependent shape closed form
+on top of that Köhler pair is the same Abdul-Razzak & Ghan (2000) form the
+CAM path uses (``ham_arg``). The updraft is HAM's own West et al. (2013)
+20-bin velocity PDF (``ham_updraft``, ``nactivpdf = 1``) rather than a single
+characteristic value; ``jam_nactivpdf: 0`` selects the single-updraft form
+the reference-run template itself leaves as the code default. The PDF's width
+is ``sqrt(2/3 TKE)`` floored at ``w_sigma_min``, HAM's 0.1 m/s
+(``mo_activ.f90:69``) in the class and **0.0499** in the ``echam-jam-m7``
+preset, a lever of the v3.1 structural refit
+({doc}`../design/jam_aerosol_retune`, "The structural refit");
+it is a differentiable ``HamActivationParameters`` field and the only tunable
+the PDF reads; the single updraft reads ``w_min`` with
+``fact_tke`` (ARG) or ``fact_tke_lin_leaitch``, and ``echam_physics`` flags an
+override of a tunable the composed path never reads. HAM's own
+rational-Chebyshev normal CDF (``ham_logtail`` → ``_m7_cumulative_normal``, a
+port of ``m7_cumulative_normal``) stands in for ``jax.scipy.special.erf``.
+Lin–Leaitch (``ncd_activ = 1``, ``lin_leaitch``) is a selectable simpler
+alternative. The M7 preset turns ``ham_arg`` on with ``nactivpdf = 1`` — a
+**maintainer decision** that deviates from the reference-run template
+(which leaves the code default ``nactivpdf = 0``); ``jam_nactivpdf: 0``
+recovers the template's single updraft.
+
+**What ECHAM-HAM does.** ``mo_ham_activ.f90`` (``ham_activ_koehler_ab``,
+``ham_activ_abdulrazzak_ghan``, ``ham_avail_activ_lin_leaitch``),
+``mo_ham_tools.f90::ham_m7_logtail``, ``mo_ham_m7.f90::m7_cumulative_normal``,
+``mo_activ.f90`` (``activ_updraft``, ``aero_activ_updraft_pdf``,
+``activ_lin_leaitch``).
+
+**Why we differ.**
+- ``science`` (maintainer decision) — ``nactivpdf = 1`` (the 20-bin PDF) rather
+  than the reference template's own code default 0, chosen 2026-10-05.
+- ``compute`` / ``differentiability`` — reference physical constants (e.g.
+  ``argas = 8.314472``) are HAM's own literals, not the live, overridable
+  ``jcm.constants`` singleton: the compiled reference this module is held to
+  (rtol ≤ 1e-12) was built against those exact literals, and mixing in
+  ``jcm.constants`` would both break that tolerance and couple the comparison
+  to unrelated calibration changes — the same reasoning as ``arg.py``'s own
+  CAM literals.
+
+**Status & known limitations.** Every field matches the compiled r7492
+routines (20 designed M7 cells, ``jcm/data/test/echam_cloud_reference/
+ham_activ_*``) at float64 round-off (≤6e-15 relative) or exactly; float32
+agrees to a measured 4.8e-6 against a 1e-5 tolerance. Gradients are finite
+on every reference cell and every normal-CDF branch.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/activation/ham_activation.py`` — ``koehler_ab``,
+  ``ham_arg``, ``ham_logtail``, ``ham_updraft``, ``lin_leaitch``.
+- ``jcm/physics/aerosol/jam/activation/ham_activation_term.py`` —
+  ``HamActivation``, ``HamActivationParameters``.
+
+### HAM per-sector primary emissions, and biogenic organic carbon
+
+**What we do.** ``m7_sector_policy`` (``jcm/physics/aerosol/jam/emissions/
+ham_sectors.py``) gives the population's own per-sector-class primary
+emission targets: HAM's Fortran sector index collapses onto exactly three
+size/mode classes — ``"fossil"`` (fossil-fuel-like surface/elevated sources;
+BC/OC to the insoluble Aitken mode, primary SO₄ split 50/50 Aitken-soluble/
+accumulation-soluble), ``"energy_ships"`` (energy stacks and shipping; SO₄
+only, split 50/50 accumulation/coarse-soluble instead), and
+``"biomass_like"`` (open/forest/agricultural fires and domestic/biofuel
+combustion; BC/OC to HAM's biomass number-median radius, 65% of OC taken as
+water-soluble into Aitken-soluble and the rest into the insoluble Aitken
+mode — HAM's own ``zbb_wsoc_perc``). Each target is a ``SectorTarget`` of a
+mass fraction and a number-median radius; HAM's mass→number conversion
+(``zm2n = 3/(4π·ρ·(cmr·cmr2ram)³)``) is reproduced exactly by jcm's existing
+monodisperse-diameter path once the number-median radius is converted to
+the equivalent volume-mean diameter (``cmr_to_emission_diameter``).
+``AnthropogenicEmissions`` reads this per-sector policy for a population that
+declares one (M7) and keeps its existing per-species/class-geometry split
+for one that does not (MAM4), so the MAM4 path does not change.
+
+HAM's own ``biogenic`` sector class — 35% to the insoluble Aitken mode at
+0.03 µm with number, 32.5% each to the Aitken-soluble and accumulation-
+soluble modes without number, no OM:OC scaling (consistent with ``nsoa = 0``)
+— and the mirror builder that sources it from HAM's own AeroCom II
+biogenic-OC climatology (:func:`~jcm.data.mirror.emissions.load_biogenic_oc`,
+``emis_biogenic_oc``) are in jcm (pull request 1035); the global-total cross-check is 19.06 Tg/yr against 19.1 Tg/yr
+published (Dentener et al. 2006).
+
+**What ECHAM-HAM does.** ``mo_ham_m7_emissions.f90``
+(``ham_m7_init_emissions`` lines 90-262 for the number-median radii and
+mass-to-number factors; ``ham_m7_emissions`` lines 564-646 for the
+per-sector-class assignment; the biogenic class at lines 596-607).
+
+**Why we differ.** Faithful, including one Fortran quirk reproduced rather
+than corrected: ``"biomass_like"``'s SO₄ targets are textually identical to
+``"fossil"``'s in the reference (``zm2n_s4ks_bb``/``zm2n_s4as_bb`` use the same
+``cmr_sk``/``cmr_sa`` as the fossil radii, not a biomass-specific one, unlike
+every other species) — this looks like an oversight in r7492, but it is
+what the compiled code does.
+
+**Status & known limitations.** The per-sector policy, biogenic-OC class
+included, is active in the shipped configuration, which resolves the mirror's
+emissions bundle (``forcing.emissions_file: auto``), and inert only without
+one. The mirror's emissions bundles
+carry ``emis_biogenic_oc`` and the residential/energy subset channels. An
+emissions file without the subsets sizes each super-sector as its parent
+class, and one without ``emis_biogenic_oc`` has no biogenic source; the
+emissions term warns for both.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/emissions/ham_sectors.py`` — ``m7_sector_policy``,
+  ``SectorTarget``, ``HamSectorPolicy``, ``cmr_to_emission_diameter``.
+
+### Kazil–Lovejoy ion-mediated nucleation and GCR ionisation
+
+**What we do.** ``nsnucl = 2`` nucleates H₂SO₄/H₂O both neutrally and on the
+ions galactic cosmic rays produce — ``m7-jax``'s ``nucleation.kazil_lovejoy``,
+a 5-D log-linear interpolation of the tabulated PARNUC formation-rate
+lookup (``parnuc.15H2SO4.nc``, read outside any traced function and passed
+to the core like the κ table), needs an ion-pair production rate as an
+input alongside temperature, relative humidity, [H₂SO₄] and the H₂SO₄
+condensation sink. jcm computes that rate host-side, as ECHAM does
+(``ham_subm_interface`` calls ``gcr_ionization`` before ``m7``):
+``jcm/physics/aerosol/jam/chemistry/gcr_ionisation.py::gcr_ion_pair_rate``
+ports ``mo_ham_gcrion.f90::gcr_ionization``/``gcr_ionization_profile`` —
+geomagnetic latitude (via a port of ``mo_geopack.f90``'s dipole-axis
+``recalc``/``geo2mag``, reduced to only the degree-1 IGRF terms the rotation
+needs, not the full spherical-harmonic field model ``recalc`` also serves),
+the resulting vertical cutoff rigidity, and a 2-D (cutoff rigidity, mass
+column density) interpolation of the O'Brien solar-min/max ion-pair tables
+(``read_obrien_gcr_ipr``, the exact blocked text format of HAM's own
+``gcr_ipr_solmin.txt``/``gcr_ipr_solmax.txt`` -- or the staged
+distribution's ``solmin.txt``/``solmax.txt`` -- is read in). The
+companion ``solar_activity`` is the cosine solar-cycle parameterisation
+(``mo_ham_gcrion.f90::solar_activity``), fed the model's own calendar date
+via two new raw-calendar-fact fields on ``jcm/forcing.py``'s ``SolarGeometry``
+(``calendar_year``, ``day_of_year``) — the same date-derived-quantity pattern
+every other date-dependent term reads from ``forcing.solar``, not ``DateData``
+directly.
+
+The mass-column-density conversion's gravitational acceleration deliberately
+differs between the model path and the reference test: ``gcr_ion_pair_rate``
+defaults to jcm's own ``c.grav`` (read dynamically, honouring a
+``set_constants`` override), because the column mass it converts is the
+model's own ``pressure/c.grav`` everywhere else too; the reference test below
+passes r7492's literal ``9.80665`` instead, since it measures parity with the
+compiled routine specifically.
+
+**What ECHAM-HAM does.** ``mo_ham_gcrion.f90`` (whole module) and
+``mo_geopack.f90`` (``recalc``, ``geo2mag``, ``vertical_cutoff_rigidity``) for GCR
+ionisation; ``m7-jax``'s own ``nucleation.kazil_lovejoy`` for the PARNUC
+interpolation, a port of ``mo_ham_m7_nucl.f90::nucl_kazil_lovejoy`` +
+``ham_nucl_initialize``.
+
+**Why we differ.** Faithful. The IGRF dipole axis is genuinely
+date-dependent (it drifts over a model run), which the signature this was
+sketched against omitted; ``gcr_ion_pair_rate`` takes ``year``/``day_of_year``
+explicitly rather than freezing the axis at a reference epoch.
+
+**Status & known limitations.** Both the PARNUC table and the O'Brien GCR
+tables are on the data mirror (its Tier A ``ham_input`` product); ``HAM_INPUT_DIR``
+overrides them. ``gcr_ion_pair_rate`` matches the
+compiled, unmodified ``gcr_ionization`` (28 designed columns spanning every
+latitude/longitude combination, 10 L47-like levels, 8 solar-activity/date
+scenarios including dates outside the IGRF table's 1965-2010 range) at
+float64 rtol=1e-12; ``m7-jax``'s ``kazil_lovejoy``/``nucleate_all``/``step_all`` at
+``nsnucl=2`` match the compiled ``nucl_kazil_lovejoy``/``m7_nuck``/``m7`` at float64
+round-off against the real PARNUC table, including its forward-only float32
+core (#1017 task 6) — the Kazil table and the GCR ion-pair tables rebuild at
+the core's own working dtype per step, the same rule the κ table follows.
+``echam-jam-m7.yaml`` selects ``nucleation_scheme=2`` by default (as noted
+under *M7 population and core* above); running it with neither the mirror
+copy nor ``HAM_INPUT_DIR`` fails construction rather than silently falling
+back to ``nsnucl = 1``.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/chemistry/gcr_ionisation.py`` —
+  ``gcr_ion_pair_rate``, ``read_obrien_gcr_ipr``, ``solar_activity``, ``geo2mag``,
+  ``vertical_cutoff_rigidity``.
+- ``jcm/forcing.py`` — ``SolarGeometry``.
+- ``jcm/date.py`` — ``day_of_year_elapsed``.
+
+**Validation evidence.** ``jcm/physics/aerosol/jam/chemistry/
+gcr_ionisation_test.py`` runs the full comparison against
+``jcm/data/test/echam_cloud_reference/hamgcr.npz`` (built by a private
+Fortran harness compiling the unmodified ``mo_ham_gcrion.f90`` +
+``mo_geopack.f90`` against the real tables).
+
+### Contact freezing under M7
+
+**What we do.** M7's own class roles for the aerosol inputs to mixed-phase
+freezing (``M7_FREEZING_ROLES`` on ``M7_SPEC``: soluble accumulation/coarse for
+immersion, insoluble Aitken/accumulation/coarse for contact) are HAM's own
+class set exactly, unlike MAM4's approximating map — see
+[Aerosol inputs to ice formation](#aerosol-inputs-to-ice-formation) above
+for the shared ``ham_freezing_aerosol`` partition both populations run
+through. Unlike MAM4, which has no insoluble dust mode at all (so its
+contact-freezing inputs are structurally zero), M7's insoluble accumulation
+(AI) and coarse (CI) modes carry dust directly, so contact freezing under
+M7 is genuinely active: Brownian contact on AI/CI dust gives a contact-ice
+mixing ratio of about 3.6e-10 kg/kg in a seeded test column.
+
+**What ECHAM-HAM does.** ``mo_ham_freezing.f90::ham_IN_setup``, as for MAM4
+(see above); M7's own insoluble modes are exactly the dust-bearing classes
+HAM's contact-freezing inputs expect.
+
+**Why we differ.** Faithful — this is the one respect in which M7 needs no
+approximating map at all, since its class set already matches HAM's.
+
+**Status & known limitations.** ``ham_freezing_aerosol``'s M7 partition is
+compared with the compiled ``ham_IN_setup`` directly (``jcm/data/test/
+echam_cloud_reference/hamfrz_M7.npz``); the full chain — feeding that
+partition into ``het_mxphase_freezing`` and comparing against the compiled
+chain end to end — is verified by
+``jcm/physics/aerosol/jam/ice_nucleation/m7_freezing_chain_reference_test.py``
+(pull request 1034), confirming the non-zero contact-ice rate above against
+the compiled chain at both float32 and float64.
+
+### Status & known limitations (M7 preset, overall)
+
+HAM optics (HAM's authentic Mie tables when ``HAM_INPUT_DIR`` holds them,
+else jcm's own kernel built on HAM's axes) is already documented under
+[Online aerosol optics](#online-aerosol-optics) above — ``jam_optics_backend
+="ham_lut"`` applies to either population. Kärcher–Lohmann cirrus nucleation
+(``nic_cirrus = 2``) runs on M7's soluble aerosol; see
+[Aerosol inputs to ice formation](#aerosol-inputs-to-ice-formation). The
+preset's wet deposition is HAM's ``nwetdep = 3`` (``jam_wetdep_scheme = ham``:
+Croft below-cloud tables, ``ic_scav_nuc`` and ``ic_scav_imp``), documented under
+[Aerosol removal](#aerosol-removal-below-cloud-scavenging-settling-and-the-removal-chain);
+the 2M precipitation cover its below-cloud removal reads is now checked
+directly against the compiled ECHAM reference: ``precip_formation_warm``/
+``_cold`` (``mo_cloud_micro_2m.f90`` sections 7.1/7.2) match on every column,
+level and step (pull request 1114), which also fixed a genuine defect the
+comparison found — ``demott2010_inp``'s background coarse-aerosol floor
+produced a nonzero DeMott INP number even for an explicit "no aerosol"
+input, flipping a warm-rain gate ECHAM leaves on. A separate, unrelated
+residual in the ICNC reaching some cells from sedimentation (not a
+``precip_formation`` defect) was tracked and fixed under the now-closed
+issue 1110.
+
 ## MACv2-SP simple plumes
 
 **What we do.** A faithful port of MACv2-SP (Stevens et al. 2017): nine
@@ -1390,8 +2037,112 @@ parameters are differentiable leaves for calibration.
 (no seasonal cycle) until the forcing supplies them; a smooth-cap option replaces
 SPA's hard ``min`` for gradient calibration.
 
+## MACv2 natural aerosol background
+
+**What we do.** MACv2-SP describes the anthropogenic increment of the aerosol
+column. ``Macv2NaturalAerosol`` adds what the plumes sit on: the coarse mode
+(dust, sea salt) and the pre-industrial fine mode of the MACv2 climatology
+(Kinne 2019), the climatology the plumes were fitted to. Its global annual-mean
+optical depth at 550 nm is 0.090 (coarse 0.058, fine 0.032), against the
+plumes' 0.03. It is composed directly after ``Macv2SpAerosol`` in the ``echam``
+(1M), ``echam-rrtmgp-2m`` and ``echam-rrtmgp-2m-cosp`` packages and by
+``echam_physics()`` with the simple plumes on RRTMGP, and reads the per-grid
+``macv2_natural_aerosol`` bundle through ``forcing.natural_aerosol_file``
+(``auto`` by default; see {doc}`boundary_conditions`).
+(``jcm/physics/aerosol/macv2_natural.py``, ``jcm/data/mirror/macv2.py``.)
+
+- **Time.** Twelve monthly means, blended between mid-month anchors by the
+  forcing's ``WRAP_YEAR`` selection (ECHAM's ``time_weights``). The fine mode
+  is the pre-industrial one in every model year, so the anthropogenic part is
+  the plumes' alone and is not counted twice.
+- **Vertical.** The climatology gives, per mode, the fraction of the column
+  optical depth in each of 20 height layers above sea level (500 m thick near
+  the surface, to 20 km). A model layer takes the share of every climatology
+  layer it overlaps in height, and the profile is renormalised to one over the
+  model column, so the column optical depth is the climatology's whatever the
+  model's orography or lid.
+- **Shortwave.** The two modes are mixed with the plumes' optics as sums of τ,
+  τω and τωg per band.
+- **Longwave.** Coarse mode only, absorption only: τ(1 − ω) of the
+  far-infrared optics, added as a non-scattering optical depth on the coarse
+  mode's profile.
+- **Bands.** The climatology is on RRTMG's 14 + 16 bands. Each RRTMGP band
+  takes the climatology band whose limits contain its centre, which is
+  one-to-one although the two band sets differ at four edges.
+- **Twomey factor.** Unchanged: MACv2-SP normalises it with its own background
+  optical depth (Stevens et al. 2017), and the climatology does not enter it.
+- **Diagnostics.** ``natural_od550_coarse`` and ``natural_od550_fine`` are the
+  two modes' column optical depths at 550 nm. ``macsp.od550aer`` stays the
+  plumes' own, so the total column is the sum of the three.
+
+**What ECHAM/CAM does.** ECHAM6 reads the Kinne climatology as its standard
+tropospheric aerosol (``iaero = 3``, ``mo_aero_kinne.f90``: MAC-v1, Kinne et
+al. 2013), and ICON pairs the same climatology read for 1850 with the simple
+plumes (``irad_aero = 18``, ``mo_echam_phy_bcs.f90``,
+``mo_bc_aeropt_kinne.f90::set_bc_aeropt_kinne``). Both sample a 40-level
+extinction profile at each model layer's centre height and renormalise it over
+the column; monthly means are blended with ``time_weights``; the longwave is
+coarse-mode absorption.
+
+**Why we differ.**
+- `science` — the background is **MACv2**, not the MAC-v1 that ECHAM6 was built
+  around: the plumes were fitted to MACv2's anthropogenic part, so its
+  pre-industrial fine mode and coarse mode are the background that makes the
+  sum the climatology the plumes approximate (Stevens et al. 2017, Table 7:
+  0.124 in total, 0.030 of it anthropogenic).
+- `science` — the vertical distribution uses the layer fractions MACv2 is
+  published with and an exact height overlap, where the reference samples a
+  pre-processed even-level profile at the layer centre. Both conserve the
+  column by renormalising.
+- `science` — the asymmetry sum is τωg, as in ICON. ECHAM6.3's
+  ``set_aop_kinne`` carries a second factor of ω in it, an evident slip that
+  is not followed.
+- `compute` — the term costs one time blend and one vertical redistribution
+  per step and no extra radiation solve.
+
+**Status & known limitations.**
+- The bundle exists on the mirror's Gaussian grids and on T31 and T42. On any
+  other grid (T85, T119) ``auto`` resolves to no file, the term passes the
+  plumes through, and the run logs a warning; a bundle for such a grid is one
+  call to ``jcm.data.mirror.macv2.build_macv2_natural``.
+- ``auto`` applies to real surfaces (``forcing.kind: from_file``). The
+  climatology is geographic, so an idealised or aquaplanet run takes it only
+  from an explicit path.
+- ``echam-emulated-2m`` does not compose the term: its emulator was trained on
+  the plumes' optics alone. The pySES column grids have no bundle, and the
+  single-column runner builds no gridded forcing, so both run the plumes
+  alone.
+- Measured on ``t63-echam-1m`` and ``t63-echam-2m`` (30 days from the January
+  warm state, days 5-10, background on against ``natural_aerosol_file: null``,
+  each beside a 1 ppm gravity twin): clear-sky reflected shortwave at the top
+  of the atmosphere +3.3 W m⁻² in both, all-sky +1.5 and +1.4; surface
+  downward shortwave −3.7 and −3.5; clear-sky outgoing longwave −0.2 and −0.3;
+  surface downward longwave +1.1; net at the top of the atmosphere −1.4 and
+  −1.3 W m⁻², seven and eleven times the twins' drift (0.2 and 0.1). Over days
+  5-30 the net change is −1.0 and −0.8 W m⁻². Cloud cover, precipitation and
+  2 m temperature are unchanged beyond the twins.
+- The cloud calibration of these packages is the v3.1 set
+  ({doc}`../design/jam_aerosol_retune`, "The hosts not refitted"), fitted
+  without the background and kept with it, so their net top-of-atmosphere
+  balance sits about 1 W m⁻² below that page's table. For the 2M that is
+  toward the observed +1.0 W m⁻² (CERES EBAF). For the 1M it is away from it,
+  and the 1M's autoconversion rates cannot return it: in the same January
+  window ``ccraut`` at 1.5 and 2 times ECHAM's 15 raises the net by 0.6 and
+  0.9 W m⁻² (days 5-10; 0.7 and 0.6 over days 5-30, against a twin drift of
+  0.4), and raising it with ``ccsaut`` removes ice from an ice water path that
+  is already low (35 against an observed 53 g m⁻²). The 1M's balance is set by
+  its cloud cover, which has no calibration of its own (#1014).
+
+**Validation evidence.** ``jcm/physics/aerosol/macv2_natural_test.py`` (height
+overlap, band mapping, mixing with the plumes, both hosts, no accumulation
+across steps, gradients), ``jcm/forcing_assembly_test.py`` (bundle to forcing
+to term, key resolution), ``jcm/data/mirror/macv2_test.py`` (the bundle
+builder: conservation, labels, refusals).
+
 **Validation evidence (aerosol).** JAM: ``jam_integration_test.py``,
-``jam_phase0_test.py``, ``microphysics/mam4_jax_test.py``, and per-process
+``jam_phase0_test.py``, ``microphysics/mam4_jax_test.py``,
+``microphysics/m7_jax_test.py``, ``microphysics/m7_data_test.py``,
+``m7_chain_test.py``, and per-process
 ``*_test.py`` under each ``jam/`` sub-package. MACv2-SP / SPA:
 ``macv2_sp_test.py``, ``spa_test.py``, ``per_band_optics_test.py``. Design
 references: {doc}`../design/jam_carbon_aging`,
@@ -1399,12 +2150,3 @@ references: {doc}`../design/jam_carbon_aging`,
 {doc}`../design/aerosol_optics_diagnostics`,
 {doc}`../design/aerocom_erfari_sampling`.
 
-
-JAM surface collection uses CAM's eleven land-cover classes and the
-Zhang et al. (2001) impaction, interception, diffusion and rebound law.
-The official CAM land-use map is conservatively remapped at model construction.
-This replaces the previous application of an ocean-only law over deserts
-and vegetation. Host aerodynamic resistance remains neutral; the prognostic
-cloud-borne phase still uses aerosol-mode collection velocities. See
-[the SOA and dust design note](../design/jam_soa_dust.md) for the source,
-reference comparisons and measured limitations.

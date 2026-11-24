@@ -14,6 +14,14 @@ resolves its source paths through :func:`current` instead of hard-coding them.
   ``$JCM_MIRROR_ROOT/sources/cesm_inputdata`` (same tree layout as the CESM
   inputdata server).
 
+Neither holds the ECHAM-HAM emissions tree; the two products built from it
+(the biogenic OC and the MSG dust map) are built on the UCSD devbox, which
+falls back to ``glade`` with ``JCM_HAM_EMISSIONS_DIR`` and ``JCM_MIRROR_ROOT``
+set (``docs/source/design/data_mirror.md``). Nor does either hold the MACv2
+aerosol climatology: its ``for_ICON`` tree is a public download
+(:data:`jcm.data.mirror.macv2.SOURCE_URL`), built from wherever a copy is with
+``JCM_MACV2_DIR`` pointing at it.
+
 A root is ``None`` where the site does not provide that source; a stage that
 needs it then fails fast in :func:`jcm.data.mirror.build_mirror.check_sources`
 naming the site and the missing source.
@@ -22,7 +30,9 @@ Selection: ``JCM_MIRROR_SITE`` if set, else auto-detection by mount point, else
 ``glade`` (so module-level path constants still form, e.g. for unit tests on a
 laptop, and the source check reports what is missing).
 Individual roots can be overridden with ``JCM_HAMMOZ_DIR`` (a directory laid out
-like ``/pool/data/ECHAM6-HAMMOZ``), ``JCM_CESM_INPUTDATA`` (a CESM inputdata
+like ``/pool/data/ECHAM6-HAMMOZ``), ``JCM_HAM_EMISSIONS_DIR`` (an ECHAM-HAM
+emissions tree, ``hammoz/T63/aerocom_II/...``), ``JCM_MACV2_DIR`` (a copy of
+MPI-M's MACv2 ``for_ICON`` tree), ``JCM_CESM_INPUTDATA`` (a CESM inputdata
 tree — the WACCM oxidants then resolve under its ``atm/cam/ozone`` too, as in
 the standard layout) and ``JCM_WACCM_OXIDANTS_DIR`` (the oxidant directory on
 its own, e.g. Glade's separate ``cseg`` tree; it wins over the inputdata one).
@@ -53,9 +63,18 @@ class Site:
     ne30_topo: str | None
     #: ECHAM-HAMMOZ input pool root (``v0007/hammoz/T63/...``).
     hammoz: str | None
+    #: ECHAM-HAM emissions tree (``hammoz/T63/aerocom_II/...``): the source of
+    #: the HAM biogenic-OC Tier A product and the MSG dust map. Neither site
+    #: declares one; where it is absent the ``biogenic`` stage fetches the
+    #: published product and the ``dust-msg`` stage cannot run.
+    ham_emissions: str | None
     #: ECHAM6 input pool root (``T127/T127GR15_jan_surf.nc``) — terrain
     #: cross-checks only, never a bundle source.
     echam6: str | None
+    #: Copy of MPI-M's MACv2 ``for_ICON`` tree (``spec_2005/``, ``altitude/``):
+    #: the source of the natural-aerosol background bundle. A public download
+    #: no site mounts, so it is declared only through ``JCM_MACV2_DIR``.
+    macv2: str | None
     #: Default ``JCM_MIRROR_ROOT`` (build + upload trees) on this site.
     default_root: str
 
@@ -77,7 +96,9 @@ def _glade() -> Site:
                    "ne30np4_gmted2010_modis_bedmachine_nc3000_Laplace0100_"
                    "noleak_greenlndantarcsgh30fac2.50_20250825.nc"),
         hammoz=None,
+        ham_emissions=None,
         echam6=None,
+        macv2=None,
         default_root=f"/glade/derecho/scratch/{_user()}/hf_mirror",
     )
 
@@ -94,7 +115,9 @@ def _levante() -> Site:
         rda=None,
         ne30_topo=None,
         hammoz="/pool/data/ECHAM6-HAMMOZ",
+        ham_emissions=None,
         echam6="/pool/data/ECHAM6",
+        macv2=None,
         default_root=root,
     )
 
@@ -123,6 +146,10 @@ def current() -> Site:
     overrides = {}
     if os.environ.get("JCM_HAMMOZ_DIR"):
         overrides["hammoz"] = os.environ["JCM_HAMMOZ_DIR"]
+    if os.environ.get("JCM_HAM_EMISSIONS_DIR"):
+        overrides["ham_emissions"] = os.environ["JCM_HAM_EMISSIONS_DIR"]
+    if os.environ.get("JCM_MACV2_DIR"):
+        overrides["macv2"] = os.environ["JCM_MACV2_DIR"]
     if os.environ.get("JCM_CESM_INPUTDATA"):
         # The oxidant files sit in the inputdata tree's atm/cam/ozone, so an
         # inputdata override moves them too; leaving the site default in place

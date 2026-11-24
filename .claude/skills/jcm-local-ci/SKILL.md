@@ -98,7 +98,8 @@ coverage report --rcfile=.coveragerc-pr --fail-under=80
 ```bash
 # 4. extras-tests — every test an optional extra gates, fast and slow, in a
 #    SEPARATE venv (installing the extras into the coverage venv breaks
-#    dependency parity for gates 2 and 3):
+#    dependency parity for gates 2 and 3); the not-on-PyPI dependencies first:
+pip install -r tools/ci/extras_preinstall.txt
 pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
 python tools/ci/optional_extras.py check
 JCM_REQUIRE_EXTRAS=1 JAX_PLATFORMS=cpu pytest -v -rs -m requires_extra

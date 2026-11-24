@@ -10,6 +10,7 @@ run directory is to give the same numbers for either.
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 import numpy as np
@@ -23,6 +24,11 @@ for _p in (str(_HERE), str(_HERE.parent), str(_HERE.parents[1])):
 
 import aerosol_stats as A  # noqa: E402
 import jcm.constants as c  # noqa: E402
+from jcm.physics.aerosol.jam.microphysics import M7_SPEC, MAM4_SPEC  # noqa: E402
+
+#: The two populations' sulfate: MAM4's ammonium bisulfate, M7's SO4.
+_MAM4_SO4 = MAM4_SPEC.species_props("so4").molar_mass
+_M7_SO4 = M7_SPEC.species_props("so4").molar_mass
 
 _LAT = np.array([-45.0, 45.0])
 _LON = np.array([0.0, 180.0])
@@ -129,6 +135,39 @@ class TestConventions:
                 surface_first_interfaces=surface_first, aloft_only=True))
             assert np.isclose(low["so4_above_500hPa"], 0.0)
             assert np.isclose(high["so4_above_500hPa"], high["burden_so4"])
+
+
+class TestSulfatePopulation:
+    """Each chunk records which sulfate its ``so4`` tracers carry."""
+
+    @staticmethod
+    def _m7_chunk():
+        ds = synthetic_chunk().drop_vars(["m_so4_acc",
+                                          "jam_cloud_borne.mc_so4_acc"])
+        q_dims = ("time", "level", "lon", "lat")
+        return ds.assign(m_so4_ks=(q_dims, _field([1.0, 0.0, 0.0, 0.0])),
+                         m_so4_as=(q_dims, _field([3.0, 0.0, 0.0, 0.0])))
+
+    def test_a_mam4_chunk_records_ammonium_bisulfate(self):
+        out = A.chunk_reduction(synthetic_chunk())
+        assert out["so4_molar_mass"] == _MAM4_SO4
+
+    def test_an_m7_chunk_records_so4(self):
+        out = A.chunk_reduction(self._m7_chunk())
+        assert out["so4_molar_mass"] == _M7_SO4
+        # ... and its sulfate still reaches the burden the ledger closes on:
+        # 4 kg/kg in the bottom 300 hPa, interstitial only.
+        assert np.isclose(out["burden_so4"],
+                          4.0 * 3.0e4 / float(c.grav) * 1e6, rtol=1e-6)
+
+    def test_a_chunk_without_one_population_records_none(self):
+        q_dims = ("time", "level", "lon", "lat")
+        mixed = synthetic_chunk(extra={
+            "m_so4_as": (q_dims, _field([1.0, 0.0, 0.0, 0.0]))})
+        assert "so4_molar_mass" not in A.chunk_reduction(mixed)
+        bare = synthetic_chunk().drop_vars(["m_so4_acc",
+                                            "jam_cloud_borne.mc_so4_acc"])
+        assert "so4_molar_mass" not in A.chunk_reduction(bare)
 
 
 class TestDetection:
@@ -502,9 +541,10 @@ class TestBudget:
         n = days.size
         # 1 mg of SULFATE AEROSOL per m² per day, arriving as SO2 and all
         # deposited as so4. The conversion is the sulfate-aerosol molar mass
-        # (NH4HSO4, 115 g/mol) over SO2's, not 96.06 over SO2's.
-        emi_so2 = np.full(n, 1.0 / 86400e6) / A._SULFUR_CARRIERS["so2"]
+        # (MAM4's NH4HSO4, 115 g/mol) over SO2's, not 96.06 over SO2's.
+        emi_so2 = np.full(n, 1.0 / 86400e6) / A.sulfur_carriers(_MAM4_SO4)["so2"]
         series = {"burden_so4": np.full(n, 4.0),
+                  "so4_molar_mass": np.full(n, _MAM4_SO4),
                   "gas_so2": np.zeros(n), "gas_dms": np.zeros(n),
                   "gas_h2so4": np.zeros(n),
                   "emi_so2": emi_so2, "emi_dms": np.zeros(n),
@@ -512,10 +552,18 @@ class TestBudget:
                   "dry_so4": np.zeros(n), "wet_so4": np.full(n, 1.0 / 86400e6)}
         assert abs(A._budget_residual(days, series, "so4")) < 1e-6
 
-    def test_sulfate_carrier_ratios_are_the_aerosol_molar_mass(self):
-        """NH4HSO4 (115 g/mol), the species jcm's ``so4`` tracer carries."""
-        assert np.isclose(A._SULFUR_CARRIERS["so2"], 1.795, atol=1e-3)
-        assert np.isclose(A._SULFUR_CARRIERS["dms"], 1.851, atol=1e-3)
+    @pytest.mark.parametrize("m_sulfate, so2, dms, h2so4", [
+        (_MAM4_SO4, 1.795, 1.851, 1.173),     # NH4HSO4, 115 g/mol
+        (_M7_SO4, 1.4995, 1.5461, 0.9794),    # SO4, 96.0631 g/mol
+    ])
+    def test_sulfate_carrier_ratios_are_the_population_molar_mass(
+            self, m_sulfate, so2, dms, h2so4):
+        """Each population's ``so4`` per kilogram of each sulfur carrier."""
+        carriers = A.sulfur_carriers(m_sulfate)
+        assert np.isclose(carriers["so2"], so2, atol=1e-3)
+        assert np.isclose(carriers["dms"], dms, atol=1e-3)
+        assert np.isclose(carriers["h2so4"], h2so4, atol=1e-3)
+        assert carriers["so4"] == 1.0
 
     def test_gas_reservoirs_convert_to_sulfate_mass(self):
         """Sulfur stored as SO2 counts as the sulfate it will become."""
@@ -524,7 +572,8 @@ class TestBudget:
         # Nothing emitted or deposited; the aerosol burden falls by exactly
         # the sulfate equivalent of the SO2 the column gained.
         gas = np.linspace(0.0, 10.0, n)
-        series = {"burden_so4": 40.0 - gas * A._SULFUR_CARRIERS["so2"],
+        series = {"burden_so4": 40.0 - gas * A.sulfur_carriers(_MAM4_SO4)["so2"],
+                  "so4_molar_mass": np.full(n, _MAM4_SO4),
                   "gas_so2": gas, "gas_dms": np.zeros(n),
                   "gas_h2so4": np.zeros(n),
                   "emi_so2": np.full(n, 1.0 / 86400e6),
@@ -533,6 +582,67 @@ class TestBudget:
         residual = A._budget_residual(days, series, "so4")
         # The storage change cancels exactly, leaving only the emission.
         assert np.isclose(residual, 1.0, atol=1e-9)
+
+    @staticmethod
+    def _conserving_sulfur_run(m_sulfate, n=73):
+        """Build a year in which every emitted sulfur atom deposits as sulfate.
+
+        Built the way the model books it: SO2 and DMS are emitted as their
+        own mass, primary sulfate as the population's sulfate, and the
+        deposited sulfate is the population's sulfate made from the same
+        sulfur atoms. The proportions are an M7 T63 year's (110 Tg SO2,
+        40 Tg DMS, 4 Tg primary SO4 per year).
+        """
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        unit = 1.0 / 86400e6
+        so2, dms, so4 = 110.0 * unit, 40.0 * unit, 4.0 * unit
+        moles_s = (so2 / A.GAS_SPECIES["so2"].molar_mass
+                   + dms / A.GAS_SPECIES["dms"].molar_mass)
+        deposited = moles_s * m_sulfate + so4
+        series = {"burden_so4": np.full(n, 5.6),
+                  "so4_molar_mass": np.full(n, m_sulfate),
+                  "gas_so2": np.full(n, 0.3), "gas_dms": np.full(n, 0.05),
+                  "gas_h2so4": np.full(n, 1e-4),
+                  "emi_so2": np.full(n, so2), "emi_dms": np.full(n, dms),
+                  "emi_so4": np.full(n, so4),
+                  "dry_so4": np.full(n, 0.12 * deposited),
+                  "wet_so4": np.full(n, 0.88 * deposited)}
+        return days, series
+
+    @pytest.mark.parametrize("m_sulfate", [_MAM4_SO4, _M7_SO4],
+                             ids=["mam4", "m7"])
+    def test_a_conserving_run_closes_in_its_own_sulfate(self, m_sulfate):
+        days, series = self._conserving_sulfur_run(m_sulfate)
+        assert abs(A._budget_residual(days, series, "so4")) < 1e-9
+
+    def test_m7_sulfur_converted_as_mam4_bisulfate_reads_as_a_leak(self):
+        """The ledger must not convert an M7 run's sulfur to NH4HSO4.
+
+        Its ``so4`` is SO4 at 96.06 g/mol, so pricing its SO2 and DMS at
+        115 g/mol of sulfate overstates the source by 19.7 % and reads a
+        conserving run as a +16 % leak (the M7 T63 years' structural
+        ``budget_residual_so4``). The ledger reads the sulfate from the
+        recorded ``so4_molar_mass``, never from the MAM4 species table.
+        """
+        days, series = self._conserving_sulfur_run(_M7_SO4)
+        assert abs(A._budget_residual(days, series, "so4")) < 1e-9
+        series["so4_molar_mass"] = np.full(days.size, _MAM4_SO4)
+        mispriced = A._budget_residual(days, series, "so4")
+        assert 0.15 < mispriced < 0.17
+
+    def test_a_cache_from_before_the_unit_was_recorded_closes_as_mam4(self):
+        """An old ``--series-out`` cache keeps its MAM4 sulfur closure.
+
+        Records cached before the reduction recorded ``so4_molar_mass`` were
+        written by tools that knew only MAM4's species, so a sulfate record
+        with no ``burden_oc`` key is MAM4's; one carrying ``burden_oc`` (M7's
+        own species) cannot be attributed and stays unscored.
+        """
+        days, series = self._conserving_sulfur_run(_MAM4_SO4)
+        del series["so4_molar_mass"]
+        assert abs(A._budget_residual(days, series, "so4")) < 1e-9
+        series["burden_oc"] = np.full(days.size, 1.5)
+        assert A._budget_residual(days, series, "so4") is None
 
     def test_soa_is_not_scored(self):
         """SOA's source is the SOAG gas, which has no ``emi_*`` channel."""
@@ -550,6 +660,16 @@ class TestBudget:
             assert species in _SPECIES, species
         for species in A.LIFETIME_SPECIES:
             assert species in _SPECIES, species
+
+    def test_every_m7_species_has_a_mass_ledger(self):
+        """M7's sulfate closes in the family ledger, everything else alone.
+
+        All of M7's other species are emitted as primary (its ``oc`` includes
+        biogenic SOA, emitted as primary by HAM's default), so a species left
+        off the list is one whose leak the gate cannot see.
+        """
+        primary = {s.name for s in M7_SPEC.species} - {"so4", "h2o"}
+        assert primary <= set(A.PRIMARY_BUDGET_SPECIES)
 
 
 class TestDynamicsConservation:
@@ -1119,6 +1239,7 @@ class TestEveryClosureComponentRequired:
         days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
         emi = np.full(n, 1.0 / 86400e6)
         base = {"burden_so4": np.full(n, 4.0),
+                "so4_molar_mass": np.full(n, _MAM4_SO4),
                 "gas_so2": np.zeros(n), "gas_dms": np.zeros(n),
                 "gas_h2so4": np.zeros(n),
                 "emi_so2": emi, "emi_dms": np.zeros(n), "emi_so4": np.zeros(n),
@@ -1128,6 +1249,48 @@ class TestEveryClosureComponentRequired:
             series = dict(base)
             del series[gas]
             assert A._budget_residual(days, series, "so4") is None, gas
+
+    def _sulfur_ledger(self, n=40):
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        emi = np.full(n, 1.0 / 86400e6)
+        return days, {"burden_so4": np.full(n, 4.0),
+                      "so4_molar_mass": np.full(n, _M7_SO4),
+                      "gas_so2": np.zeros(n), "gas_dms": np.zeros(n),
+                      "gas_h2so4": np.zeros(n),
+                      "emi_so2": np.zeros(n), "emi_dms": np.zeros(n),
+                      "emi_so4": emi, "dry_so4": np.zeros(n), "wet_so4": emi}
+
+    def test_an_unidentified_sulfate_is_unscored_and_named(self):
+        """No guessed sulfate: a series that cannot say which is unscored.
+
+        A record with no ``so4_molar_mass`` that also carries M7's own
+        ``burden_oc`` (a cache from tools that knew both populations but not
+        yet the unit) has no unit to close the sulfur family in, and the
+        report says why rather than calling the ledger incomplete. (Without
+        ``burden_oc`` it is an old MAM4 cache, which closes as MAM4's: see
+        ``test_a_cache_from_before_the_unit_was_recorded_closes_as_mam4``.)
+        """
+        days, series = self._sulfur_ledger()
+        assert A._budget_residual(days, dict(series), "so4") is not None
+        del series["so4_molar_mass"]
+        series["burden_oc"] = np.full(days.size, 1.5)
+        assert A._budget_residual(days, series, "so4") is None
+        assert "budget_residual_so4" not in A.summarize(days, series)
+        reason = dict(A.unscored_gates(days, series))["budget_residual_so4"]
+        assert "not identified" in reason
+
+    @pytest.mark.parametrize("corrupt", ["nan_chunk", "two_populations"])
+    def test_a_record_without_one_sulfate_is_unscored(self, corrupt):
+        days, series = self._sulfur_ledger()
+        m = series["so4_molar_mass"].copy()
+        if corrupt == "nan_chunk":
+            m[3] = np.nan                  # one chunk not attributable
+        else:
+            m[len(m) // 2:] = _MAM4_SO4    # stitched from two populations
+        series["so4_molar_mass"] = m
+        assert A._budget_residual(days, series, "so4") is None
+        assert "not identified" in dict(
+            A.unscored_gates(days, series))["budget_residual_so4"]
 
 
 class TestFluxIntegration:
@@ -1321,6 +1484,7 @@ class TestAnchorGates:
         days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
         emi = np.full(n, 1.0 / 86400e6)
         series = {"burden_so4": np.full(n, 500.0), "emi_so4": emi,
+                  "so4_molar_mass": np.full(n, _MAM4_SO4),
                   "emi_so2": np.zeros(n), "emi_dms": np.zeros(n),
                   "gas_so2": np.zeros(n), "gas_dms": np.zeros(n),
                   "gas_h2so4": np.zeros(n),
@@ -1468,3 +1632,673 @@ class TestDustEmissionBand:
         reason = dict(A.unscored_gates(days, series))[
             "dust_emission_tg_per_yr"]
         assert "10 of 74" in reason
+
+
+class TestAnnualWindowBounds:
+    """``annual_window_bounds()``: which trailing slice is the annual
+    window, regardless of what ``--last-n`` later asks for (#1010).
+    """
+
+    @staticmethod
+    def _days(n):
+        return np.arange(5.0, 5.0 * n + 5.0, 5.0)
+
+    def test_a_200_day_record_is_whole(self):
+        # The documented health.py --last-n 40 recipe's window, when it also
+        # happens to be the WHOLE run directory: too short for the dust gate
+        # either way, but not through any trimming here.
+        assert A.annual_window_bounds(self._days(40)) == (0, None)
+
+    def test_a_365_day_record_is_whole(self):
+        assert A.annual_window_bounds(self._days(73)) == (0, None)
+
+    def test_a_400_day_record_trims_to_the_last_year(self):
+        days = self._days(80)      # 80 x 5 days = 400
+        start, window_start = A.annual_window_bounds(days)
+        # 73 trailing 5-day chunks is exactly 365 days; 72 would be 360.
+        assert start == 80 - 73 == 7
+        assert window_start == days[6]
+        assert A.covered_days(days[start:], window_start) == pytest.approx(365.0)
+
+    def test_a_record_already_sliced_short_of_a_year_keeps_its_own_start(self):
+        # annual_window_bounds treats its ``days`` argument as the whole
+        # record it is given; one that is ITSELF already a slice of a longer
+        # run (as a pre-sliced --series-in cache can be, see slice_windows)
+        # carries that slice's own window_start forward rather than
+        # inventing day 0.
+        assert A.annual_window_bounds(self._days(40), window_start=195.0) \
+            == (0, 195.0)
+
+
+class TestWindowSplitting:
+    """``slice_windows()``: the request (``--last-n``) and annual windows
+    the summary functions are handed, from one record (#1010).
+
+    ``collect_windows()`` (the file-reading sibling used by both ``main``
+    entry points) shares the same index arithmetic via ``_window_indices``;
+    :class:`TestCollectWindowsReadsTheRightFiles` exercises it against real
+    chunk files.
+    """
+
+    @staticmethod
+    def _series(n):
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        return days, {"emi_du": np.arange(float(n))}
+
+    def test_last_n_short_of_a_year_still_reaches_back_for_the_annual_window(self):
+        # An 80-chunk/400-day record (#1010's reproduction): --last-n 40
+        # asks for the final 200 days, but the annual window needs the
+        # final 365 (73 chunks) — strictly more, and starting earlier.
+        days, series = self._series(80)
+        request, annual = A.slice_windows(days, series, last_n=40)
+        req_days, _req_series, req_window_start = request
+        ann_days, _ann_series, ann_window_start = annual
+        assert req_days.size == 40 and req_days[0] == days[40]
+        assert ann_days.size == 73 and ann_days[0] == days[7]
+        assert req_window_start == days[39]
+        assert ann_window_start == days[6]
+        assert ann_days[0] < req_days[0]        # the annual window reaches further back
+
+    def test_last_n_already_a_year_or_more_makes_the_two_windows_equal(self):
+        days, series = self._series(80)
+        request, annual = A.slice_windows(days, series, last_n=73)
+        np.testing.assert_array_equal(request[0], annual[0])
+        assert request[2] == annual[2]
+
+    def test_a_whole_record_short_of_a_year_keeps_both_windows_equal(self):
+        # A run directory that is genuinely only 200 days old: the fix must
+        # not invent a longer annual window than the run has.
+        days, series = self._series(40)
+        request, annual = A.slice_windows(days, series, last_n=40)
+        np.testing.assert_array_equal(request[0], annual[0])
+        assert request[2] is None and annual[2] is None
+
+    def test_no_last_n_makes_the_request_the_whole_record_too(self):
+        days, series = self._series(80)
+        request, annual = A.slice_windows(days, series, last_n=None)
+        assert request[0].size == 80                  # no slicing at all
+        assert annual[0].size == 73                    # still trimmed to a year
+
+
+class TestDustScoredOnTheWholeRecord:
+    """The #1010 fix: ``dust_emission_tg_per_yr`` reads the run directory's
+    own year, independent of whatever ``--last-n`` sliced the request window
+    (``days``/``series``) to for the drift/ledger/mean statistics.
+    """
+
+    @staticmethod
+    def _dust_series(n, tg_per_yr, nlat=96.0):
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        flux = tg_per_yr * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        return days, {"emi_du": np.full(n, flux), "nlat": np.full(n, nlat)}
+
+    def test_a_200_day_request_still_scores_the_365_day_annual_window(self):
+        # Exactly #1010's reproduction: health.py --last-n 40 hands
+        # summarize() a 200-day request from a run whose directory holds a
+        # full year. The request's own emi_du is set far outside the band
+        # (9999 Tg/yr) so a PASS below can only come from the annual series.
+        request_days, request_series = self._dust_series(40, 9999.0)
+        annual_days, annual_series = self._dust_series(73, 450.0)
+        stats = A.summarize(request_days, request_series,
+                            annual_days=annual_days,
+                            annual_series=annual_series)
+        assert stats["dust_emission_tg_per_yr"] == pytest.approx(450.0,
+                                                                  rel=1e-6)
+        assert stats["record_days"] == pytest.approx(195.0)    # request span
+        assert stats["dust_window_days"] == pytest.approx(365.0)
+        rows = dict((name, ok) for name, _v, _lim, ok
+                    in A.physics_gates(stats))
+        assert rows["dust_emission_tg_per_yr"]
+
+    def test_unscored_gates_checks_the_annual_series_not_the_request(self):
+        # The request carries no emi_du at all (unremarkable: a trimmed
+        # --last-n reduction need not keep every diagnostic the annual
+        # window's own chunks do); the annual series does. unscored_gates
+        # must check the annual series, not report "no emi_du" from the
+        # request having none.
+        request_days, request_series = self._dust_series(40, 450.0)
+        del request_series["emi_du"]
+        annual_days, annual_series = self._dust_series(73, 450.0)
+        reasons = dict(A.unscored_gates(request_days, request_series,
+                                        annual_days=annual_days,
+                                        annual_series=annual_series))
+        assert "dust_emission_tg_per_yr" not in reasons
+
+    def test_a_short_whole_record_is_unscored_even_with_a_long_request(self):
+        # The run directory itself is only 200 days old: no --last-n choice
+        # can conjure a real year, and the fix must not fabricate one.
+        request_days, request_series = self._dust_series(40, 450.0)
+        annual_days, annual_series = self._dust_series(40, 450.0)
+        stats = A.summarize(request_days, request_series,
+                            annual_days=annual_days,
+                            annual_series=annual_series)
+        assert "dust_emission_tg_per_yr" not in stats
+        reasons = dict(A.unscored_gates(request_days, request_series,
+                                        annual_days=annual_days,
+                                        annual_series=annual_series))
+        assert "seasonal" in reasons["dust_emission_tg_per_yr"]
+        assert "200" in reasons["dust_emission_tg_per_yr"]
+
+    def test_a_400_day_record_only_uses_its_final_365_days(self):
+        # The first 7 (of 80) chunks read a wildly different flux; slicing
+        # through slice_windows() must drop exactly those for the annual
+        # statistic, leaving only the trailing 450 Tg/yr portion.
+        days = np.arange(5.0, 5.0 * 80 + 5.0, 5.0)
+        flux_450 = 450.0 * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        flux_9999 = 9999.0 * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        emi = np.concatenate([np.full(7, flux_9999), np.full(73, flux_450)])
+        series = {"emi_du": emi, "nlat": np.full(80, 96.0)}
+        request, annual = A.slice_windows(days, series, last_n=40)
+        req_days, req_series, req_window_start = request
+        ann_days, ann_series, ann_window_start = annual
+        stats = A.summarize(req_days, req_series, window_start=req_window_start,
+                            annual_days=ann_days, annual_series=ann_series,
+                            annual_window_start=ann_window_start)
+        assert stats["dust_emission_tg_per_yr"] == pytest.approx(450.0,
+                                                                  rel=1e-6)
+        assert stats["dust_window_days"] == pytest.approx(365.0)
+
+    def test_drift_still_reads_the_request_window_regardless_of_the_annual_series(self):
+        # The annual_* arguments must steer ONLY the annual-budget
+        # statistic; the drift gate stays exactly what it was pre-#1010.
+        days = np.arange(5, 370, 5, dtype=float)
+        values = np.full(days.size, 3.0)
+        tail = days >= 320
+        values[tail] = 3.0 * np.exp(0.12 * (days[tail] - 320.0))
+        annual_days, annual_series = self._dust_series(73, 450.0)
+        stats = A.summarize(days, {"burden_so4": values},
+                            annual_days=annual_days,
+                            annual_series=annual_series)
+        rows = A.physics_gates(stats)
+        failed = [name for name, _v, _lim, ok in rows if not ok]
+        assert "dlnB_dt_so4_per_day" in failed
+        passed = dict((name, ok) for name, _v, _lim, ok in rows)
+        assert passed["dust_emission_tg_per_yr"]
+
+    def test_dust_window_days_is_not_a_regression_target(self):
+        # Bookkeeping, like record_days: a run scored over a different
+        # window than its reference is not thereby a regression.
+        days, series = self._dust_series(73, 450.0)
+        stats = A.summarize(days, series)
+        reference = dict(stats, dust_window_days=1.0)
+        names = [name for name, _v, _lim, _ok
+                 in A.compare_to_reference(stats, reference, series)]
+        assert "dust_window_days" not in names
+
+
+class TestCollectWindowsReadsTheRightFiles:
+    """``collect_windows()``: the file-reading sibling of ``slice_windows()``,
+    end to end against real chunk files (#1010).
+    """
+
+    @staticmethod
+    def _dust_chunk(tg_per_yr, nlat=96, nlon=2) -> xr.Dataset:
+        """Build a minimal JAM-like chunk: just enough for chunk_reduction()
+        to read ``emi_du`` and ``nlat`` without crashing on the rest.
+        """
+        lat = np.linspace(-89.0, 89.0, nlat)
+        lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
+        dp = np.array([300.0, 250.0, 250.0, 200.0]) * 100.0
+        half = np.concatenate([[1000e2], 1000e2 - np.cumsum(dp)])
+        full = 0.5 * (half[:-1] + half[1:])
+        flux = tg_per_yr * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        data = {
+            "pressure_full": (("time", "level", "lon", "lat"),
+                              np.broadcast_to(
+                                  full[None, :, None, None],
+                                  (1, dp.size, nlon, nlat)).copy()),
+            "pressure_half": (("time", "level_i", "lon", "lat"),
+                              np.broadcast_to(
+                                  half[None, :, None, None],
+                                  (1, dp.size + 1, nlon, nlat)).copy()),
+            "emi_du": (("time", "lon", "lat"), np.full((1, nlon, nlat), flux)),
+        }
+        coords = {"lat": lat, "lon": lon,
+                  "level_i": ("level_i", np.linspace(1.0, 0.0, dp.size + 1),
+                              {"positive": "down"})}
+        return xr.Dataset(data, coords=coords)
+
+    def _write_run(self, tmp_path, n, tg_per_yr=450.0):
+        """``n`` 5-day chunks, all carrying the same flux."""
+        for i in range(n):
+            day = 5 * (i + 1)
+            self._dust_chunk(tg_per_yr).to_netcdf(tmp_path / f"mx_day{day}.nc")
+        return A.run_files(str(tmp_path))
+
+    def test_the_request_and_annual_windows_split_correctly(self, tmp_path):
+        files = self._write_run(tmp_path, n=80, tg_per_yr=450.0)
+        request, annual = A.collect_windows(files, last_n=40)
+        req_days, req_series, req_window_start = request
+        ann_days, ann_series, ann_window_start = annual
+        assert req_days.size == 40 and req_days[0] == 205.0
+        assert ann_days.size == 73 and ann_days[0] == 40.0
+        assert req_window_start == 200.0
+        assert ann_window_start == 35.0
+        np.testing.assert_allclose(req_series["emi_du"] * A.EARTH_AREA_M2
+                                   * 86400.0 * 365.0 / 1e9, 450.0, rtol=1e-6)
+        np.testing.assert_allclose(ann_series["emi_du"] * A.EARTH_AREA_M2
+                                   * 86400.0 * 365.0 / 1e9, 450.0, rtol=1e-6)
+
+    def test_the_whole_pipeline_scores_the_dust_gate_under_a_short_last_n(
+            self, tmp_path):
+        """End-to-end reproduction of the #1010 bug and its fix.
+
+        80 chunks (400 days) at a flux inside the band; ``--last-n 40`` asks
+        for only the final 200 days (the documented recipe's exact window).
+        Pre-#1010 this was UNSCORED; it must now PASS, scored on the whole
+        record's trailing year.
+        """
+        files = self._write_run(tmp_path, n=80, tg_per_yr=450.0)
+        request, annual = A.collect_windows(files, last_n=40)
+        req_days, req_series, req_window_start = request
+        ann_days, ann_series, ann_window_start = annual
+        stats = A.summarize(req_days, req_series, window_start=req_window_start,
+                            annual_days=ann_days, annual_series=ann_series,
+                            annual_window_start=ann_window_start)
+        assert stats["dust_emission_tg_per_yr"] == pytest.approx(450.0,
+                                                                  rel=1e-6)
+        rows = dict((name, ok) for name, _v, _lim, ok
+                    in A.physics_gates(stats))
+        assert rows["dust_emission_tg_per_yr"]
+
+
+class TestOtherPopulationSpecies:
+    """A species of the population a run does not carry is not a gap."""
+
+    def _series(self, *species):
+        n = 4
+        return (np.arange(5.0, 5.0 * n + 5.0, 5.0),
+                {f"burden_{sp}": np.full(n, 1.0) for sp in species})
+
+    def test_a_mam4_run_does_not_report_m7s_oc(self):
+        days, series = self._series("so4", "bc", "poa", "soa")
+        assert A.other_population_species(series) == {"oc"}
+        rows = dict(A.unscored_gates(days, series))
+        assert "burden_oc_mg_m2" not in rows
+
+    def test_an_m7_run_does_not_report_mam4s_poa_and_soa(self):
+        days, series = self._series("so4", "bc", "oc")
+        assert A.other_population_species(series) == {"poa", "soa"}
+        rows = dict(A.unscored_gates(days, series))
+        assert "burden_poa_mg_m2" not in rows
+        assert "burden_soa_mg_m2" not in rows
+
+    def test_a_record_with_no_population_species_reports_every_gap(self):
+        """With nothing to tell the populations apart by, absence is a gap."""
+        days, series = self._series("so4", "bc")
+        assert A.other_population_species(series) == set()
+        rows = dict(A.unscored_gates(days, series))
+        for species in ("poa", "soa", "oc", "du", "ss"):
+            assert f"burden_{species}_mg_m2" in rows
+
+    def test_a_shared_species_is_always_reported(self):
+        days, series = self._series("so4", "bc", "poa", "soa")
+        assert "burden_du_mg_m2" in dict(A.unscored_gates(days, series))
+
+
+class TestWarmStart:
+    """Window selection for a warm-started/second year (#1081)."""
+
+    def _run_dir(self, tmp_path, kind=None):
+        run = tmp_path / "run"
+        run.mkdir(parents=True)
+        (run / ".hydra").mkdir()
+        if kind is not None:
+            (run / ".hydra" / "config.yaml").write_text(f"init:\n  kind: {kind}\n")
+        else:
+            (run / ".hydra" / "config.yaml").write_text("run:\n  time_step: 720\n")
+        return run
+
+    def test_from_state_is_detected_as_warm(self, tmp_path):
+        run = self._run_dir(tmp_path, kind="from_state")
+        assert A.warm_start_kind(str(run)) is True
+
+    def test_a_cold_init_kind_is_detected_as_cold(self, tmp_path):
+        for kind in ("jw", "isothermal", "era5", "balanced_isothermal"):
+            run = self._run_dir(tmp_path / kind, kind=kind)
+            assert A.warm_start_kind(str(run)) is False
+
+    def test_no_init_block_is_detected_as_cold(self, tmp_path):
+        run = self._run_dir(tmp_path, kind=None)
+        assert A.warm_start_kind(str(run)) is False
+
+    def test_a_missing_hydra_config_is_unknown(self, tmp_path):
+        run = tmp_path / "hand_assembled"
+        run.mkdir()
+        assert A.warm_start_kind(str(run)) is None
+
+    def test_resolve_explicit_flag_wins_over_provenance(self, tmp_path):
+        run = self._run_dir(tmp_path, kind="from_state")
+        warm, reason = A.resolve_warm_start("no", str(run))
+        assert warm is False and "warm-start no" in reason
+        cold = tmp_path / "cold"
+        cold.mkdir()
+        warm, reason = A.resolve_warm_start("yes", str(cold))
+        assert warm is True and "warm-start yes" in reason
+
+    def test_resolve_auto_detects_from_provenance(self, tmp_path):
+        run = self._run_dir(tmp_path, kind="from_state")
+        warm, reason = A.resolve_warm_start("auto", str(run))
+        assert warm is True and "from_state" in reason
+
+    def test_resolve_auto_without_provenance_defaults_to_cold(self, tmp_path):
+        """No .hydra/config.yaml -- e.g. --series-in -- changes nothing by default."""
+        warm, reason = A.resolve_warm_start("auto", None)
+        assert warm is False and "no .hydra" in reason
+        hand_assembled = tmp_path / "hand_assembled"
+        hand_assembled.mkdir()
+        warm, reason = A.resolve_warm_start("auto", str(hand_assembled))
+        assert warm is False and "no .hydra" in reason
+
+    @staticmethod
+    def _record_days(out):
+        match = re.search(r"record_days\s+([0-9.eE+-]+)", out)
+        assert match, out
+        return float(match.group(1))
+
+    def test_cli_ignores_last_n_on_a_warm_run(self, tmp_path, monkeypatch,
+                                              capsys):
+        """``--warm-start yes`` scores the whole record, not --last-n."""
+        n = 73
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        src = tmp_path / "full.npz"
+        np.savez(src, _days=days, burden_so4=np.full(n, 3.0))
+        monkeypatch.setattr(
+            sys, "argv",
+            ["aerosol_stats", "--series-in", str(src), "--last-n", "10",
+             "--warm-start", "yes"])
+        A.main()
+        out = capsys.readouterr().out
+        assert "NOTE  --last-n 10 ignored" in out
+        assert self._record_days(out) == pytest.approx(days[-1] - days[0])
+
+    def test_cli_applies_last_n_on_a_cold_run(self, tmp_path, monkeypatch,
+                                              capsys):
+        n = 73
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        src = tmp_path / "full.npz"
+        np.savez(src, _days=days, burden_so4=np.full(n, 3.0))
+        monkeypatch.setattr(
+            sys, "argv",
+            ["aerosol_stats", "--series-in", str(src), "--last-n", "10"])
+        A.main()
+        out = capsys.readouterr().out
+        assert "NOTE  --last-n" not in out
+        assert self._record_days(out) == pytest.approx(days[-1] - days[-10])
+
+
+class TestBoxModelDrift:
+    """The periodic-box correction for POA/BC (#1081)."""
+
+    DAYS = np.arange(5.0, 370.0, 5.0)      # 73 five-day chunks = one year
+
+    def _build(self, tau_days, amplitude=3.0, mean=1.0, phase=0.0):
+        """Drive the box the gate's correction uses, at fine resolution, to
+        build a genuinely periodic ``burden`` series the box model should
+        reproduce almost exactly.
+        """
+        tau_seconds = tau_days * 86400.0
+        emission = mean * (1.0 + amplitude * np.cos(
+            2 * np.pi * self.DAYS / 365.0 + phase))
+        emission = np.clip(emission, 0.01 * mean, None)
+        n_sub = 50
+        fine_step = 5.0 / n_sub
+        n_fine = int(round(365.0 / fine_step))
+        fine = (np.arange(n_fine) + 0.5) * fine_step
+        centres = self.DAYS - 2.5
+        e_fine = np.interp(fine, centres, emission, period=365.0)
+        eq = e_fine * tau_seconds
+        decay = np.exp(-fine_step * 86400.0 / tau_seconds)
+        b = float(np.mean(emission)) * tau_seconds
+        out = np.empty(n_fine)
+        for _ in range(20):
+            for i in range(n_fine):
+                b = eq[i] + (b - eq[i]) * decay
+                out[i] = b
+        burden = out.reshape(-1, n_sub).mean(axis=1)
+        sink = burden / tau_seconds
+        # ``box_model_drift`` takes the burden the way the ``burden_<sp>``
+        # series carries it, in mg/m2, against kg/m2/s ledgers.
+        return emission, burden * 1e6, sink
+
+    def test_a_periodic_signal_reads_as_nonzero_drift_before_correction(self):
+        """The premise: a fit over a finite window of a periodic signal is
+        biased, even with the annual harmonic -- that bias is what the box
+        model exists to quantify and subtract.
+        """
+        emission, burden, sink = self._build(tau_days=5.0)
+        raw, harmonic = A.fit_log_drift(self.DAYS, burden, A.YEAR_DAYS)
+        assert harmonic
+        assert abs(raw) > 1e-4
+
+    def test_the_box_model_reproduces_its_own_construction(self):
+        """``box_model_drift`` fed the box's OWN emission/burden/sink must
+        recover (near enough to the box's own discretisation) the slope that
+        series' own fit reads -- the corrected residual is then ~0.
+        """
+        emission, burden, sink = self._build(tau_days=5.0, amplitude=3.0)
+        dry = np.zeros_like(sink)
+        wet = sink
+        raw, _harmonic = A.fit_log_drift(self.DAYS, burden, A.YEAR_DAYS)
+        box = A.box_model_drift(self.DAYS, emission, burden, dry, wet,
+                                A.YEAR_DAYS)
+        assert box == pytest.approx(raw, abs=2e-4)
+        assert abs(raw - box) < 0.1 * abs(raw)
+
+    def test_a_flatter_emission_cycle_produces_a_smaller_artefact(self):
+        """A weaker seasonal pulse biases the fit less -- a sanity check on
+        the sign and the rough size of what the box model measures, not a
+        tuned threshold.
+        """
+        _e1, b1, s1 = self._build(tau_days=5.0, amplitude=3.0)
+        _e2, b2, s2 = self._build(tau_days=5.0, amplitude=0.3)
+        slope1 = abs(A.fit_log_drift(self.DAYS, b1, A.YEAR_DAYS)[0])
+        slope2 = abs(A.fit_log_drift(self.DAYS, b2, A.YEAR_DAYS)[0])
+        assert slope2 < slope1
+
+    def test_matches_the_poa_drift_investigation_construction(self):
+        """The #1081 investigation (12 JAM T63 L47/L95 years on disk,
+        ``docs/source/design/jam_regression.md``, "Which window, and the
+        box-model correction") validated exactly this construction --
+        constant mean lifetime, exact-exponential periodic steady state, the
+        gate's own :func:`A.fit_log_drift` -- against an independent
+        reduction of the run output, reproducing its box-model slope on
+        every one of 24 species-years to machine precision. That reduction
+        is not vendored here (it is tens of GB of JAM chunk output); this
+        pins the one property that reduction established and that this test
+        file CAN check without it: a strong seasonal pulse with a short (5
+        day) lifetime -- POA's actual regime -- produces a box-model
+        artefact and a corrected residual both smaller in magnitude than the
+        raw drift, for a range of plausible phases.
+        """
+        for phase in (0.0, 1.0, 2.3, 4.0, 5.5):
+            emission, burden, sink = self._build(tau_days=5.0, amplitude=0.9,
+                                                 mean=1.0, phase=phase)
+            raw, harmonic = A.fit_log_drift(self.DAYS, burden, A.YEAR_DAYS)
+            box = A.box_model_drift(self.DAYS, emission, burden,
+                                    np.zeros_like(sink), sink, A.YEAR_DAYS)
+            assert harmonic
+            # Exact here (box is built from the series' own construction),
+            # which is the same identity the whole-year numbers above pin.
+            assert box == pytest.approx(raw, abs=2e-4)
+
+    def test_a_cadence_that_does_not_divide_the_year_still_pools(self):
+        """10- and 30-day output cadences (both configurable) leave no
+        integer number of chunks in 365 days; the box's fine grid is built
+        from the nearest whole count so the pooling reshape always works and
+        the slope stays close to the 5-day answer.
+        """
+        emission5, burden5, sink5 = self._build(tau_days=5.0, amplitude=0.9)
+        ref = A.box_model_drift(self.DAYS, emission5, burden5,
+                                np.zeros_like(sink5), sink5, A.YEAR_DAYS)
+        for cadence in (10.0, 30.0):
+            days = np.arange(cadence, 366.0, cadence)
+            centres = days - 0.5 * cadence
+            emission = np.interp(centres, self.DAYS - 2.5, emission5,
+                                 period=365.0)
+            burden = np.interp(centres, self.DAYS - 2.5, burden5, period=365.0)
+            sink = np.interp(centres, self.DAYS - 2.5, sink5, period=365.0)
+            box = A.box_model_drift(days, emission, burden, np.zeros_like(sink),
+                                    sink, A.YEAR_DAYS)
+            assert np.isfinite(box)
+            assert box == pytest.approx(ref, abs=5e-4)
+
+    def test_burden_is_read_in_mg_per_m2(self):
+        """The ``burden_<sp>`` series is mg/m2 and the ledgers kg/m2/s; a
+        box built without the conversion has a lifetime a million times too
+        long and reports no artefact at all, which would silently disable
+        the correction on every real reduction.
+        """
+        emission, burden, sink = self._build(tau_days=5.0, amplitude=0.9)
+        box = A.box_model_drift(self.DAYS, emission, burden,
+                                np.zeros_like(sink), sink, A.YEAR_DAYS)
+        assert abs(box) > 1e-4
+        wrong = A.box_model_drift(self.DAYS, emission, burden * 1e6,
+                                  np.zeros_like(sink), sink, A.YEAR_DAYS)
+        assert abs(wrong) < 0.1 * abs(box)
+
+
+class TestSummarizeBoxCorrection:
+    """``summarize`` wires the correction to POA/BC only, on the whole-year fit."""
+
+    DAYS = np.arange(5.0, 370.0, 5.0)
+
+    def _closed_species(self, species, amplitude=0.4, phase=0.0, tau_days=5.0):
+        """Build a burden/emission/deposition series closed by construction.
+
+        Has a seasonal emission cycle (so the fit is biased, like POA/BC
+        really are).
+        """
+        t = self.DAYS
+        burden = 3.0 * np.exp(amplitude * np.cos(2 * np.pi * t / 365.0 + phase))
+        # ``burden_<sp>`` is mg/m2 as reduced; the ledgers are kg/m2/s.
+        sink = burden * 1e-6 / (tau_days * 86400.0)
+        # emission chosen so the box the correction builds is close to, but
+        # not identical to, the actual series -- exercising the real
+        # subtraction rather than a degenerate zero.
+        emission = sink + np.gradient(burden * 1e-6, t) / 86400.0
+        return {f"burden_{species}": burden, f"emi_{species}": emission,
+                f"dry_{species}": np.zeros_like(sink), f"wet_{species}": sink}
+
+    def test_poa_and_bc_get_raw_and_box_keys_on_the_whole_year_fit(self):
+        series = {}
+        for sp in ("poa", "bc"):
+            series.update(self._closed_species(sp))
+        stats = A.summarize(self.DAYS, series)
+        for sp in ("poa", "bc"):
+            assert f"raw_dlnB_dt_{sp}_per_day" in stats
+            assert f"box_dlnB_dt_{sp}_per_day" in stats
+            corrected = (stats[f"raw_dlnB_dt_{sp}_per_day"]
+                        - stats[f"box_dlnB_dt_{sp}_per_day"])
+            assert stats[f"dlnB_dt_{sp}_per_day"] == pytest.approx(corrected)
+
+    def test_dust_and_sea_salt_are_bit_identical_to_the_uncorrected_path(self):
+        """#1081 explicitly excludes dust and sea salt (interactive emission):
+        their gated slope must be EXACTLY the raw fit, with no raw_/box_
+        companion keys at all.
+        """
+        series = {}
+        for sp in ("du", "ss"):
+            series.update(self._closed_species(sp))
+        stats = A.summarize(self.DAYS, series)
+        for sp in ("du", "ss"):
+            assert f"raw_dlnB_dt_{sp}_per_day" not in stats
+            assert f"box_dlnB_dt_{sp}_per_day" not in stats
+            raw, _harmonic = A.fit_log_drift(
+                self.DAYS, series[f"burden_{sp}"], A.YEAR_DAYS)
+            assert stats[f"dlnB_dt_{sp}_per_day"] == raw
+
+    def test_a_two_year_record_builds_the_box_from_the_fitted_year(self):
+        """Two-year directories are supported, and the gate fits the final
+        year: the box must be driven by that year's emission and lifetime
+        alone, not by every year folded onto one day-of-year axis.
+        """
+        first = self._closed_species("poa", amplitude=0.9, phase=2.0, tau_days=3.0)
+        second = self._closed_species("poa", amplitude=0.4, phase=0.0, tau_days=5.0)
+        days2 = np.concatenate([self.DAYS, self.DAYS + 365.0])
+        series2 = {k: np.concatenate([first[k], second[k]]) for k in first}
+        two_year = A._box_slope(days2, series2, "poa", series2["burden_poa"],
+                                A.YEAR_DAYS)
+        final_only = A._box_slope(self.DAYS + 365.0, second, "poa",
+                                  second["burden_poa"], A.YEAR_DAYS)
+        assert two_year == pytest.approx(final_only, rel=1e-12, abs=1e-15)
+        folded = A._box_slope(self.DAYS, first, "poa", first["burden_poa"],
+                              A.YEAR_DAYS)
+        # The two synthetic years have different pulses, so a box built
+        # from the first year (or from both folded together) is a
+        # different number; the artefacts are small here, hence the tight
+        # tolerance on the distinction.
+        assert abs(two_year - folded) > 1e-8
+
+    def test_zero_emission_keeps_the_raw_slope(self):
+        """A warm-started run with the prescribed sources switched off still
+        carries a decaying POA/BC burden but emits nothing: the periodic box
+        it would build is identically zero and its fit undefined, so the
+        gate keeps the RAW slope (no box_ key) rather than scoring NaN.
+        """
+        series = self._closed_species("poa")
+        series["emi_poa"] = np.zeros_like(series["emi_poa"])
+        stats = A.summarize(self.DAYS, series)
+        raw, _harmonic = A.fit_log_drift(self.DAYS, series["burden_poa"],
+                                         A.YEAR_DAYS)
+        assert np.isfinite(stats["dlnB_dt_poa_per_day"])
+        assert stats["dlnB_dt_poa_per_day"] == raw
+        assert "box_dlnB_dt_poa_per_day" not in stats
+
+    def test_so4_is_also_untouched(self):
+        """so4 is not in BOX_CORRECTED_SPECIES either, even though it has a
+        prescribed-looking gas-phase source; the maintainer's decision is
+        POA/BC only.
+        """
+        series = self._closed_species("so4")
+        stats = A.summarize(self.DAYS, series)
+        assert "raw_dlnB_dt_so4_per_day" not in stats
+        assert "box_dlnB_dt_so4_per_day" not in stats
+
+    def test_no_correction_on_the_six_month_short_record_window(self):
+        """A record shorter than a year cannot build a periodic box (it does
+        not cover a full annual cycle), so the six-month line keeps the raw
+        slope -- the maintainer's decision was scoped to the whole-year fit.
+        """
+        short_days = self.DAYS[:40]                      # 200 days
+        series = self._closed_species("poa")
+        short_series = {k: v[:40] for k, v in series.items()}
+        stats = A.summarize(short_days, short_series)
+        assert "raw_dlnB_dt_poa_per_day" not in stats
+        assert "box_dlnB_dt_poa_per_day" not in stats
+        raw, harmonic = A.fit_log_drift(
+            short_days, short_series["burden_poa"], A.SHORT_RECORD_WINDOW_DAYS)
+        assert not harmonic
+        assert stats["dlnB_dt_poa_per_day"] == raw
+
+    def test_missing_ledger_falls_back_to_the_raw_slope(self):
+        """A POA/BC year without emi_*/dry_*/wet_* (a trimmed or old-version
+        output) cannot build the box; the gate must still report the
+        (uncorrected) slope rather than nothing.
+        """
+        burden = 3.0 * np.exp(0.4 * np.cos(2 * np.pi * self.DAYS / 365.0))
+        stats = A.summarize(self.DAYS, {"burden_poa": burden})
+        assert "raw_dlnB_dt_poa_per_day" not in stats
+        assert "box_dlnB_dt_poa_per_day" not in stats
+        raw, _harmonic = A.fit_log_drift(self.DAYS, burden, A.YEAR_DAYS)
+        assert stats["dlnB_dt_poa_per_day"] == raw
+
+    def test_raw_and_box_keys_are_exempt_from_the_reference_comparison(self):
+        series = {}
+        for sp in ("poa", "bc"):
+            series.update(self._closed_species(sp))
+        stats = A.summarize(self.DAYS, series)
+        # A "reference" that differs wildly on the companion keys must not
+        # register as a regression: they are not an independent measurement.
+        reference = dict(stats)
+        reference["raw_dlnB_dt_poa_per_day"] = 10.0
+        reference["box_dlnB_dt_poa_per_day"] = -10.0
+        names = [name for name, _v, _lim, _ok
+                in A.compare_to_reference(stats, reference, series)]
+        assert "raw_dlnB_dt_poa_per_day" not in names
+        assert "box_dlnB_dt_poa_per_day" not in names
+
+    def test_box_corrected_species_constant_is_poa_and_bc_only(self):
+        assert A.BOX_CORRECTED_SPECIES == ("poa", "bc")
+        assert "du" not in A.BOX_CORRECTED_SPECIES
+        assert "ss" not in A.BOX_CORRECTED_SPECIES

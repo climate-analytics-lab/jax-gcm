@@ -9,6 +9,7 @@ import ast
 import contextlib
 import unittest
 from pathlib import Path
+import os
 from unittest import mock
 
 import jax
@@ -19,6 +20,7 @@ import xarray as xr
 
 from jcm import configurations, forcing_assembly, runners
 from jcm.forcing import ForcingData
+from jcm.physics.surface.slim import properties as slim_properties
 from jcm.terrain import TerrainData
 
 
@@ -45,6 +47,20 @@ class TestConfigurationsDoor(unittest.TestCase):
     def test_unknown_name_raises(self):
         with self.assertRaisesRegex(ValueError, "Unknown configuration"):
             configurations.load("does-not-exist")
+
+    def test_monthly_anchors_override_composes(self):
+        """``forcing.monthly_anchors`` (#902) must be declared on the shipped
+        forcing groups, not just read with a Python-side default — otherwise
+        the documented override ``forcing.monthly_anchors=month_start`` fails
+        at Hydra composition ("Key 'monthly_anchors' is not in struct")
+        before jcm.forcing_assembly ever sees it.
+        """
+        exp = configurations.load(
+            "speedy-t31",
+            **{"terrain": "aquaplanet", "forcing": "default",
+               "forcing.monthly_anchors": "month_start",
+               "run.total_time": 1.0, "run.save_interval": 1.0})
+        self.assertEqual(exp.config["forcing"]["monthly_anchors"], "month_start")
 
     def test_load_speedy_builds_and_hides_hydra(self):
         # Cheap real build (SPEEDY needs no network); aquaplanet/default keep it
@@ -226,11 +242,11 @@ class TestPackagedConfigSearchpath(unittest.TestCase):
         # The coupler's own top-level schema survives the jcm composition.
         self.assertEqual(cfg.coupler.name, "demo")
         # Re-rooting landed the whole speedy-t31 recipe under `atmosphere`: its
-        # grid, 15-min step, and terrain/forcing file overrides all nest there.
+        # grid, 30-min step, and terrain/forcing file overrides all nest there.
         atm = cfg.atmosphere
         self.assertEqual(atm.grid.layers, 8)
         self.assertEqual(atm.grid.vertical, "speedy")
-        self.assertEqual(atm.run.time_step, 15)
+        self.assertEqual(atm.run.time_step, 30)
         self.assertEqual(atm.terrain.file, "hf://bundles/t63/terrain.nc")
         self.assertEqual(atm.forcing.file, "hf://bundles/t63/forcing_pd.nc")
         # The searchpath served the jcm groups by name and the recipe re-rooted:
@@ -281,9 +297,24 @@ def _patched_engine(shape):
                    return_value={"type2": jnp.ones(shape)}),
         mock.patch("jcm.forcing.read_dust_regions", return_value=jnp.ones(shape)),
         mock.patch("jcm.forcing.read_dust_roughness", return_value=jnp.ones(shape)),
+        mock.patch("jcm.forcing.read_dust_msg_source", return_value=jnp.ones(shape)),
+        mock.patch("jcm.forcing.read_volcanic_emissions",
+                   return_value={"degassing_flux": jnp.ones((1, 1))}),
         mock.patch("jcm.forcing.read_oxidant_vmr",
                    return_value={"oh": jnp.ones((1, *shape))}),
         mock.patch("jcm.forcing.validate_oxidant_levels"),
+        # The 1M/2M presets compose the MACv2 natural background, whose
+        # bundle (forcing.natural_aerosol_file=auto) would likewise be read
+        # through the stubbed open_dataset and come back empty.
+        mock.patch("jcm.forcing.read_natural_aerosol",
+                   return_value={"aod_sw_coarse": jnp.ones((12, 14, *shape))}),
+        # The ECHAM presets' default land is SLIM, whose property file
+        # (forcing.slim_file=auto) would be read through the stubbed
+        # open_dataset above and come back empty.
+        mock.patch("jcm.physics.surface.slim.properties.read_slim_properties",
+                   return_value={name: jnp.ones(shape) for name in
+                                 slim_properties.MONTHLY_FIELDS
+                                 + slim_properties.STATIC_FIELDS}),
     ]
 
 
@@ -299,16 +330,18 @@ class TestConfigurationsAcceptance(unittest.TestCase):
     def tearDown(self):
         jax.config.update("jax_enable_x64", self._x64)
 
-    def _assert_door_matches_cli(self, name):
+    def _assert_door_matches_cli(self, name, overrides=None):
         """Both doors build the same patched engine; assert they agree."""
         coords = _t63l47_coords()
         shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
         with contextlib.ExitStack() as stack:
             for p in _patched_engine(shape):
                 stack.enter_context(p)
-            exp = configurations.load(name)
+            overrides = dict(overrides or {})
+            exp = configurations.load(name, **overrides)
             # The CLI composition, built through the same runners the door uses.
-            cfg = configurations._compose(name, [])
+            cfg = configurations._compose(
+                name, [f"{k}={v}" for k, v in overrides.items()])
             ref_model = runners.build_model(cfg)
             ref_forcing = runners.build_forcing(
                 cfg, ref_model.coords,
@@ -337,7 +370,81 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         # JAM composes the optional mam4-jax microphysics, so this runs where
         # the GPL extra is installed (the extras-tests CI job) and skips in the
         # default jobs, which install none.
-        self._assert_door_matches_cli("t63-echam-jam")
+        self._assert_door_matches_cli("t63-echam-jam-mam4")
+
+    @pytest.mark.requires_extra("m7")
+    def test_jam_m7_load_equivalent_to_cli_composition(self):
+        # The echam-jam-m7 preset composes the optional m7-jax core (#1017).
+        # Its default nsnucl=2 reads HAM's nucleation tables (the mirror, or
+        # $HAM_INPUT_DIR), and this test stubs xarray.open_dataset for the
+        # whole engine, so it
+        # composes the documented data-free variant (binary nucleation, jcm's
+        # own Mie tables) - equivalence of the two doors is what is tested.
+        # forcing.dust_msg_file stays at the shipped "auto": the staged MSG
+        # bundle resolves offline and read_dust_msg_source is mocked above.
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HAM_INPUT_DIR", None)
+            self._assert_door_matches_cli(
+                "t63-echam-jam",
+                {"physics.jam_microphysics_options.nucleation_scheme": 1})
+
+    @pytest.mark.requires_extra("m7")
+    def test_jam_m7_preset_carries_its_reference_settings(self):
+        """The preset builds HAM's switches, not the MAM4 calibrations.
+
+        Sea salt, dust, activation, wet removal and warm autoconversion carry
+        this population's own calibration on the SLIM land (1.85 on HAM's Long
+        source, 1.157 on its dust thresholds, ``w_sigma_min`` 0.0499, one
+        wet-removal scale of 1.587, ``ccraut`` 19.8; the values and their fit
+        are in docs/source/design/jam_aerosol_retune.md, "The structural
+        refit"), not the MAM4 configuration's (SEASALT_SCALE_DEFAULT,
+        NDUSCALE_JCM_T63_SCALE, the CloudParams2M default), wet deposition is
+        the full nwetdep=3 scheme with the corrected cdroprad(6) = 30 um axis,
+        cirrus is nic_cirrus=2, and the convection carries HAM's pair for this
+        pairing (``cprcon`` 9e-4, ``entrpen`` 2e-4).
+        """
+        cfg = configurations._compose(
+            "t63-echam-jam",
+            ["physics.jam_microphysics_options.nucleation_scheme=1"])
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HAM_INPUT_DIR", None)
+            physics = runners.build_physics(cfg, _t63l47_coords())
+
+        def term(name):
+            return next(t for t in physics.terms if t.name == name)
+
+        def params(name):
+            return term(name).params.get_value()
+
+        self.assertAlmostEqual(
+            float(params("jam_seasalt_emissions").scale), 1.85040662, places=6)
+        # DustEmissions keeps its preset as (ndust, nudged, nduscale_scale):
+        # HAM's ndust=5 with jcm's MAM4 multiplier off.
+        self.assertEqual(term("jam_dust_emissions")._preset[0], 5)
+        self.assertAlmostEqual(
+            float(term("jam_dust_emissions")._preset[2]), 1.1574521, places=6)
+        self.assertAlmostEqual(
+            float(params("ham_activation").w_sigma_min), 0.049941278, places=7)
+        wet = term("jam_wet_deposition")
+        self.assertEqual(wet.scheme, "ham")
+        self.assertEqual(wet._incloud_impaction, "ham")
+        self.assertEqual(wet._below_cloud_lookup, "ham")
+        for value in (params("jam_wet_deposition").incloud_scale,
+                      params("jam_wet_deposition").impact_scale,
+                      params("convective_tracer_transport").conv_scav_scale):
+            self.assertAlmostEqual(float(value), 1.5868195, places=6)
+        cloud = next(t for t in physics.terms
+                     if hasattr(t, "params")
+                     and hasattr(t.params.get_value(), "nic_cirrus"))
+        self.assertEqual(cloud.params.get_value().nic_cirrus, 2)
+        self.assertAlmostEqual(
+            float(cloud.params.get_value().ccraut), 19.8456116, places=5)
+        self.assertEqual(float(cloud.params.get_value().cdnc_min_fixed), 10.0)
+        conv = next(t for t in physics.terms
+                    if hasattr(t, "params")
+                    and hasattr(t.params.get_value(), "cprcon"))
+        self.assertAlmostEqual(float(conv.params.get_value().cprcon), 9e-4, places=9)
+        self.assertAlmostEqual(float(conv.params.get_value().entrpen), 2e-4, places=9)
 
 
 @pytest.mark.slow

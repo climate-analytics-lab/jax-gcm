@@ -10,6 +10,9 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics.thermodynamics import (
+    jsbach_surface_humidity_boundary, saturation_specific_humidity,
+)
 
 from .surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing,
@@ -22,7 +25,7 @@ from .turbulent_fluxes import (
 from .ocean import ocean_physics_step
 from .sea_ice import sea_ice_physics_step
 from .land import land_surface_physics_step
-from .albedo import CTFREEZ
+from .sea_ice_temperature import carried_ice_temperature
 
 
 def initialize_surface_state(
@@ -31,10 +34,11 @@ def initialize_surface_state(
     ocean_temp: jnp.ndarray,
     ice_temp: jnp.ndarray,
     soil_temp: jnp.ndarray,
-    params: SurfaceParameters | None = None
+    params: SurfaceParameters | None = None,
+    soil_moisture: jnp.ndarray | None = None,
 ) -> SurfaceState:
     """Initialize surface state from basic inputs.
-    
+
     Args:
         ncol: Number of columns
         surface_fractions: Surface type fractions [water, ice, land] (ncol, 3)
@@ -42,7 +46,14 @@ def initialize_surface_state(
         ice_temp: Ice temperature [K] (ncol, nice_layers)
         soil_temp: Soil temperature [K] (ncol, nsoil_layers)
         params: Surface parameters
-        
+        soil_moisture: Soil moisture [-] (ncol, nsoil_layers). ``None``
+            (the default, every pre-existing caller) fills a flat 0.3 —
+            a synthetic placeholder, since this module has no prognostic
+            soil-moisture state of its own. ``EchamSurface`` passes a
+            live-derived value so its published bulk-flux estimate reads
+            this step's actual land wetness rather than the placeholder
+            (jax-gcm#1118 Codex review).
+
     Returns:
         Initialized surface state
 
@@ -72,7 +83,8 @@ def initialize_surface_state(
     snow_depth = jnp.zeros(ncol)
     
     # Soil variables
-    soil_moisture = jnp.full((ncol, nsoil_layers), 0.3)  # 30% default moisture
+    if soil_moisture is None:
+        soil_moisture = jnp.full((ncol, nsoil_layers), 0.3)  # 30% default moisture
     vegetation_temp = soil_temp[:, 0]  # Same as surface
     
     # Default surface properties
@@ -135,15 +147,39 @@ def surface_physics_step(
     surface_state: SurfaceState,
     dt: float,
     params: SurfaceParameters | None = None,
+    vegetation_fraction: jnp.ndarray | None = None,
+    land_cair: jnp.ndarray | None = None,
+    land_csat: jnp.ndarray | None = None,
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics]:
     """Complete surface physics step for all surface types.
-    
+
     Args:
         atmospheric_state: Atmospheric forcing
         surface_state: Surface state
         dt: Time step [s]
         params: Surface parameters
-        
+        vegetation_fraction: Vegetated land fraction [-] (ncol,). ``None``
+            (the default, every pre-existing caller) fills a flat 0.5 — a
+            synthetic placeholder, since this module reads no vegetation
+            boundary condition of its own. ``EchamSurface`` passes the live
+            ``forcing.forest_fraction`` so its published bulk-flux estimate
+            reads this step's actual vegetated fraction rather than the
+            placeholder (jax-gcm#1118 Codex review).
+        land_cair: JSBACH land-tile humidity factor of the air [1] (ncol,).
+            ``None`` (the default) is a fully-saturated boundary;
+            ``EchamSurface`` passes the live, same-step ``SurfaceData.cair``
+            (jax-gcm#1140 review). Used here, not forwarded to
+            :func:`compute_surface_diagnostics` directly: this function
+            builds the per-tile surface-layer humidity ANCHOR from it (the
+            JSBACH boundary over land, Sonntag saturation over water/ice,
+            both at the surface pressure) and passes that array down —
+            :func:`compute_surface_diagnostics` no longer derives its own
+            copy of this quantity (jax-gcm#1151 review: three separate
+            defects were found in three separate re-derivations of it
+            before this consolidation).
+        land_csat: JSBACH land-tile humidity factor of the surface
+            saturation [1] (ncol,), same convention as ``land_cair``.
+
     Returns:
         Tuple of (surface_fluxes, tendencies, diagnostics)
 
@@ -217,7 +253,8 @@ def surface_physics_step(
     all_roughness.append(roughness_ice)
     
     # Land surface (isfc = 2)
-    vegetation_fraction = jnp.full(ncol, 0.5)  # 50% vegetation
+    if vegetation_fraction is None:
+        vegetation_fraction = jnp.full(ncol, 0.5)  # 50% vegetation (default)
     soil_depths = jnp.array([0.1, 0.3, 0.6, 1.0])  # Soil layer depths
     
     fluxes_land, tendencies_land, roughness_land = land_surface_physics_step(
@@ -247,13 +284,41 @@ def surface_physics_step(
     resistances = compute_surface_resistances(
         atmospheric_state, surface_state, ri_bulk, params
     )
-    
+
+    # The per-tile surface-layer humidity anchor ``compute_surface_diagnostics``
+    # needs for the Richardson number's surface humidity — the ONE
+    # definition of this boundary value
+    # (:func:`jsbach_surface_humidity_boundary`), the SAME one the live
+    # TTE-TKE surface exchange's own Richardson number calls
+    # (``surface_layer.py``'s ``qts``), built here rather than inside that
+    # function (jax-gcm#1151 review): ``cair=csat=1`` everywhere except the
+    # land tile collapses to plain Sonntag saturation, matching water/ice;
+    # the land tile gets the JSBACH boundary from ``land_cair``/``land_csat``.
+    # Evaluated at ``atmospheric_state.surface_pressure`` (the lowest
+    # interface pressure), NOT ``atmospheric_state.pressure`` (the lowest
+    # model LEVEL's) -- the two differ, and a #1151 review caught the
+    # pre-consolidation code using the wrong one here.
+    if land_cair is None:  # not a def default: jax arrays at import (#859)
+        land_cair = jnp.ones(ncol)
+    if land_csat is None:
+        land_csat = jnp.ones(ncol)
+    cair_tile = jnp.ones_like(surface_state.temperature).at[:, params.ilnd].set(
+        land_cair)
+    csat_tile = jnp.ones_like(surface_state.temperature).at[:, params.ilnd].set(
+        land_csat)
+    saturation_humidity_tile = saturation_specific_humidity(
+        surface_state.temperature, atmospheric_state.surface_pressure[:, None],
+        phase="auto")
+    surface_humidity_tile = jsbach_surface_humidity_boundary(
+        saturation_humidity_tile, atmospheric_state.humidity[:, None],
+        cair_tile, csat_tile)
+
     # Compute diagnostics
     diagnostics = compute_surface_diagnostics(
         atmospheric_state, surface_state, combined_fluxes, resistances,
-        params,
+        surface_humidity_tile, params,
     )
-    
+
     return combined_fluxes, combined_tendencies, diagnostics
 
 
@@ -366,7 +431,11 @@ from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: 
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation.radiation_types import RadiationData  # noqa: E402
 from jcm.physics.surface.echam.surface_types import (  # noqa: E402
+    BULK_OUTPUT_ATTRS,
+    DRY_HEAT_OUTPUT_ATTRS,
+    DIAG_OUTPUT_ATTRS,
     LAND_OUTPUT_ATTRS,
+    ICE_OUTPUT_ATTRS,
     AtmosphericForcing,
     SurfaceData,
     SurfaceParameters,
@@ -388,9 +457,8 @@ def correct_surface_longwave(radiation: RadiationData, t_old, t_new, pressure_ha
     surface upward flux (all-sky, and clear-sky where the scheme solved it: the
     surface emits the same in both) and the lowest-level heating, and written
     back into the radiation carry: the cached longwave then always describes
-    the current surface, so successive steps telescope exactly as the
-    shortwave zenith rescale does, and a radiation solve starts from the
-    temperature the last correction left.
+    the current surface, so successive steps telescope and a radiation solve
+    starts from the temperature the last correction left.
 
     Returns:
         ``(radiation, heating)``: the corrected carry and the lowest-level
@@ -437,8 +505,22 @@ class EchamSurface(PhysicsTerm):
     ``"radiation"``, sea-ice / land surface temp from forcing and ``fmask``
     from terrain, and runs :func:`surface_physics_step` for the
     albedo/radiative/tile bookkeeping; the explicit bulk fluxes that step
-    computes remain available as reference/tile diagnostics but are no
-    longer the delivery path.
+    computes are no longer the delivery path, but (jax-gcm#1118) are
+    published as the grid-mean reference diagnostics
+    ``surface.bulk_sensible_heat_flux`` / ``bulk_latent_heat_flux`` /
+    ``bulk_evaporation`` / ``bulk_momentum_flux_u/v`` — an always-on check
+    of how closely an explicit one-shot bulk-aerodynamic estimate tracks the
+    implicit solution's delivered flux, rather than the computed-and-
+    discarded value it used to be. The SAME step's ``SurfaceDiagnostics``
+    bundle (jax-gcm#1140) is likewise published as ``surface.temperature_2m``
+    / ``humidity_2m`` / ``dewpoint_2m`` / ``richardson_number`` /
+    ``energy_balance_residual`` and the ``_tile`` pair — see
+    :data:`~jcm.physics.surface.echam.surface_types.DIAG_OUTPUT_ATTRS` for
+    what each means and :data:`~jcm.physics.surface.echam.surface_types.
+    SurfaceData`'s field comments for the three fields of that bundle
+    deliberately left unpublished (a second friction velocity, a hardcoded
+    "100 m" PBL height, and a net-radiation pair that duplicates fields
+    already public).
 
     After the vdiff's land energy balance it publishes the new grid surface
     temperature and re-emits the cached surface longwave at it
@@ -451,11 +533,15 @@ class EchamSurface(PhysicsTerm):
     name: ClassVar[str] = "echam_surface"
     category: ClassVar[str] = "surface"
     requires: ClassVar[tuple[str, ...]] = (
-        "pressure_full", "pressure_half", "height_full",
+        "pressure_full", "pressure_half",
         "vertical_diffusion", "radiation", "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("surface", "radiation")
-    output_attrs: ClassVar = LAND_OUTPUT_ATTRS
+    optional_requires: ClassVar[tuple[str, ...]] = ("clouds",)
+    output_attrs: ClassVar = {
+        **LAND_OUTPUT_ATTRS, **ICE_OUTPUT_ATTRS, **BULK_OUTPUT_ATTRS, **DRY_HEAT_OUTPUT_ATTRS,
+        **DIAG_OUTPUT_ATTRS,
+    }
 
     def __init__(self, params: SurfaceParameters | None = None):
         """Hold the scheme-native :class:`SurfaceParameters`."""
@@ -475,12 +561,39 @@ class EchamSurface(PhysicsTerm):
         terrain: TerrainData,
     ) -> tuple[PhysicsTendency, dict]:
         """Compute lowest-level surface-flux tendencies and surface diagnostics."""
+        # Lazy: ``echam_boundary_conditions`` imports ``jcm.physics.surface.
+        # echam`` (for the albedo schemes), so a module-level import here
+        # would cycle back into this package's own ``__init__`` mid-import.
+        # Deferred to call time, this module is always fully loaded by then.
+        from jcm.physics.forcing.echam_boundary_conditions import (
+            tile_weighted_radiative_temperature,
+        )
+        # Same reason, the other direction: ``vertical_diffusion_types.py``
+        # (imported by ``tte_tke``'s own ``__init__``) reads
+        # ``jcm.physics.surface.echam.ocean`` at module scope, so a
+        # module-level import of ``tte_tke`` here would cycle into THIS
+        # package's own ``__init__`` mid-import (this module is one of its
+        # steps). Deferred the same way.
+        from jcm.physics.vertical_diffusion.tte_tke.closure import (
+            lowest_level_height_above_surface,
+        )
+
         nlev, ncols = state.temperature.shape
         dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
 
         pressure_full = diagnostics["pressure_full"]
-        height_full = diagnostics["height_full"]
+        pressure_half = diagnostics["pressure_half"]
+
+        # Read EARLY: ``TteTkeVerticalDiffusion`` runs before this term
+        # (``requires`` includes ``"vertical_diffusion"``) and has already
+        # written THIS step's land state onto ``diagnostics["surface"]`` —
+        # the live skin temperature and JSBACH humidity factors the
+        # implicit solve itself used. Needed below, before the bulk-flux
+        # ``surface_state``/``surface_physics_step`` inputs are built.
+        prev_surface = diagnostics.get(
+            "surface", SurfaceData.zeros((ncols,), nlev),
+        )
 
         nsfc_type = 3
         land_fraction = terrain.fmask.reshape((ncols,))
@@ -494,29 +607,67 @@ class EchamSurface(PhysicsTerm):
         surface_fractions = surface_fractions.at[:, 1].set(sea_ice_fraction)
         surface_fractions = surface_fractions.at[:, 2].set(land_fraction)
 
-        # Per-tile surface temperatures: SST for ocean, min(SST, ctfreez)
-        # for ice (saline freezing point), stl_am for land (this bookkeeping
-        # step is diagnostic-only; the land's prognostic skin temperature is
-        # the vdiff's, published below). Read straight
-        # from forcing rather than the upstream-blended
-        # ``_surface.surface_temperature``, which is snapped to one-or-the-
-        # other via ``where(fmask>0.5)`` in EchamBoundaryConditions and would
-        # feed the wrong T into the minority tile (e.g. the 40 % ocean
-        # fraction of an fmask=0.6 cell would otherwise use stl_am instead
-        # of sst).
+        # Per-tile surface temperatures: SST for ocean, the prognostic ice
+        # surface temperature for ice. Read straight from forcing rather
+        # than ``_surface.surface_temperature`` — that field is the
+        # tile-WEIGHTED T**4 mean EchamBoundaryConditions forms for radiation
+        # (:func:`~jcm.physics.forcing.echam_boundary_conditions.tile_weighted_radiative_temperature`,
+        # #988), a single blended grid value that is never the right
+        # temperature for any one tile on its own. The ocean is not prognostic
+        # (the SST forcing IS its live state); the land skin and the sea-ice
+        # surface temperature are, and are read back from the carry below.
         ocean_temp = forcing.sea_surface_temperature.reshape(ncols)
-        land_temp = forcing.stl_am.reshape(ncols)
-        ice_surface_temp = jnp.where(
-            sea_ice_fraction > 0.0,
-            jnp.minimum(ocean_temp, CTFREEZ),
-            ocean_temp,
-        )
+        # Live land skin temperature, not a synthetic ``forcing.stl_am``
+        # fallback: vdiff (same-step fresh — this term's ``requires``
+        # includes ``"vertical_diffusion"``) has ALREADY written THIS
+        # step's ``land_surface_temperature`` here — ``forcing.stl_am`` in
+        # prescribed mode, the skin energy balance's just-solved value in
+        # prognostic mode (``TteTkeVerticalDiffusion.__call__``'s
+        # ``land_temp_col``) — so reading it back is correct in BOTH modes
+        # without this term needing to know which is active. Before this
+        # fix, the published ``surface.bulk_*`` land contribution read the
+        # forcing value unconditionally, which silently diverges from the
+        # implicit solve's own land state once the skin temperature evolves
+        # away from ``stl_am`` (jax-gcm#1118 Codex review).
+        land_temp = prev_surface.land_surface_temperature.reshape(ncols)
+        ice_surface_temp = carried_ice_temperature(
+            prev_surface.ice_surface_temperature.reshape(ncols), ocean_temp,
+            sea_ice_fraction)
         ice_temp = jnp.repeat(ice_surface_temp[:, jnp.newaxis], 2, axis=1)
         soil_temp = jnp.repeat(land_temp[:, jnp.newaxis], 4, axis=1)
 
+        # Live land wetness/vegetation for the bulk-flux estimate below
+        # (same Codex finding). ``land_surface_physics_step`` has no
+        # cair/csat concept of its own — its evaporation efficiency is a
+        # single ``soil_beta = min(soil_moisture[:, 0]/0.75, 1)`` — so the
+        # closest faithful proxy within that existing formula is to drive
+        # it from the SAME live JSBACH ``csat`` the implicit solve published
+        # this step (``prev_surface.csat``) rather than the hardcoded 0.3
+        # ``initialize_surface_state`` otherwise defaults to. This does not
+        # reproduce JSBACH's ``cair`` term (the atmospheric-humidity-side
+        # reduction) — ``land_surface_physics_step``'s formula has no slot
+        # for it — so the land bulk estimate remains an approximation of
+        # the delivered flux even with this fix, just one driven by this
+        # step's actual wetness rather than an unrelated constant. Layers
+        # 1-3 keep the 0.3 default: only ``soil_moisture[:, 0]`` is read
+        # (``land.py::land_surface_physics_step``'s ``soil_beta``).
+        csat_live = jnp.clip(prev_surface.csat.reshape(ncols), 0.0, 1.0)
+        soil_moisture_land = jnp.full((ncols, 4), 0.3).at[:, 0].set(
+            0.75 * csat_live)
+        # The matching JSBACH ``cair`` factor (the atmospheric-humidity-side
+        # reduction), threaded into the bulk Richardson diagnostic with
+        # the same boundary humidity the live implicit exchange uses.
+        cair_live = jnp.clip(prev_surface.cair.reshape(ncols), 0.0, 1.0)
+        # Same ``veg_col`` derivation ``TteTkeVerticalDiffusion`` uses for
+        # JSBACH (vegetated fraction = the forest fraction).
+        vegetation_fraction_live = (
+            jnp.zeros(ncols) if forcing.forest_fraction is None
+            else jnp.clip(forcing.forest_fraction.reshape(ncols), 0.0, 1.0)
+        )
+
         surface_state = initialize_surface_state(
             ncols, surface_fractions, ocean_temp, ice_temp, soil_temp,
-            params,
+            params, soil_moisture=soil_moisture_land,
         )
 
         # Lowest-model-level atmospheric inputs.
@@ -526,11 +677,29 @@ class EchamSurface(PhysicsTerm):
         atm_v = state.v_wind[-1, :]
         atm_p = pressure_full[-1, :]
 
-        # Reference height ≥ 10 m (kept for parity with the legacy code; the
-        # surface scheme does not actually consume it through this path).
-        _ref_height = jnp.maximum(
-            height_full[-1, :] - height_full[-1, :].min(), 10.0,
-        )
+        # Height of the lowest model level ABOVE THE LOCAL SURFACE [m]
+        # (ncols,): ECHAM's own ``pgeom1(klev)/g`` (``closure.
+        # lowest_level_height_above_surface``, jax-gcm#1171), the lowest
+        # level's hydrostatic height above the surface from the lowest
+        # layer's own ``alpha_K·R_d·T_v,K`` (``geopot.f90``/``auxhyb.f90``).
+        # Before #1171 this read ``height_full[-1,:] - height_half[-1,:]``
+        # (this module's level axis is first, index -1 = lowest/surface):
+        # half the gap between the two lowest full levels, since
+        # ``height_half[-1]`` is an extrapolated bottom half-level for the
+        # OUTPUT ``height_half`` field's own layer-thickness bookkeeping
+        # (``moist_air_state.py``), not a surface-layer reference height.
+        # No condensate-loading term on ``atm_temp``'s virtual temperature
+        # here (``PhysicsState`` carries no qc/qi at this boundary): this
+        # diagnostic-only bulk-flux pathway (``AtmosphericForcing`` feeds
+        # only ``surface_physics_step``'s reference estimate, never the live
+        # column) already omits condensate loading everywhere else it forms
+        # a virtual temperature, so this matches its existing fidelity
+        # rather than adding a new one just for this one term.
+        p_up = pressure_half[-2, :]
+        p_lo = pressure_half[-1, :]
+        tv_lowest = atm_temp * (1.0 + c.vtmpc1 * atm_qv)
+        ref_height = jnp.maximum(
+            lowest_level_height_above_surface(tv_lowest, p_up, p_lo), 1.0)
 
         vdiff = diagnostics["vertical_diffusion"]
         exchange_coeff_heat = vdiff.surface_exchange_heat.reshape(
@@ -558,14 +727,51 @@ class EchamSurface(PhysicsTerm):
             exchange_coeff_heat=exchange_coeff_heat,
             exchange_coeff_moisture=exchange_coeff_moisture,
             exchange_coeff_momentum=exchange_coeff_momentum,
+            reference_height=ref_height,
+            heat_2m_reduction=vdiff.heat_2m_reduction.reshape(ncols, nsfc_type),
+            condensate=(diagnostics["clouds"].qc[-1] + diagnostics["clouds"].qi[-1]
+                        if "clouds" in diagnostics else jnp.zeros(ncols)),
         )
 
-        # Albedo/radiative/tile bookkeeping. The explicit bulk fluxes this
-        # step computes are reference/tile diagnostics only — the fluxes the
-        # column actually receives are delivered by the vdiff implicit solve
-        # and read back below.
-        _fluxes, _tendencies, _surface_diag = surface_physics_step(
+        # Albedo/radiative/tile bookkeeping, PLUS the explicit ECHAM bulk-
+        # aerodynamic flux estimate (reference diagnostic only — the fluxes
+        # the column actually receives are delivered by the vdiff implicit
+        # solve and read back below; ``bulk_fluxes`` is published alongside
+        # them as ``surface.bulk_*``, jax-gcm#1118, not fed back into the
+        # column, which would double-count the delivered flux). This
+        # includes the ocean tile's own Charnock roughness
+        # (``ocean.py::compute_ocean_roughness``), computed here from this
+        # step's bulk estimate of u* for the reference flux alone — a
+        # SEPARATE evaluation from the live water-tile roughness
+        # (``TteTkeVerticalDiffusion``, ``VDiffParameters.cchar``), which
+        # uses the previous step's u* from the implicit solve itself (see
+        # that term's docstring); the two are not required to agree, since
+        # one is diagnostic and the other is the live state.
+        # ``_tendencies`` is discarded deliberately, not silently, though
+        # for two different reasons depending on the tile: the ocean/ice
+        # fields are PROVABLY zero by construction (``ocean_temp`` and
+        # sea-ice temperature are prescribed boundary conditions here, not
+        # prognostic — see ``ocean.py``'s module docstring), while the land
+        # fields (``soil_temp_tendency``/``soil_moisture_tendency``,
+        # ``land.py::land_surface_physics_step``) are genuinely NONZERO —
+        # that function integrates its own synthetic soil-column bucket —
+        # but have no consumer anywhere in jcm's actual state (the live
+        # land prognostic is ``TteTkeVerticalDiffusion``'s own skin-energy
+        # balance, entirely separate from this module's soil column), so
+        # discarding them is correct either way, just not "nothing to
+        # discard" for land as it is for ocean/ice. ``surface_diag`` (2 m
+        # T/q/dewpoint, bulk Richardson number, the bulk estimate's own
+        # energy-balance residual) is now published too (jax-gcm#1140,
+        # ``surface.temperature_2m`` etc. below) — the 2 m dew point's
+        # placeholder formula is replaced with the exact inverse of jcm's
+        # Tetens saturation law (``turbulent_fluxes.py``), and three of its
+        # fields stay unpublished because a better (or the only real)
+        # version already exists elsewhere; see the ``SurfaceData`` field
+        # comments for exactly which and why.
+        bulk_fluxes, _tendencies, surface_diag = surface_physics_step(
             atm_forcing, surface_state, dt, params,
+            vegetation_fraction=vegetation_fraction_live,
+            land_cair=cair_live, land_csat=csat_live,
         )
 
         # No turbulent-flux tendencies here: the vdiff term's implicit solve
@@ -579,9 +785,6 @@ class EchamSurface(PhysicsTerm):
         ch = atm_forcing.exchange_coeff_heat[:, 0]
         cm = atm_forcing.exchange_coeff_momentum[:, 0]
 
-        prev_surface = diagnostics.get(
-            "surface", SurfaceData.zeros((ncols,), nlev),
-        )
         # Publish the DELIVERED fluxes diagnosed from the vdiff implicit
         # solution. By the ECHAM ``pev_vdiff`` identity these equal the
         # column-integrated vdiff tendencies exactly, so ``evaporation ==
@@ -589,12 +792,24 @@ class EchamSurface(PhysicsTerm):
         # imp_moist factor) no longer exists. The field is kept for API
         # stability (the Tiedtke moisture-budget closure reads it).
         evaporation = vdiff.surface_evaporation.reshape(ncols)
-        # The grid surface temperature after the land balance, snapped by
-        # fmask as EchamBoundaryConditions forms it for the radiation.
+        # The grid surface temperature after the land balance, weighted the
+        # same way EchamBoundaryConditions forms it for the radiation
+        # (#988): the re-emission below must mirror the temperature the
+        # cached longwave was SOLVED with, or the correction and the cached
+        # flux describe two different surfaces. ``t_grid_old`` is last
+        # step's published (already tile-weighted) value; ``t_grid_new``
+        # re-applies the identical weights to this step's post-balance
+        # tile temperatures: the land tile's NEW prognostic skin
+        # (``prev_surface.land_surface_temperature``, just updated by the
+        # vdiff's implicit solve), the ice tile's NEW temperature (advanced
+        # by the vdiff term's ``s_sicetemp`` step; ECHAM's ``pztsnew`` is
+        # formed after it too) and the prescribed SST.
         t_grid_old = prev_surface.surface_temperature.reshape(ncols)
-        t_grid_new = jnp.where(land_fraction > 0.5,
-                               prev_surface.land_surface_temperature.reshape(ncols),
-                               ocean_temp)
+        t_grid_new = tile_weighted_radiative_temperature(
+            land_fraction, sea_ice_fraction,
+            prev_surface.land_surface_temperature.reshape(ncols),
+            ice_surface_temp, ocean_temp,
+        )
         out = {}
         if isinstance(radiation, RadiationData):
             radiation_out, heating = correct_surface_longwave(
@@ -622,6 +837,7 @@ class EchamSurface(PhysicsTerm):
             surface_temperature=t_grid_new,
             skin_temperature=t_grid_new,
             sensible_heat_flux=vdiff.surface_sensible_heat.reshape(ncols),
+            sensible_heat_flux_dry=vdiff.surface_sensible_heat_dry.reshape(ncols),
             latent_heat_flux=vdiff.surface_latent_heat.reshape(ncols),
             momentum_flux_u=vdiff.surface_stress_u.reshape(ncols),
             momentum_flux_v=vdiff.surface_stress_v.reshape(ncols),
@@ -629,6 +845,18 @@ class EchamSurface(PhysicsTerm):
             effective_evaporation=evaporation,
             ch=ch,
             cm=cm,
+            bulk_sensible_heat_flux=bulk_fluxes.sensible_heat_mean,
+            bulk_latent_heat_flux=bulk_fluxes.latent_heat_mean,
+            bulk_evaporation=bulk_fluxes.evaporation_mean,
+            bulk_momentum_flux_u=bulk_fluxes.momentum_u_mean,
+            bulk_momentum_flux_v=bulk_fluxes.momentum_v_mean,
+            temperature_2m=surface_diag.temperature_2m,
+            humidity_2m=surface_diag.humidity_2m,
+            dewpoint_2m=surface_diag.dewpoint_2m,
+            richardson_number=surface_diag.richardson_number,
+            energy_balance_residual=surface_diag.energy_balance_residual,
+            temperature_2m_tile=surface_diag.temperature_2m_tile,
+            humidity_2m_tile=surface_diag.humidity_2m_tile,
         )
 
         return tendency, {**diagnostics, **out, "surface": surface_out}

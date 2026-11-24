@@ -9,12 +9,14 @@ bit-identical at width 0 and at a positive width, and a gradient that is
 exactly zero (or unbounded) under the reference derivative is finite and
 nonzero with a positive width -- the humidity trigger (with its column
 moisture budget), the vertical-diffusion onset, the condensation cap, the
-stratiform clip and the drizzle corner of the cloud cover, and the dry-land
-evaporation hinge. The convective precipitation onset is a single
-``surrogate_pos`` and is covered by the primitive tests and, through the
-trigger's budget test, by its tangent in a switching-on plume. If a value
-test regresses the forward model has been changed; if a gradient test, the
-switch has been re-hardened.
+stratiform clip and the drizzle corner of the cloud cover, the dry-land
+evaporation hinge, the bottom-level condensation threshold selection, the
+``+/-dtheta`` clip of the stability correction, and the ``psa > psmin``
+convection switch (with its column moisture budget). The convective
+precipitation onset is formed per unit cloud-base mass flux, so a
+switching-on plume's tangent rains at the plume's own yield; its test is
+with the pressure switch's. If a value test regresses the forward model has
+been changed; if a gradient test, the switch has been re-hardened.
 """
 import dataclasses
 
@@ -403,6 +405,244 @@ class TestVdiffSeFluxOneSided:
         assert float(tend.temperature[-1, 0, 0]) <= 0.0
 
 
+class TestVdiffPblMoistureFluxSurrogate:
+    """The moisture flux across the lowest interface, one surrogate (#1167).
+
+    SPEEDY splits it on ``dmse >= 0``: shallow convection ``a_shc * drh``
+    where ``drh >= 0``, else moisture diffusion ``a_vdi * drh`` where
+    ``drh > drh0``. Both tests on ``dmse`` are value jumps, by the
+    difference between the two branches' fluxes.
+    """
+
+    # a_shc = fshcq * qsat[kx] and a_vdi = fvdiq2 * qsat[nl1] at the default
+    # relaxation times on SPEEDY's L8 grid, qsat ~ 15 g/kg; drh0 =
+    # rhgrad * (fsg[kx] - fsg[nl1]) at the default rhgrad.
+    A_SHC, A_VDI, DRH0 = 6.9e-5, 2.2e-5, 0.0575
+    WIDTHS = (200.0, 0.02)
+
+    @classmethod
+    def _operands(cls, dmse, drh):
+        dmse, drh = jnp.broadcast_arrays(jnp.asarray(dmse, jnp.float32),
+                                         jnp.asarray(drh, jnp.float32))
+        return (dmse, drh, jnp.full_like(dmse, cls.A_SHC), jnp.full_like(dmse, cls.A_VDI),
+                jnp.full_like(dmse, cls.DRH0))
+
+    @staticmethod
+    def _speedy(dmse, drh, a_shc, a_vdi, drh0):
+        """speedy.f90 vertical_diffusion.f90, step 2, with jcm's dmse > 0 at the exact tie."""
+        out = np.zeros_like(dmse)
+        for i in np.ndindex(dmse.shape):
+            if dmse[i] > 0.0:
+                if drh[i] >= 0.0:
+                    out[i] = a_shc[i] * drh[i]
+            elif drh[i] > drh0[i]:
+                out[i] = a_vdi[i] * drh[i]
+        return out
+
+    def test_value_is_speedys_branch_selection_at_any_width(self):
+        from jcm.physics.vertical_diffusion.speedy_vdiff import _surrogate_pbl_moisture_flux
+
+        d0 = self.DRH0
+        dmse, drh = np.meshgrid(
+            [-2000.0, -200.0, -1e-3, 0.0, 1e-3, 200.0, 2000.0],
+            [-0.2, -0.01, 0.0, 0.01, d0 - 1e-3, d0, d0 + 1e-3, 0.2], indexing="ij")
+        ops = self._operands(dmse, drh)
+        reference = self._speedy(*(np.asarray(x) for x in ops))
+        for widths in ((0.0, 0.0), self.WIDTHS, (2000.0, 0.1)):
+            got = _surrogate_pbl_moisture_flux(*ops, tuple(jnp.asarray(w) for w in widths))
+            np.testing.assert_array_equal(np.asarray(got), reference, err_msg=str(widths))
+
+    def test_block_is_a_surrogate(self):
+        from jcm.physics.vertical_diffusion.speedy_vdiff import (
+            _pbl_moisture_flux, _smooth_pbl_moisture_flux, _surrogate_pbl_moisture_flux,
+        )
+        from jcm.testing import check_gradients
+
+        widths = tuple(jnp.asarray(w) for w in self.WIDTHS)
+        ops = self._operands([-300.0, -50.0, 40.0, 500.0], [-0.08, 0.03, 0.07, 0.12])
+        check_surrogate_gradient(
+            lambda *xs: _surrogate_pbl_moisture_flux(*xs, widths),
+            _pbl_moisture_flux,
+            lambda *xs: _smooth_pbl_moisture_flux(*xs, widths),
+            ops,
+        )
+        # The surrogate is smooth: its own derivative converges to a difference.
+        check_gradients(lambda *xs: _smooth_pbl_moisture_flux(*xs, widths), ops, rtol=1e-2)
+
+    def test_surrogate_is_the_value_away_from_the_switches(self):
+        """Rule 4: the surrogate departs from the value only near a switch."""
+        from jcm.physics.vertical_diffusion.speedy_vdiff import (
+            _pbl_moisture_flux, _smooth_pbl_moisture_flux,
+        )
+
+        w_mse, w_rh = self.WIDTHS
+        # Ten widths from both dmse = 0 and the drh onsets; the shallow
+        # branch's softplus overshoots max(drh, 0) by at most w_rh * log 2.
+        dmse, drh = np.meshgrid([-10 * w_mse, 10 * w_mse],
+                                [-10 * w_rh, 10 * w_rh, self.DRH0 + 10 * w_rh], indexing="ij")
+        ops = self._operands(dmse, drh)
+        exact = _pbl_moisture_flux(*ops)
+        smooth = _smooth_pbl_moisture_flux(*ops, self.WIDTHS)
+        np.testing.assert_allclose(np.asarray(smooth), np.asarray(exact),
+                                   atol=float(self.A_SHC * w_rh * np.exp(-10.0)) + 1e-12,
+                                   rtol=1e-3)
+
+    def test_dmse_derivative_is_the_jump_the_value_makes(self):
+        """The crossfade's slope is sigmoid'(dmse/w)/w times the actual jump.
+
+        Where drh < 0 neither branch carries a flux, so crossing dmse = 0
+        changes nothing and the derivative must not see a flux there. A
+        derivative of the shallow branch's ``a_shc * drh`` regardless of its
+        own ``drh >= 0`` test (a reversed flux) is negative there: a positive
+        feedback on the bottom humidity, which grew a 14-day tangent 17-220x
+        with the forecast unchanged (#1167).
+        """
+        from jcm.physics.vertical_diffusion.speedy_vdiff import _surrogate_pbl_moisture_flux
+
+        w_mse = self.WIDTHS[0]
+
+        def slope(dmse, drh, w_rh):
+            widths = (jnp.asarray(w_mse), jnp.asarray(w_rh))
+            return float(jax.grad(
+                lambda d: _surrogate_pbl_moisture_flux(*self._operands(d, drh), widths).sum()
+            )(jnp.asarray(dmse, jnp.float32)))
+
+        # At the switch the sigmoid's slope is 1/(4w).
+        both, shallow_only = 0.1, 0.03
+        np.testing.assert_allclose(slope(0.0, both, 0.0),
+                                   (self.A_SHC - self.A_VDI) * both / (4 * w_mse), rtol=1e-5)
+        np.testing.assert_allclose(slope(0.0, shallow_only, 0.0),
+                                   self.A_SHC * shallow_only / (4 * w_mse), rtol=1e-5)
+        for dmse in (-50.0, 0.0, 50.0):
+            assert slope(dmse, -0.1, 0.0) == 0.0
+            # With the drh tests smoothed too, only their tails remain
+            # (drh = -5 * rh_gate_smoothing here), and never with a reversed
+            # flux's sign.
+            tail = slope(dmse, -0.1, self.WIDTHS[1])
+            assert 0.0 <= tail < 1e-2 * slope(dmse, shallow_only, self.WIDTHS[1])
+
+    def test_zero_width_is_the_reference_derivative(self):
+        from jcm.physics.vertical_diffusion.speedy_vdiff import (
+            _pbl_moisture_flux, _surrogate_pbl_moisture_flux,
+        )
+
+        ops = self._operands([-300.0, -50.0, 40.0, 500.0], [-0.08, 0.03, 0.07, 0.12])
+        tangent = tuple(jnp.linspace(0.5, 1.5, 4, dtype=jnp.float32) * s
+                        for s in (100.0, 0.01, 1e-5, 1e-5, 0.01))
+        zero = (jnp.asarray(0.0), jnp.asarray(0.0))
+        _, got = jax.jvp(lambda *xs: _surrogate_pbl_moisture_flux(*xs, zero), ops, tangent)
+        _, want = jax.jvp(_pbl_moisture_flux, ops, tangent)
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+        # ... and that is SPEEDY's own branch selection differentiated, written
+        # independently of the scheme's helpers (no tie among these points).
+        def speedy_where(dmse, drh, a_shc, a_vdi, drh0):
+            return jnp.where(dmse > 0.0, jnp.where(drh >= 0.0, a_shc * drh, 0.0),
+                             jnp.where(drh > drh0, a_vdi * drh, 0.0))
+
+        _, independent = jax.jvp(speedy_where, ops, tangent)
+        np.testing.assert_allclose(np.asarray(got), np.asarray(independent), rtol=1e-6)
+
+
+class TestVdiffTangentStaysBounded:
+    """A day of vertical-diffusion steps: the width-on tangent stays bounded (#1167).
+
+    Forward Euler at the model's 30-minute step on a single column, the
+    humidity and the static energy recomputed from the state each step. In
+    the first column the bottom pair sits 50 J/kg below the shallow-
+    convection switch with drh < 0, so neither branch carries a flux and the
+    reference tangent is constant; a derivative of a flux that is not there
+    would multiply it every step. In the second, both branches are on and
+    the column is attracted to the switch, where the derivative of the true
+    jump damps the bottom humidity's tangent.
+    """
+
+    DT = 1800.0
+    STEPS = 48
+
+    @staticmethod
+    def _qsat(temperature, fsg):
+        """SPEEDY's saturation humidity on a (kx, 1, 1) column, as the humidity term forms it."""
+        from jcm.physics.clouds.speedy_humidity import get_qsat
+
+        return jax.vmap(get_qsat, in_axes=(0, None, 0))(temperature, jnp.ones((1, 1)), fsg)
+
+    def _column(self, dmse, drh):
+        """Build a tropical column whose bottom pair has the given dmse [J/kg] and drh."""
+        import jcm.constants as c
+        from jcm.physics.speedy.physical_constants import alhc
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords
+
+        kx = 8
+        coords = SpeedyCoords.single_column_coords(num_levels=kx)
+        fsg = coords.fsg
+        temperature = jnp.array(
+            [205.0, 220.0, 235.0, 252.0, 266.0, 279.0, 289.0, 296.0])[:, None, None]
+        # The profile's hydrostatic geopotential (zero at the bottom level), held fixed.
+        tbar = 0.5 * (temperature[1:] + temperature[:-1])
+        dphi = c.rd * tbar * jnp.log(fsg[1:] / fsg[:-1])[:, None, None]
+        phi = jnp.concatenate([jnp.cumsum(dphi[::-1], axis=0)[::-1], jnp.zeros((1, 1, 1))])
+        qsat = self._qsat(temperature, fsg)
+        se = c.cpd * temperature + phi
+        q_bottom = qsat[-2] + (dmse - (se[-1] - se[-2])) / alhc
+        q = (0.5 * qsat).at[-1].set(q_bottom)
+        q = q.at[-2].set((q_bottom / qsat[-1] - drh) * qsat[-2])
+        return coords, temperature, q, phi
+
+    def _tangent_norm(self, dmse, drh, w_mse):
+        """|tangent| of (q, 0.1 T) after STEPS steps from a bottom-pair perturbation."""
+        import dataclasses as dc
+
+        import jcm.constants as c
+        from jcm.forcing import ForcingData
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.physics_data import ConvectionData, HumidityData, PhysicsData
+        from jcm.physics.vertical_diffusion.speedy_vdiff import get_vertical_diffusion_tend
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+
+        coords, temperature, q, phi = self._column(dmse, drh)
+        kx = temperature.shape[0]
+        p = Parameters.default()
+        p = dc.replace(p, vertical_diffusion=dc.replace(
+            p.vertical_diffusion, mse_gate_smoothing=jnp.asarray(w_mse)))
+        forcing, terrain = ForcingData.ones((1, 1)), TerrainData.single_column()
+
+        def step(carry, _):
+            t, qa = carry
+            qsat = self._qsat(t, coords.fsg)
+            data = PhysicsData.zeros(
+                (1, 1), kx, speedy_coords=coords,
+                humidity=HumidityData.zeros((1, 1), kx, rh=qa / qsat, qsat=qsat),
+                convection=ConvectionData.zeros(
+                    (1, 1), kx, iptop=jnp.full((1, 1), kx + 1, dtype=int),
+                    se=c.cpd * t + phi))
+            state = PhysicsState.zeros((kx, 1, 1), temperature=t,
+                                       specific_humidity=qa, geopotential=phi)
+            tend, _ = get_vertical_diffusion_tend(state, data, p, forcing, terrain)
+            return (t + self.DT * tend.temperature,
+                    qa + self.DT * tend.specific_humidity), None
+
+        def run(t0, q0):
+            return jax.lax.scan(step, (t0, q0), None, length=self.STEPS)[0]
+
+        # Perturb the bottom pair, the levels dmse and drh are made of.
+        dt0 = jnp.zeros_like(temperature).at[-2:].set(1.0)
+        dq0 = jnp.zeros_like(q).at[-2:].set(0.1)
+        _, (dt1, dq1) = jax.jvp(run, (temperature, q), (dt0, dq0))
+        return float(jnp.sqrt(jnp.sum(dq1 ** 2) + jnp.sum((0.1 * dt1) ** 2)))
+
+    def test_lingering_dry_column_tangent_is_not_amplified(self):
+        reference = self._tangent_norm(-50.0, -0.1, 0.0)
+        for w_mse in (200.0, 2000.0):
+            assert self._tangent_norm(-50.0, -0.1, w_mse) < 2.0 * reference, w_mse
+
+    def test_attracted_column_tangent_stays_bounded(self):
+        reference = self._tangent_norm(50.0, 0.1, 0.0)
+        for w_mse in (200.0, 2000.0):
+            assert self._tangent_norm(50.0, 0.1, w_mse) < 2.0 * reference, w_mse
+
+
 class TestLscCapSmoothing:
     def _heating(self, cap_smoothing, rhlsc):
         from jcm.forcing import ForcingData
@@ -635,3 +875,328 @@ class TestSurfaceEvapSmoothing:
 
         assert float(jax.grad(total_evap)(jnp.array(0.7), 0.0)) == 0.0
         assert float(jax.grad(total_evap)(jnp.array(0.7), 0.1)) > 0.0
+
+
+class TestLscBoundaryThresholdSurrogate:
+    """``max(rhref[-1], rhblsc)``: the bottom level's threshold selection."""
+
+    def _bottom_drying(self, bl_threshold_smoothing, rhlsc, rhblsc):
+        """Bottom-level drying tendency of a saturated column."""
+        from jcm.forcing import ForcingData
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.physics_data import (
+            ConvectionData, HumidityData, PhysicsData,
+        )
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords
+        from jcm.physics_interface import PhysicsState
+        from jcm.physics.clouds.speedy_condensation import (
+            get_large_scale_condensation_tendencies,
+        )
+        from jcm.terrain import TerrainData
+
+        kx, ix, il = 8, 1, 1
+        coords = SpeedyCoords.single_column_coords(num_levels=kx)
+        parameters = Parameters.default()
+        parameters = dataclasses.replace(
+            parameters,
+            condensation=dataclasses.replace(
+                parameters.condensation,
+                bl_threshold_smoothing=jnp.array(bl_threshold_smoothing),
+                rhlsc=rhlsc, rhblsc=rhblsc,
+            ),
+        )
+        qsat = jnp.full((kx, ix, il), 10.0)
+        qa = qsat  # saturated: the bottom level condenses at either threshold
+        humidity = HumidityData.zeros((ix, il), kx, qsat=qsat)
+        convection = ConvectionData.zeros(
+            (ix, il), kx, iptop=jnp.full((ix, il), kx + 1, dtype=int)
+        )
+        physics_data = PhysicsData.zeros(
+            (ix, il), kx, humidity=humidity, convection=convection,
+            speedy_coords=coords,
+        )
+        state = PhysicsState.zeros((kx, ix, il), specific_humidity=qa)
+        state = state.copy(normalized_surface_pressure=jnp.ones((ix, il)))
+        tend, _ = get_large_scale_condensation_tendencies(
+            state, physics_data, parameters, ForcingData.ones((ix, il)),
+            TerrainData.single_column(),
+        )
+        return tend.specific_humidity[-1, 0, 0]
+
+    # On the 8-level column the bottom layer sits at sigma 0.95, so the
+    # profile's own bottom-level threshold is rhlsc - 0.1 * (1 - 0.95^2) =
+    # rhlsc - 0.00975: rhblsc = 0.85 loses to rhlsc = 0.9, rhblsc = 0.95 wins.
+    LOSES = (jnp.array(0.9), jnp.array(0.85))
+    WINS = (jnp.array(0.9), jnp.array(0.95))
+
+    def test_value_is_the_hard_selection_at_any_width(self):
+        rtlsc = 1.0 / (4.0 * 3600.0)
+        for (rhlsc, rhblsc), threshold in ((self.LOSES, 0.9 - 0.00975),
+                                           (self.WINS, 0.95)):
+            hard = float(self._bottom_drying(0.0, rhlsc, rhblsc))
+            np.testing.assert_allclose(hard, (threshold - 1.0) * 10.0 * rtlsc, rtol=1e-5)
+            assert float(self._bottom_drying(0.03, rhlsc, rhblsc)) == hard
+
+    def test_losing_parameter_regains_a_derivative(self):
+        d_rhblsc = jax.grad(self._bottom_drying, argnums=2)
+        d_rhlsc = jax.grad(self._bottom_drying, argnums=1)
+        # rhblsc below the profile value has no effect on the model: the
+        # reference derivative is exactly zero. The surrogate's is positive
+        # and decays with the 0.04 gap -- about a tenth of the winning slope
+        # at width 0.03 -- so an optimiser that stepped rhblsc below the
+        # threshold is still pulled back toward it.
+        assert float(d_rhblsc(0.0, *self.LOSES)) == 0.0
+        winning = float(d_rhblsc(0.0, *self.WINS))
+        assert winning > 0.0
+        losing = float(d_rhblsc(0.03, *self.LOSES))
+        assert 0.0 < losing < 0.2 * winning
+        # The mirror image: rhlsc has no bottom-level derivative while
+        # rhblsc wins the selection.
+        assert float(d_rhlsc(0.0, *self.WINS)) == 0.0
+        assert float(d_rhlsc(0.03, *self.WINS)) > 0.0
+
+
+class TestStabilityClipSurrogate:
+    """The +/- dtheta clip of the surface-to-air excess in the stability factor."""
+
+    def _factor(self, excess, dtheta, width):
+        from jcm.physics.speedy.params import SurfaceFluxParameters
+        from jcm.physics.surface.speedy_surface_flux import _stability_factor
+
+        sfp = dataclasses.replace(
+            SurfaceFluxParameters.default(), dtheta=dtheta,
+            stability_smoothing=jnp.array(width))
+        t2 = jnp.asarray(290.0)
+        return _stability_factor(t2 + excess, t2, sfp)
+
+    def test_value_is_the_hard_clip_at_any_width(self):
+        fstab, dtheta = 0.67, jnp.asarray(3.0)
+        # (excess, clipped dth): the stable side is damped by astab = 0.5
+        # before the clip, so -8 K clips at -3 and -3 K sits at -1.5.
+        for excess, dth in ((-8.0, -3.0), (-3.0, -1.5), (-1.0, -0.5),
+                            (0.5, 0.5), (2.0, 2.0), (5.0, 3.0)):
+            hard = float(self._factor(jnp.asarray(excess), dtheta, 0.0))
+            np.testing.assert_allclose(hard, 1.0 + dth * fstab / 3.0, rtol=1e-6)
+            assert float(self._factor(jnp.asarray(excess), dtheta, 0.5)) == hard
+
+    def test_clipped_columns_regain_a_dtheta_derivative(self):
+        d_dtheta = jax.grad(self._factor, argnums=1)
+        for excess in (5.0, -8.0):  # clipped on the unstable and the stable side
+            hard = float(d_dtheta(jnp.asarray(excess), jnp.asarray(3.0), 0.0))
+            smooth = float(d_dtheta(jnp.asarray(excess), jnp.asarray(3.0), 0.5))
+            # The factor is 1 +/- fstab whatever dtheta is: the reference
+            # derivative fstab/dtheta - dtheta*fstab/dtheta^2 is exactly 0.
+            assert hard == 0.0
+            assert np.isfinite(smooth) and smooth != 0.0
+
+    def test_unclipped_columns_keep_the_reference_derivative(self):
+        d_dtheta = jax.grad(self._factor, argnums=1)
+        excess = jnp.asarray(1.0)  # four widths inside the +dtheta clip
+        hard = float(d_dtheta(excess, jnp.asarray(3.0), 0.0))
+        smooth = float(d_dtheta(excess, jnp.asarray(3.0), 0.5))
+        assert hard != 0.0
+        np.testing.assert_allclose(smooth, hard, rtol=0.1)
+
+    def test_block_is_a_surrogate(self):
+        from jcm.physics.surface.speedy_surface_flux import (
+            _clipped_excess, _smooth_clipped_excess, _surrogate_clipped_excess,
+        )
+
+        w = jnp.asarray(0.5)
+        operands = (jnp.asarray([-8.0, -2.0, 0.0, 0.5, 5.0]), jnp.asarray(3.0),
+                    jnp.asarray(0.5))
+        check_surrogate_gradient(
+            lambda *xs: _surrogate_clipped_excess(*xs, w),
+            _clipped_excess,
+            lambda *xs: _smooth_clipped_excess(*xs, w),
+            operands,
+        )
+
+    def test_smooth_clip_is_continuous_through_zero_excess(self):
+        """One smooth function: no jump in value or dtheta-derivative at the sign test."""
+        from jcm.physics.surface.speedy_surface_flux import _smooth_clipped_excess
+
+        def smooth(excess, dtheta):
+            return _smooth_clipped_excess(excess, dtheta, jnp.asarray(0.5), 0.5)
+
+        d_dtheta = jax.grad(smooth, argnums=1)
+        eps = 1e-4
+        below = float(smooth(jnp.asarray(-eps), jnp.asarray(3.0)))
+        above = float(smooth(jnp.asarray(eps), jnp.asarray(3.0)))
+        np.testing.assert_allclose(above, below, atol=2 * eps)
+        np.testing.assert_allclose(
+            float(d_dtheta(jnp.asarray(eps), jnp.asarray(3.0))),
+            float(d_dtheta(jnp.asarray(-eps), jnp.asarray(3.0))), atol=1e-4)
+
+
+class TestConvectionPressureSwitchSurrogate:
+    """``psa > psmin`` and the clipped ramp on the cloud-base mass flux."""
+
+    @staticmethod
+    def _run(psa_value, psmin_smoothing, psmin=0.8):
+        """Convection on the RH-trigger column at a given surface pressure."""
+        import jcm.constants as c
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.physics_data import HumidityData, PhysicsData
+        from jcm.physics_interface import PhysicsState
+        from jcm.physics.convection.speedy_convection import get_convection_tendencies
+
+        psa, se, qa, qsat, coords = _convection_column(rh_pbl_top=0.95)
+        psa = psa * psa_value
+        kx = se.shape[0]
+        parameters = Parameters.default()
+        parameters = dataclasses.replace(
+            parameters, convection=dataclasses.replace(
+                parameters.convection, psmin=jnp.asarray(psmin),
+                psmin_smoothing=jnp.array(psmin_smoothing)))
+        physics_data = PhysicsData.zeros(
+            (1, 1), kx, speedy_coords=coords,
+            humidity=HumidityData.zeros((1, 1), kx, qsat=qsat))
+        state = PhysicsState.zeros(
+            (kx, 1, 1), temperature=se / c.cpd, specific_humidity=qa,
+            normalized_surface_pressure=psa)
+        tend, out = get_convection_tendencies(state, physics_data, parameters)
+        column_moisture = jnp.sum(tend.specific_humidity * coords.dhs[:, None, None])
+        return tend, out.convection, column_moisture
+
+    def test_value_is_the_hard_switch_at_any_width(self):
+        kx = 8
+        for psa_value in (0.75, 0.85, 0.95):
+            tend0, conv0, _ = self._run(jnp.asarray(psa_value), 0.0)
+            tend1, conv1, _ = self._run(jnp.asarray(psa_value), 0.02)
+            for a, b in zip(jax.tree.leaves((tend0, conv0)),
+                            jax.tree.leaves((tend1, conv1))):
+                np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+            below = psa_value < 0.8
+            assert (int(conv0.iptop[0, 0]) == kx + 1) == below
+            assert (float(conv0.cbmf[0, 0]) == 0.0) == below
+            assert (float(conv0.qdif[0, 0]) == 0.0) == below
+            if below:
+                assert float(jnp.abs(tend0.specific_humidity).max()) == 0.0
+                assert float(jnp.abs(tend0.temperature).max()) == 0.0
+
+    def _rain(self, psmin, psa_value, width):
+        _, conv, _ = self._run(jnp.asarray(psa_value), width, psmin=psmin)
+        return conv.precnv[0, 0]
+
+    def test_sub_threshold_column_sees_the_switch(self):
+        # 0.05 below psmin: 2.5 widths. Raising psmin pushes the switch
+        # further away, so the surrogate derivative is negative.
+        d_psmin = jax.grad(self._rain)
+        assert float(d_psmin(jnp.asarray(0.8), 0.75, 0.0)) == 0.0
+        smooth = float(d_psmin(jnp.asarray(0.8), 0.75, 0.02))
+        assert np.isfinite(smooth) and smooth < 0.0
+
+    def test_capped_ramp_regains_a_derivative(self):
+        # psa = 0.95 is past the cap (1 + psmin)/2 = 0.9: the mass flux is
+        # psa * 1 whatever psmin is.
+        d_psmin = jax.grad(self._rain)
+        assert float(d_psmin(jnp.asarray(0.8), 0.95, 0.0)) == 0.0
+        smooth = float(d_psmin(jnp.asarray(0.8), 0.95, 0.02))
+        assert np.isfinite(smooth) and smooth < 0.0
+
+    def test_on_ramp_derivative_is_the_reference(self):
+        # psa = 0.85 is mid-ramp, five widths from both the switch and the cap.
+        d_psmin = jax.grad(self._rain)
+        hard = float(d_psmin(jnp.asarray(0.8), 0.85, 0.0))
+        smooth = float(d_psmin(jnp.asarray(0.8), 0.85, 0.01))
+        assert hard < 0.0
+        np.testing.assert_allclose(smooth, hard, rtol=0.05)
+
+    def test_switched_off_plume_tangent_rains_at_the_plumes_own_yield(self):
+        """The precipitation onset per unit mass flux: no half-rain tangent.
+
+        In a switched-off column the onset's argument is exactly 0, where
+        AD's tie rule would give the hinge half its right-hand slope. The
+        onset is formed per unit cloud-base mass flux instead, so the rain
+        tangent per mass-flux tangent equals the yield precnv/cbmf of the
+        same plume running (same profile and surface pressure, switched on
+        by a lower psmin).
+        """
+        def rain_and_cbmf(psmin, psa_value, width):
+            _, conv, _ = self._run(jnp.asarray(psa_value), width, psmin=psmin)
+            return conv.precnv[0, 0], conv.cbmf[0, 0]
+
+        rain, cbmf = rain_and_cbmf(jnp.asarray(0.6), 0.75, 0.0)
+        assert float(rain) > 0.0 and float(cbmf) > 0.0
+        (_, _), (d_rain, d_cbmf) = jax.jvp(
+            lambda p: rain_and_cbmf(p, 0.75, 0.02), (jnp.asarray(0.8),), (jnp.asarray(1.0),))
+        assert float(d_cbmf) < 0.0
+        np.testing.assert_allclose(
+            float(d_rain) / float(d_cbmf), float(rain / cbmf), rtol=1e-4)
+
+    def test_precipitation_onset_is_a_surrogate(self):
+        from jcm.physics.convection.speedy_convection import (
+            _precnv, _smooth_precnv, _surrogate_precnv,
+        )
+
+        w = jnp.asarray(0.5)
+        # Three plumes: running and raining, running and dry, switched off.
+        operands = (
+            jnp.asarray([4.0, 1.0, 0.0]),    # fuq_top
+            jnp.asarray([2.0, 2.0, 0.0]),    # fmass_top
+            jnp.asarray([1.5, 1.5, 1.5]),    # qsatb
+            jnp.asarray([1.0, 1.0, 0.0]),    # cbmf
+            jnp.asarray([1.0, -2.0, 1.0]),   # unit_excess
+        )
+        check_surrogate_gradient(
+            lambda *xs: _surrogate_precnv(*xs, w),
+            _precnv,
+            lambda *xs: _smooth_precnv(*xs, w),
+            operands,
+        )
+
+    def test_switch_value_and_tie(self):
+        """At psa == psmin and for psmin >= 1 the factor is 0 with zero derivative."""
+        from jcm.physics.convection.speedy_convection import (
+            _mass_flux_pressure_factor, _surrogate_mass_flux_pressure_factor,
+        )
+
+        factor = lambda psa, psmin, w: _surrogate_mass_flux_pressure_factor(psa, psmin, w)
+        assert float(factor(jnp.asarray(0.8), jnp.asarray(0.8), 0.0)) == 0.0
+        assert float(jax.grad(factor)(jnp.asarray(0.8), jnp.asarray(0.8), 0.0)) == 0.0
+        assert float(jax.grad(factor, argnums=1)(jnp.asarray(0.8), jnp.asarray(0.8), 0.0)) == 0.0
+        for psmin in (1.0, 1.02):
+            assert float(_mass_flux_pressure_factor(jnp.asarray(0.9), jnp.asarray(psmin))) == 0.0
+            # The reference slope 2/(1 - psmin) is infinite at psmin = 1 and
+            # left a 0 * inf NaN in the masked branch's derivative; the
+            # floored slope keeps it finite: exactly 0 at width 0 (the
+            # reference's, masked), and the softplus pair's finite tail at a
+            # positive width (Codex review, PR #1168).
+            for w in (0.0, 0.02):
+                g_psa = float(jax.grad(factor)(jnp.asarray(0.9), jnp.asarray(psmin), w))
+                g_psmin = float(jax.grad(factor, argnums=1)(jnp.asarray(0.9), jnp.asarray(psmin), w))
+                assert np.isfinite(g_psa) and np.isfinite(g_psmin)
+                if w == 0.0:
+                    assert g_psa == 0.0 and g_psmin == 0.0
+
+    def test_smooth_factor_is_one_function(self):
+        """Its Hessian in (psa, psmin) is symmetric: no fixed operand-dependent width."""
+        from jcm.physics.convection.speedy_convection import _smooth_mass_flux_pressure_factor
+
+        for psa in (0.79, 0.85, 0.92):
+            h = jax.hessian(lambda v: _smooth_mass_flux_pressure_factor(v[0], v[1], 0.02))(
+                jnp.asarray([psa, 0.8]))
+            np.testing.assert_allclose(float(h[0, 1]), float(h[1, 0]), rtol=1e-5)
+
+    def test_switch_tangent_closes_the_column_moisture_budget(self):
+        """Below the switch the derivative is a whole plume switching on.
+
+        As for the humidity trigger: convection converts column moisture
+        into rain at a fixed ratio, and the switch's surrogate derivative
+        has to respect it, or the tangent would be a moisture sink the
+        scheme does not have.
+        """
+        def budget(psmin, psa_value, width):
+            _, conv, moisture = self._run(jnp.asarray(psa_value), width, psmin=psmin)
+            return moisture, conv.precnv[0, 0]
+
+        # The ratio carries the 1/psa of the flux-to-tendency conversion, so
+        # the reference is taken at the SAME surface pressure, made active by
+        # a lower psmin (0.75 is mid-ramp for psmin = 0.6).
+        moisture, rain = budget(jnp.asarray(0.6), 0.75, 0.0)
+        ratio = float(moisture / rain)
+        (_, _), (d_moisture, d_rain) = jax.jvp(
+            lambda p: budget(p, 0.75, 0.02), (jnp.asarray(0.8),), (jnp.asarray(1.0),))
+        assert float(d_rain) < 0.0
+        np.testing.assert_allclose(float(d_moisture), ratio * float(d_rain), rtol=1e-4)

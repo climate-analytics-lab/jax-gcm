@@ -107,9 +107,22 @@ For monthly output, save daily interval means and aggregate their bounds:
 
 The helper returns an xarray Dataset with duration-weighted means, bounds
 and coverage. It rejects snapshots and intervals crossing month boundaries,
-because their monthly means cannot be reconstructed. A daily grid should
-therefore start at midnight. Observer datasets remain separate and retain
-their sampling cadence.
+because their monthly means cannot be reconstructed from them after the
+fact -- a daily grid from a non-midnight start, or any ``save_interval``
+that does not evenly tile every month (5 days, say), will eventually
+produce one. Observer datasets remain separate and retain their sampling
+cadence.
+
+For a run through ``run_chunked`` (the CLI's ``run.monthly_means=true``,
+:ref:`monthly-means-cli`), that scheduling is automatic (#903): a
+non-midnight start or a non-tiling ``save_interval`` is laid out as a
+sequence of sub-runs rather than refused. Driving ``model.run``/
+``model.resume`` directly, as above, build the same schedule with
+:func:`jcm.temporal_aggregation.schedule_monthly_segments` and loop one call
+per segment, using each segment's own ``save_interval_seconds`` (the
+configured interval for a body segment, or that one shorter edge interval's
+own duration); concatenate the resulting interval means before calling
+``monthly_means()`` on the whole thing.
 
 Categorical integer and boolean diagnostics have no defined arithmetic mean.
 They are omitted from interval-mean primary output and named in the Dataset's
@@ -121,6 +134,38 @@ Long runs can feed each chunk's daily Dataset to
 completed months, then call ``finish()`` for the last, possibly partial month.
 Its resumable state contains sums and valid durations per variable; it does
 not retain a month of daily fields.
+
+Output on constant pressure surfaces
+-------------------------------------
+
+Reach for this when an analysis wants fixed pressure levels (500 hPa
+geopotential height, a 200 hPa wind map) rather than the model's native
+sigma/hybrid levels -- comparing against reanalysis or another model's
+pressure-level output, say. :func:`jcm.analysis.to_pressure_levels` converts
+any already-saved (or in-memory) Dataset:
+
+.. code-block:: python
+
+   from jcm.analysis import to_pressure_levels
+
+   ds = predictions.to_xarray()            # or xarray.open_dataset(...)
+   on_plevs = to_pressure_levels(ds, [1000, 925, 850, 700, 500, 300, 200, 100, 50, 10])
+
+Every ``level``-dimensioned field is log-pressure linearly interpolated from
+the model's own ``pressure_full`` onto the given list of pressures (hPa, in
+whatever order given); a point below that column's surface or above the
+model lid comes back ``NaN`` rather than extrapolated. ``pressure_full``
+itself (and ``pressure_thickness``) describe the sigma grid interpolated
+*from* and are left alone -- everything else, including a field like
+``height_full`` where "height on a pressure surface" is itself a standard
+diagnostic, is converted.
+
+The CLI's ``run.pressure_levels`` (null by default; see
+:ref:`monthly-means-cli`'s neighbour in :doc:`running_at_scale`) applies the
+same function to every file at save time instead, so a run need not be
+re-run to get pressure-level output -- sigma output is the one the
+in-memory ``ModelPredictions``/chunk/monthly/snapshot path always produces
+first, and ``run.pressure_levels`` is purely a save-time conversion of it.
 
 Long forcing time-series and chunked runs
 -----------------------------------------
@@ -491,10 +536,12 @@ prior-step TKE at the seam:
 
 .. code-block:: python
 
+   from jcm.data.remote import fetch
    from jcm.initial_states import checkpoint_state
 
+   # The model must be built as the state's preset was (here t63-echam-2m).
    state, physics_carry, _ = checkpoint_state(
-       model, 'bundles/echam_t63_l47_hybrid/init_states/spun_up.msgpack')
+       model, fetch('bundles/t63_l47/init_states/echam-2m-t63_v31_warm.msgpack'))
    predictions = model.run(
        initial_state=state, initial_physics_state=physics_carry,
        forcing=forcing, total_time='365 days', save_interval='1 day')
@@ -539,7 +586,57 @@ with the published struct, so a coupler can feed back exactly what it read.
 Prescribed fluxes need a forced-mode physics to consume them: supplied to an
 interactive preset (``physics=speedy`` / ``echam``) they are rejected at
 start rather than silently ignored.
+
+A coupled ocean can feed its surface current back the same way:
+``forcing.ocean_current`` (``constants`` or ``file``, same shape as
+``prescribed_surface_flux`` above), or a coupler setting
+``ForcingData.ocean_u``/``ocean_v`` directly. The ECHAM
+``TteTkeVerticalDiffusion`` term reads it as the water-tile stress target
+and publishes the current-relative open-water 10 m speed
+(``surface_exchange.wind_speed_relative_to_current``, ECHAM's ``wind10w``);
+a current supplied to a composition that cannot consume it (SPEEDY,
+Held-Suarez) is likewise rejected at start.
 See :doc:`design/surface_exchange` for the full contract.
+
+Running the ECHAM-JAM M7 aerosol preset
+---------------------------------------
+
+The default JAM configuration, ``t63-echam-jam``, runs ECHAM6.3-HAM2.3's own
+**M7** aerosol population and microphysics (seven log-normal modes, HAM's own
+species properties and process variants); ``t63-echam-jam-mam4`` runs the
+CAM-derived MAM4 population on the same harness instead. M7 is a
+release-matrix member (``echam-jam-m7-t63-l47``) with its own regression
+fixture; see
+:doc:`science/aerosol` ("HAM M7 modal aerosol") and
+:doc:`design/jam_m7_configuration` for exactly what is and is not yet
+faithful.
+
+The M7 microphysics core is a separate package, installed as its own extra.
+It is not on PyPI yet, so install the pinned commit from GitHub first:
+
+.. code-block:: bash
+
+   pip install "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e"
+   pip install jcm[m7]
+
+.. code-block:: bash
+
+   python -m jcm.main +configuration=t63-echam-jam
+
+The preset runs the reference's ion-mediated nucleation (Kazil–Lovejoy,
+``nsnucl = 2``), whose PARNUC and O'Brien ion-pair tables come from jcm's data
+mirror like its other inputs. To use a local copy instead, set
+``HAM_INPUT_DIR`` to a directory holding them (``parnuc.15H2SO4.nc`` or
+``parnuc.15H2SO4.A0.total.nc``; ``gcr_ipr_solmin.txt``/``gcr_ipr_solmax.txt``,
+or ``solmin.txt``/``solmax.txt``).
+
+The κ-lookup table ships with the core, and the Mie optics tables build
+in-process — unless ``HAM_INPUT_DIR`` also holds HAM's own
+(``lut_optical_properties_M7.nc`` and ``lut_optical_properties_lw_M7.nc``, as
+HAMMOZ's T63 input directory does). The run then uses those instead, a
+different optics configuration from the one the preset's dust and sea-salt
+scales were fitted with, so point ``HAM_INPUT_DIR`` at a directory holding only
+the nucleation tables to change nothing else.
 
 Where to next
 -------------

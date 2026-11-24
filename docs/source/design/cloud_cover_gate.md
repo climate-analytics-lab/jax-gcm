@@ -203,6 +203,35 @@ On the warm-start run the McICA cover reads **0.604 against 0.562** online, the
 larger of the two by 0.042 at both intervals. Treat a gap of that order as
 expected, and read neither as a check on the other.
 
+### The detection-thresholded cover, `cloud_cover_tau`
+
+`radiation.total_cloud_cover_tau` is the quantity to set beside the observed
+cover (`cloud_cover_obs`), because it carries the observation's detection
+limit. The three other covers differ from an imager's `clt` in the ways above
+(none has an optical-depth threshold, and the monitor's former `clt` overlapped
+the monthly-mean profile). It is the fraction of the RRTMGP McICA sub-columns
+(the pooled LW and SW draws, the same ones as `radiation.total_cloud_cover`)
+whose column cloud optical depth exceeds `RadiationParameters.tau_threshold`:
+
+```
+tau_col(s) = sum_k mask_s,k * tau_k        ! tau_k: in-cloud liquid + ice, 550 nm
+cover_tau  = mean_s [ tau_col(s) > tau_threshold ]
+```
+
+| | |
+|---|---|
+| band | the jax-rrtmgp SW band holding 550 nm, 16000-22650 cm⁻¹ (zero-based index 10 of 14), found from the band table |
+| `tau_k` | the library's `cloud_properties_fn` lookup on the solve's in-cloud paths and effective radii; extinction optical depth before delta scaling, without the inhomogeneity factors (a detector sees the physical optical depth) |
+| threshold | default 0.3, the ISCCP/CALIPSO-simulator limit CMIP cloud-cover diagnostics use; ESA-CCI AVHRR (CLARA) detects down to about 0.2 (Karlsson & Håkansson 2018, AMT 11, 633), so 0.3 is slightly conservative against it. A leaf of `RadiationParameters` |
+| cost | one per-layer lookup inside the radiation solve (held on cached steps like the other fields); no extra solver work |
+| differentiability | a hard comparison: no derivative, and it feeds no flux (fluxes are bit-identical for any threshold) |
+| other schemes | grey two-stream and the NN emulator draw no sub-columns and publish 0, which `health.py` and the monitor read as "not computed" (NaN would trip the NaN gates) |
+
+By construction it never exceeds `radiation.total_cloud_cover` for the same
+masks. `health.py` prints it as `cloud_cover_tau` beside
+`cloud_cover_radiation` when the run saved a non-zero field; it is not gated,
+the gate stays on the online `aclcov`.
+
 ### Measured magnitudes
 
 The three offline definitions of cover (column maximum, maximum-random and

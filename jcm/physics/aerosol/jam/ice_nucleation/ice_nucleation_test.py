@@ -208,9 +208,15 @@ class IceNucleationTermTest(unittest.TestCase):
 @pytest.mark.slow
 class IceNucleationModelTest(unittest.TestCase):
     """End-to-end wiring: the ECHAM+JAM+2M model runs with ECHAM-HAM's freezing and
-    publishes its inputs. On a 3-step cold-start T21 aquaplanet the dust is still ~0, so
+    publishes its inputs. On a cold-start T21 aquaplanet the dust is still ~0, so
     this guards the trace/compile/coupling path; the physics is pinned by the unit and
     Fortran-reference tests.
+
+    Since this only guards trace/compile/coupling (not an accumulating
+    quantity), one 30-minute step exercises it exactly as well as the
+    original 3 -- the wiring runs identically on every step -- and 3 sigma
+    levels (vs. the original 20) is a vertical-resolution choice the wiring
+    does not depend on either; both cut the compile this test pays for.
     """
 
     def test_runs_finite_and_publishes_inputs(self):
@@ -221,10 +227,11 @@ class IceNucleationModelTest(unittest.TestCase):
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
-        coords = get_coords(onp.linspace(0, 1, 21), spectral_truncation=21)
+        coords = get_coords(onp.linspace(0, 1, 4), spectral_truncation=21)
         model = Model(coords=coords, time_step=30, terrain=TerrainData.aquaplanet(coords),
                       physics=idealized_echam_physics(aerosol_module="jam", cloud_scheme="2m"))
-        preds = model.run(save_interval=0.0625, total_time=0.0625)
+        one_step_days = 30 / 1440  # a single 30-minute (time_step) GCM step
+        preds = model.run(save_interval=one_step_days, total_time=one_step_days)
         dyn = preds.dynamics
         self.assertFalse(bool(jnp.any(jnp.isnan(dyn.temperature))))
         for key in ("qi", "qni"):

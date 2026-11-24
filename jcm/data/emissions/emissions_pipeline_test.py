@@ -154,29 +154,45 @@ class PreSpeciatedContractTest(unittest.TestCase):
 class EmissionsRaiseBurdenTest(unittest.TestCase):
     """End-to-end: a prescribed BC/OC source raises the primary-carbon burden."""
 
+    _model = None  # built once; "on" and "off" share it (see _run)
+
     def _run(self, with_emissions: bool):
         from jcm.model import Model
         from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
-        sigma_boundaries = np.linspace(0, 1, 21)
-        coords = get_coords(sigma_boundaries, spectral_truncation=21)
-        terrain = TerrainData.aquaplanet(coords)
-        model = Model(
-            coords=coords, time_step=30, terrain=terrain,
-            physics=idealized_echam_physics(
-                aerosol_module="jam", cloud_scheme="2m", jam_anthropogenic=True),
-        )
+        if type(self)._model is None:
+            sigma_boundaries = np.linspace(0, 1, 21)
+            coords = get_coords(sigma_boundaries, spectral_truncation=21)
+            terrain = TerrainData.aquaplanet(coords)
+            type(self)._model = Model(
+                coords=coords, time_step=30, terrain=terrain,
+                physics=idealized_echam_physics(
+                    aerosol_module="jam", cloud_scheme="2m",
+                    jam_anthropogenic=True),
+            )
+        model = type(self)._model
+
         from jcm.forcing import default_forcing
-        forcing = default_forcing(coords.horizontal)
-        if with_emissions:
-            # A strong, uniform anthropogenic source so the signal is
-            # unambiguous over the few-step run.
-            emis = read_anthropogenic_emissions(
-                _synthetic_emissions_ds(bc=5.0e-9, oc=5.0e-9, so2=5.0e-9),
-                align_mode="wrap_year")
-            forcing = forcing.copy(anthropogenic_emissions=emis)
+        # Both branches populate the SAME ``anthropogenic_emissions`` channels
+        # (on: a strong uniform source; off: the identical channels at
+        # exactly zero), rather than leaving the "off" forcing's field at its
+        # ``None`` default. ``AnthropogenicEmissions._flux`` branches at
+        # TRACE time on whether a channel is present at all (present ->
+        # read the array; absent -> a baked-in zero constant), so a
+        # structurally-identical forcing pytree for both calls lets
+        # ``model.run``'s jit reuse the one compiled executable instead of
+        # retracing the whole ECHAM+JAM term graph a second time -- the
+        # physical result (zero flux emits nothing) is unchanged either way.
+        emis = read_anthropogenic_emissions(
+            _synthetic_emissions_ds(
+                bc=5.0e-9 if with_emissions else 0.0,
+                oc=5.0e-9 if with_emissions else 0.0,
+                so2=5.0e-9 if with_emissions else 0.0),
+            align_mode="wrap_year")
+        forcing = default_forcing(model.coords.horizontal).copy(
+            anthropogenic_emissions=emis)
         preds = model.run(forcing=forcing, save_interval=0.0625, total_time=0.0625)
         return preds
 
@@ -198,6 +214,8 @@ class EmissionsRaiseBurdenTest(unittest.TestCase):
 class PreSpeciatedRaisesBurdenTest(unittest.TestCase):
     """End-to-end: the CAM-faithful pre-speciated path injects into MAM4 tracers."""
 
+    _model = None  # built once; "on" and "off" share it (see _run)
+
     def _run(self, with_emissions: bool):
         from jcm.model import Model
         from jcm.physics.echam.testing import idealized_echam_physics
@@ -205,26 +223,34 @@ class PreSpeciatedRaisesBurdenTest(unittest.TestCase):
         from jcm.utils import get_coords
         from jcm.forcing import default_forcing
 
-        sigma_boundaries = np.linspace(0, 1, 21)
-        coords = get_coords(sigma_boundaries, spectral_truncation=21)
-        model = Model(
-            coords=coords, time_step=30, terrain=TerrainData.aquaplanet(coords),
-            physics=idealized_echam_physics(
-                aerosol_module="jam", cloud_scheme="2m", jam_prescribed_speciated=True),
-        )
-        forcing = default_forcing(coords.horizontal)
-        if with_emissions:
-            # A uniform, already-speciated accumulation-sulfate source.
-            shape = (_NLON, _NLAT, 12)
-            ds = xr.Dataset(
-                {"aero_emis_m_so4_acc": (("lon", "lat", "time"),
-                                         np.full(shape, 5.0e-9))},
-                coords={"lon": np.linspace(0, 360, _NLON, endpoint=False),
-                        "lat": np.linspace(-87, 87, _NLAT),
-                        "time": np.arange(12)})
-            forcing = forcing.copy(
-                prescribed_aerosol_emissions=read_prescribed_aerosol_emissions(
-                    ds, align_mode="wrap_year"))
+        if type(self)._model is None:
+            sigma_boundaries = np.linspace(0, 1, 21)
+            coords = get_coords(sigma_boundaries, spectral_truncation=21)
+            type(self)._model = Model(
+                coords=coords, time_step=30, terrain=TerrainData.aquaplanet(coords),
+                physics=idealized_echam_physics(
+                    aerosol_module="jam", cloud_scheme="2m",
+                    jam_prescribed_speciated=True),
+            )
+        model = type(self)._model
+
+        # Both branches populate the SAME aero_emis_m_so4_acc channel (on: a
+        # uniform source; off: the identical channel at exactly zero) rather
+        # than leaving the "off" forcing's ``prescribed_aerosol_emissions`` at
+        # its ``None`` default -- see emissions_pipeline_test.py's sibling
+        # EmissionsRaiseBurdenTest for why a structurally-identical forcing
+        # for both calls lets ``model.run``'s jit reuse one compile instead
+        # of retracing the ECHAM+JAM term graph a second time.
+        shape = (_NLON, _NLAT, 12)
+        ds = xr.Dataset(
+            {"aero_emis_m_so4_acc": (("lon", "lat", "time"),
+                                     np.full(shape, 5.0e-9 if with_emissions else 0.0))},
+            coords={"lon": np.linspace(0, 360, _NLON, endpoint=False),
+                    "lat": np.linspace(-87, 87, _NLAT),
+                    "time": np.arange(12)})
+        forcing = default_forcing(model.coords.horizontal).copy(
+            prescribed_aerosol_emissions=read_prescribed_aerosol_emissions(
+                ds, align_mode="wrap_year"))
         return model.run(forcing=forcing, save_interval=0.0625, total_time=0.0625)
 
     def test_so4_burden_increases(self):

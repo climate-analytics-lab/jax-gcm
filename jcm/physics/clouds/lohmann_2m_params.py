@@ -4,11 +4,12 @@ Based on mo_echam_cloud_params + mo_cloud_utils from ECHAM6/ICON.
 
 ``CloudParams2M`` is a ``flax.struct.dataclass`` so every numeric tunable
 is a pytree leaf visible to ``jax.grad`` when the struct is threaded
-through the scheme (the term holds it in an ``nnx.Param``). The two
-genuinely *static* switches — ``nic_cirrus`` (cirrus-scheme selector) and
-``ldyn_cdnc_min`` (dynamic-vs-fixed CDNC floor) — select code paths with
-ordinary Python ``if`` at trace time, so they are ``pytree_node=False``
-aux data and must stay plain ``int``/``bool``.
+through the scheme (the term holds it in an ``nnx.Param``). The three
+genuinely *static* switches — ``nic_cirrus`` (cirrus-scheme selector),
+``ldyn_cdnc_min`` (dynamic-vs-fixed CDNC floor) and
+``aerosol_free_freezing`` (:class:`AerosolFreeFreezing`, #1149) — select
+code paths with ordinary Python ``if`` at trace time, so they are
+``pytree_node=False`` aux data and must stay plain ``int``/``bool``/``enum``.
 
 There is deliberately no module-level default instance: parameters reach
 the scheme only through the threaded struct, so overrides (and gradients
@@ -17,6 +18,7 @@ with respect to any leaf) actually take effect. The previous import-time
 exports silently severed both.
 """
 
+import enum
 from math import pi
 
 import jax.numpy as jnp
@@ -28,6 +30,50 @@ from jcm import constants as c
 #: ECHAM's T63 snow/ice fall-speed prefactor (``mo_echam_cloud_params.f90``
 #: l.190, 211), the value a build without a grid gets.
 _T63_CVTFALL = 2.5
+
+
+class AerosolFreeFreezing(enum.Enum):
+    """Which closure feeds ``het_mxphase_freezing`` when no prognostic
+    aerosol publishes ``freezing_aerosol`` (#1149).
+
+    Both options feed the SAME ``het_mxphase_freezing`` contact/immersion
+    rates (``deposition_freezing.py``) the HAM freezing inputs of a
+    prognostic aerosol (JAM) would -- this switch only decides where those
+    inputs come from without one. It is a static (``pytree_node=False``)
+    selector: the two closures are different code paths (one calls
+    ``het_mxphase_freezing``, the other runs an INP-number-cap closure that
+    does not), not different parameter values of one path.
+    """
+
+    #: ECHAM's own aerosol-free mode, ``lccnclim`` (``mo_ccnclim.f90::
+    #: ccnclim_IN_setup``): fixed climatological contact/immersion fractions
+    #: and insoluble-mode wet radii fed to ``het_mxphase_freezing`` exactly
+    #: as a prognostic aerosol's would be (:func:`jcm.physics.clouds.
+    #: lohmann_2m.ccnclim.ccnclim_freezing_aerosol`). The default: this is
+    #: ECHAM's own replacement for an aerosol-free run, so it is also jcm's.
+    LCCNCLIM = "lccnclim"
+    #: jcm's pre-#1149 closure: freeze one mean-mass droplet per new crystal
+    #: up to the DeMott et al. (2010) INP number
+    #: (``deposition_freezing.py::demott2010_inp``) on the prescribed
+    #: coarse-aerosol number ``n_aer_coarse``. This parameterisation is in
+    #: neither the ECHAM nor the CAM source tree -- kept only as an explicit,
+    #: non-default option because the #941/#953 Fortran-reference harness's
+    #: compiled ECHAM build is a genuinely aerosol-free standalone compile
+    #: (fed exactly-zero HAM inputs, not ``lccnclim``'s nonzero climatological
+    #: defaults; see ``lohmann_2m_fortran_reference_test.echam_params``) and
+    #: needs a closure that goes to exactly zero at ``n_aer_coarse=0`` to stay
+    #: comparable to it.
+    DEMOTT = "demott"
+
+
+#: The warm-rain pair of the 2M hosts whose droplet number is prescribed
+#: (simple-plume activation), fitted with
+#: :data:`~jcm.physics.clouds.echam_cloud_defaults.JCM_CALIBRATED_COVER_T63`
+#: (``docs/source/design/jam_aerosol_retune.md``, "The v3.1 refit"). The
+#: :class:`CloudParams2M` defaults are the JAM hosts'; ``echam_physics`` picks
+#: the pair by droplet source, as it does the cover.
+PRESCRIBED_DROPLET_WARM_RAIN_2M: dict[str, float] = dict(
+    ccraut=12.5, cdnc_min_fixed=40.0)
 
 
 @struct.dataclass
@@ -145,6 +191,8 @@ class CloudParams2M:
 
     # Prescribed coarse-mode aerosol number (d > 0.5 um) for the DeMott
     # (2010) INP heterogeneous nucleation parameterization [cm^-3 at STP].
+    # Read only when ``aerosol_free_freezing == AerosolFreeFreezing.DEMOTT``
+    # (not the default since #1149; see that enum).
     n_aer_coarse: jnp.ndarray
 
     # Lohmann & Diehl (2006) immersion-freezing coefficients of the aerosol
@@ -153,26 +201,76 @@ class CloudParams2M:
     # over the commented kaolinite 6.15e-2) and black carbon, multiplying the
     # dust and BC fractions of the activated droplets. Differentiable leaves
     # so the aerosol-ice coupling can be calibrated by gradient; ECHAM
-    # hard-codes them. Read only where a composition supplies the HAM
-    # freezing inputs (JAM); the aerosol-free path uses DeMott (2010).
+    # hard-codes them. Read whenever ``het_mxphase_freezing`` runs, whether
+    # its fractions come from a prognostic aerosol (JAM) or from the
+    # ``lccnclim`` climatology below (#1149) -- not read under the
+    # ``AerosolFreeFreezing.DEMOTT`` fallback, which has no fraction inputs.
     immersion_coefficient_dust: jnp.ndarray
     immersion_coefficient_bc: jnp.ndarray
+
+    # ECHAM's ``lccnclim`` climatological mixed-phase freezing inputs
+    # (``mo_ccnclim.f90`` module-level ``CCNCLIMCTL`` namelist defaults,
+    # F 71-79; see ``jcm.physics.clouds.lohmann_2m.ccnclim`` for why these
+    # are plain global constants with no spatial/temporal dependence in the
+    # compiled routine, despite the module's "CCN climatology" name).
+    # Differentiable leaves, like ``immersion_coefficient_dust``/``_bc``
+    # above, since they are physical tunables ECHAM hard-codes but jcm need
+    # not; read only under ``AerosolFreeFreezing.LCCNCLIM`` (the default).
+    ccnclim_fracdusol: jnp.ndarray     # fraction of dust in all soluble modes
+    ccnclim_fracduai: jnp.ndarray      # fraction of dust in the insoluble accumulation mode
+    ccnclim_fracduci: jnp.ndarray      # fraction of dust in the insoluble coarse mode
+    ccnclim_fracbcsol: jnp.ndarray     # fraction of BC in all soluble modes
+    ccnclim_fracbcinsol: jnp.ndarray   # fraction of BC in all insoluble modes
+    ccnclim_rwetki: jnp.ndarray        # [m] wet radius, insoluble Aitken mode
+    ccnclim_rwetai: jnp.ndarray        # [m] wet radius, insoluble accumulation mode
+    ccnclim_rwetci: jnp.ndarray        # [m] wet radius, insoluble coarse mode
 
     # Static code-path selectors (trace-time Python branches; NOT leaves).
     # nic_cirrus=1: diagnostic ICNC from ice mass and mean crystal radius
     # (ECHAM licnc-diagnostic configuration) — the working default.
-    # nic_cirrus=2 expects an EXTERNAL cirrus-nucleation source (ECHAM-HAM
-    # Kaercher-Lohmann pnicex) that jcm does not compute yet (issue #552):
-    # with it, sub-cthomi cells never nucleate ICNC, depositional growth
-    # stalls, and supersaturation grows unboundedly (RH 5-10 over the
-    # Antarctic winter surface killed the first coupled year runs).
+    # nic_cirrus=2: ECHAM-HAM's Kaercher-Lohmann homogeneous cirrus
+    # nucleation (``lohmann_2m/cirrus.py::xfrzmstr``), limited by the
+    # aerosol number available for freezing, HAM's ``papnx``, read from the
+    # ``cirrus_aerosol_number`` diagnostic. Only a JAM population that
+    # declares ``cirrus_aerosol_modes`` (M7) publishes it; without it papnx
+    # is zero and the 1e-6 cm-3 floor leaves cirrus nucleation negligible,
+    # so nic_cirrus=2 belongs with the M7 population (echam-jam-m7).
     nic_cirrus: int = struct.field(pytree_node=False, default=1)
     ldyn_cdnc_min: bool = struct.field(pytree_node=False, default=False)
+    # Which closure feeds ``het_mxphase_freezing`` without a prognostic
+    # aerosol (#1149; see :class:`AerosolFreeFreezing`). Default
+    # ``LCCNCLIM``: ECHAM's own aerosol-free replacement, matching the
+    # project's "faithful = science" default everywhere else in this scheme.
+    aerosol_free_freezing: AerosolFreeFreezing = struct.field(
+        pytree_node=False, default=AerosolFreeFreezing.LCCNCLIM)
 
     # The truncation whose resolution defaults the parameters were built from
     # (metadata for the host's grid check; not read by the scheme). ``None`` is
     # a grid without a spectral truncation.
     defaults_truncation: int | None = struct.field(pytree_node=False, default=63)
+
+    def __post_init__(self):
+        """Normalize ``aerosol_free_freezing`` to its canonical enum member.
+
+        The STORED field is canonical regardless of which door built the
+        instance -- ``default()`` OR ``with_field_overrides``'s direct
+        ``__class__(**...)`` reconstruction of a Hydra/YAML override (whose
+        value arrives as a plain string, e.g. ``"lccnclim"``), the same
+        pattern ``VDiffParameters.__post_init__`` already uses for its own
+        scheme selector (``surface_layer_scheme``). Without this, a string
+        survives into the stored field uncoerced, every ``==`` comparison
+        against an ``AerosolFreeFreezing`` member in ``scheme.py``'s section
+        6.2 is then always ``False``, and an explicit ``aerosol_free_freezing:
+        lccnclim`` override silently falls through to the DEMOTT branch
+        instead -- the opposite of what was configured, with no error at
+        all (a Codex review on the #1149 PR caught exactly this).
+        ``AerosolFreeFreezing(value)`` is a no-op on an already-canonical
+        member and raises ``ValueError`` on an unrecognised string rather
+        than silently keeping it.
+        """
+        object.__setattr__(
+            self, "aerosol_free_freezing",
+            AerosolFreeFreezing(self.aerosol_free_freezing))
 
     @classmethod
     def default(
@@ -192,11 +290,12 @@ class CloudParams2M:
         # retune swept it over 0.5-2 times 95 and kept 95). On one 10-day T63 JAM run, 900 gives an
         # ice water path of 7 g/m² and 95 gives 22.
         ccsaut: float = 95.0,
-        # Warm autoconversion: ECHAM-HAM's retune for the same setup
-        # (mo_activ.f90). It acts on cloud droplets whose number comes from
-        # AR&G activation, which JAM runs, so the dust-mode argument above
-        # does not reach it. The SPA presets pin the generic 15.
-        ccraut: float = 10.6,
+        # Warm autoconversion, calibrated on the JAM-MAM4 host at
+        # cdnc_min_fixed = 10 (jam_aerosol_retune.md, "The v3.1 refit"); it sits
+        # on the searched range's upper bound. HAM's own value at that floor is
+        # 2.8 (mo_activ.f90). M7 sets its own; a prescribed droplet number takes
+        # PRESCRIBED_DROPLET_WARM_RAIN_2M.
+        ccraut: float = 30.0,
         ceffmax: float = 150.0,
         ceffmin: float = 10.0,
         ccwmin: float = 1e-7,
@@ -234,13 +333,26 @@ class CloudParams2M:
         clmax: float = 0.5,
         fact_PK: float = 8.253e-3,
         pow_PK: float = 2.475,
-        cdnc_min_fixed: float = 40.0,  # [cm^-3] ECHAM warm-microphysics floor; KK2000 autoconv (rate ∝ Nc^-1.79) runs away below this in clean air
+        # [cm^-3] HAM's lower floor for activated droplets (mo_activ.f90). A
+        # prescribed droplet number keeps 40 (PRESCRIBED_DROPLET_WARM_RAIN_2M):
+        # there the floor sets most of the number, and 10 thins the cloud.
+        cdnc_min_fixed: float = 10.0,
         activation_smoothing: float = 1.0e6,  # [1/m^3] smooth-max half-width for the nucleation increment
         n_aer_coarse: float = 0.5,
         immersion_coefficient_dust: float = 32.3,
         immersion_coefficient_bc: float = 2.91e-3,
+        # mo_ccnclim.f90 F 71-79 (CCNCLIMCTL namelist defaults).
+        ccnclim_fracdusol: float = 0.010,
+        ccnclim_fracduai: float = 0.094,
+        ccnclim_fracduci: float = 0.229,
+        ccnclim_fracbcsol: float = 0.042,
+        ccnclim_fracbcinsol: float = 0.0,
+        ccnclim_rwetki: float = 1.0,       # [m] Fortran's own "dummy value" (F 73)
+        ccnclim_rwetai: float = 2.59e-08,  # [m]
+        ccnclim_rwetci: float = 7.97e-08,  # [m]
         nic_cirrus: int = 1,
         ldyn_cdnc_min: bool = False,
+        aerosol_free_freezing: AerosolFreeFreezing = AerosolFreeFreezing.LCCNCLIM,
         truncation: int | None = 63,
     ) -> 'CloudParams2M':
         """Return default cloud parameters for the 2-moment scheme.
@@ -338,7 +450,16 @@ class CloudParams2M:
             n_aer_coarse=jnp.array(n_aer_coarse),
             immersion_coefficient_dust=jnp.array(immersion_coefficient_dust),
             immersion_coefficient_bc=jnp.array(immersion_coefficient_bc),
+            ccnclim_fracdusol=jnp.array(ccnclim_fracdusol),
+            ccnclim_fracduai=jnp.array(ccnclim_fracduai),
+            ccnclim_fracduci=jnp.array(ccnclim_fracduci),
+            ccnclim_fracbcsol=jnp.array(ccnclim_fracbcsol),
+            ccnclim_fracbcinsol=jnp.array(ccnclim_fracbcinsol),
+            ccnclim_rwetki=jnp.array(ccnclim_rwetki),
+            ccnclim_rwetai=jnp.array(ccnclim_rwetai),
+            ccnclim_rwetci=jnp.array(ccnclim_rwetci),
             nic_cirrus=int(nic_cirrus),
             ldyn_cdnc_min=bool(ldyn_cdnc_min),
+            aerosol_free_freezing=aerosol_free_freezing,
             defaults_truncation=truncation,
         )

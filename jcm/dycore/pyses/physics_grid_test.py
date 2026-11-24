@@ -41,6 +41,33 @@ class TestFVPhysicsGrid(unittest.TestCase):
     def test_num_cols_is_nelem_times_four(self):
         self.assertEqual(self.grid.num_cols, int(self.dims["num_elem"]) * 4)
 
+    def test_cell_areas_tile_the_sphere(self):
+        """The areas a point source is spread over (#1190) cover the sphere once."""
+        import jcm.constants as c
+
+        area = self.grid.cell_areas
+        self.assertEqual(area.shape, (self.grid.num_cols,))
+        np.testing.assert_allclose(area.sum(), 4.0 * np.pi * c.rearth ** 2, rtol=1e-12)
+        # Independently: cubed-sphere element edges are great circles, so an
+        # element's four cells must add up to the spherical quadrilateral its
+        # corner nodes span (the metric is a polynomial fit: 9e-5 on ne3).
+        pc = np.asarray(self.h_grid["physical_coords"])
+        n = pc.shape[1] - 1
+
+        def unit(i, j):
+            lat, lon = pc[:, i, j, 0], pc[:, i, j, 1]
+            return np.stack([np.cos(lat) * np.cos(lon),
+                             np.cos(lat) * np.sin(lon), np.sin(lat)], -1)
+
+        def triangle(a, b, d):
+            dot = lambda x, y: np.einsum("ek,ek->e", x, y)  # noqa: E731
+            return 2.0 * np.arctan2(np.abs(dot(a, np.cross(b, d))),
+                                    1.0 + dot(a, b) + dot(b, d) + dot(d, a))
+
+        p = [unit(0, 0), unit(0, n), unit(n, n), unit(n, 0)]
+        quad = (triangle(p[0], p[1], p[2]) + triangle(p[0], p[2], p[3])) * c.rearth ** 2
+        np.testing.assert_allclose(area.reshape(-1, 4).sum(axis=1), quad, rtol=2e-4)
+
     def test_cell_centres_are_valid_coordinates(self):
         lat, lon = self.grid.latitudes, self.grid.longitudes
         self.assertEqual(lat.shape, (self.grid.num_cols,))

@@ -10,6 +10,22 @@ container operation into its run so three model compiles cover what five
 used to.
 
 Marked @pytest.mark.slow so they run in PR CI coverage checks.
+
+2026-10 shrink pass (#1143): already at the floor for what each test
+asserts. Each of the three ``@pytest.mark.slow`` methods below is ONE
+single-day run at the smallest grid/level count that still exercises its
+own container operation (``replace``/``remove``/``cloud_scheme="2m"``) —
+merging any two would convolve two independent container paths into one
+compounded configuration, which is not evidence about either path alone
+(the whole point of this file's 2024 "three compiles instead of five"
+consolidation). Measured locally: the SPEEDY test
+(``test_speedy_composable_replace_and_run``) runs in ~10 s — the ~150 s this
+PR's timing table attributes to it in CI does not reproduce locally and is
+most likely scheduling/queueing noise in the "rest" shard's `-n 4` worker
+pool, not this test's own cost (``configurations_test.py``'s slow tests show
+the same pattern). The two ECHAM tests are genuinely ~100-115 s locally,
+all of it RRTMGP + 1M/2M-microphysics compile at the already-minimal T21
+(64x32 nodal) L8 grid they share with every other test in this file.
 """
 
 import unittest

@@ -70,14 +70,30 @@ def rel_hum_to_spec_hum(ta, ps, sig, rh):
 @jit
 def get_qsat(ta, ps, sig):
     """Compute saturation specific humidity.
-    
+
     Args:
         ta: Absolute temperature [K]
         ps: Normalized pressure (p/1000 hPa)
         sig: Sigma level
-    
+
     Returns:
         qsat: Saturation specific humidity (g/kg)
+
+    Deliberately NOT delegated to a shared saturation module (#615's
+    "decide and document" item for this file). ``speedy.f90``'s own
+    ``get_qsat``/``shtorh`` hardcodes this exact Tetens form in these exact
+    units (``ps`` as p/1000 hPa, ``qsat`` in g/kg, ``e0 = 6.108e-3`` already
+    folded into those units) — the reference formulation SPEEDY's Fortran
+    fidelity this port targets, not a quantity jcm is free to re-derive from
+    :mod:`jcm.physics.thermodynamics` (ECHAM's Sonntag tables) or
+    :mod:`jcm.physics.convection.saturation` (the shared Tetens module in
+    SI units/kg-kg, used by Betts-Miller and JAM). Converting this call site
+    would change speedy_vdiff/speedy_shortwave/speedy_surface_flux output
+    (every reader of ``humidity.rh``) against the Fortran reference by
+    whatever the units/constant reconciliation introduces — out of scope for
+    a numerics-hygiene consolidation. See ``convection/saturation.py`` for
+    the shared module every OTHER non-ECHAM Tetens caller uses instead of a
+    private copy.
 
     """
     e0 = 6.108e-3

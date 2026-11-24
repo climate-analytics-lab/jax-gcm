@@ -806,6 +806,54 @@ class TestRadiationEffectiveRadii:
         assert float(jnp.max(r_rad)) == 0.0
         assert bool(jnp.all(r_diag > 0.0))
 
+    def test_cloud_fraction_raw_gives_the_in_cloud_condensate_a_live_derivative(self):
+        """``cloud_fraction_raw`` (#973) reaches the condensate FEEDING the
+        effective-radius law.
+
+        Review finding on this PR: the mask-gradient fix originally only
+        reached the radiation term's own in-cloud condensate/cover, not
+        ``radiation_effective_radii`` -- it still called the plain, zero-
+        derivative-at-the-mask ``in_cloud_condensate`` internally, even when
+        the caller had the raw cover in hand. Passing it through
+        ``cloud_fraction_raw`` fixes that for the IN-CLOUD CONDENSATE
+        (``cw_in``/``ci_in``) the law is built from, checked here directly.
+
+        It does NOT reach the FINAL radius ``echam_cloud_effective_radii``
+        returns: that function's own ``jnp.where(cloud_water_in_cloud > 0,
+        ..., 0)`` guard is not a stylistic zero -- the Martin et al. (1994)
+        law it guards is a cube root of the water content, whose derivative
+        is genuinely infinite at exactly 0 (the "singular-point case"
+        ``docs/source/design/surrogate_gradients.md`` names for square
+        roots; a cube root has the same ``x**(-2/3)`` blow-up). Bypassing
+        the guard would trade a zero derivative for a NaN/Inf one -- worse,
+        not better -- so closing that specific gap needs its own smoothed
+        surrogate of the cube root, not a bypass; tracked as a further
+        instance of the same "downstream hard gate blocks an upstream
+        surrogate" class as jax-gcm#1093, not attempted here.
+        """
+        from jcm.physics.clouds.cloud_data import condensate_masked_cover
+        from jcm.physics.radiation.mcica import (
+            in_cloud_condensate, in_cloud_condensate_with_mask_gradient)
+
+        cf = jnp.array(0.5)
+        qi = jnp.array(0.0)
+
+        def cw_in(qc, with_raw):
+            masked = condensate_masked_cover(cf, qc, qi)
+            if with_raw:
+                return in_cloud_condensate_with_mask_gradient(
+                    qc, masked, cf, eps=1.0e-3)
+            return in_cloud_condensate(qc, masked, eps=1.0e-3)
+
+        v_omitted = cw_in(jnp.float32(0.0), False)
+        v_passed = cw_in(jnp.float32(0.0), True)
+        np.testing.assert_allclose(np.asarray(v_omitted), np.asarray(v_passed))
+
+        grad_omitted = jax.grad(lambda q: cw_in(q, False))(jnp.float32(0.0))
+        grad_passed = jax.grad(lambda q: cw_in(q, True))(jnp.float32(0.0))
+        assert float(grad_omitted) == 0.0
+        assert float(grad_passed) == pytest.approx(1.0 / 0.5)
+
     @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
     def test_gradients_are_live_in_both_modes(self, prognostic):
         """Both AD modes match a difference, and every physical input is live.
@@ -849,8 +897,19 @@ class TestRadiationEffectiveRadii:
 
         number_inputs = (("['qnc']", "['qni']") if prognostic
                          else ("['cdnc_factor']",))
+        # rtol 3e-3, not 2e-3: #1130 split eff_liquid_droplet_radius's cube
+        # root of the quotient into a cube root of the numerator and of the
+        # floored CDNC separately (a float32 reverse-mode overflow fix, see
+        # cloud_utils.py). Two independently-rounded fractional powers (and
+        # the division of their results) accumulate slightly more float32
+        # rounding than the single combined power did; this projected
+        # directional derivative's jvp-vs-central-difference agreement moves
+        # from <0.2% to ~0.26% in the prognostic (2M) case as a result --
+        # still well inside a legitimate float32 rounding margin, not a
+        # wrong derivative (the 1m/non-prognostic case, unaffected, stays
+        # under 2e-3).
         check_gradients(
-            radii, (inputs,), rtol=2e-3,
+            radii, (inputs,), rtol=3e-3,
             live_inputs=("['qc']", "['qi']", "['cloud_fraction']",
                          "['temperature']", *number_inputs))
 
@@ -877,3 +936,87 @@ class TestRadiationEffectiveRadii:
             1.0e-3)
         for a, b in zip(flat, gridded):
             np.testing.assert_array_equal(np.asarray(grid(a)), np.asarray(b))
+
+
+class TestHostEffectiveRadii:
+    """``host_effective_radii``: a host's own radii, clamped like jcm's own (#1135)."""
+
+    def _clouds(self, r_liq, r_ice):
+        from types import SimpleNamespace
+        return SimpleNamespace(r_eff_liq=jnp.asarray(r_liq),
+                               r_eff_ice=jnp.asarray(r_ice))
+
+    def test_missing_attributes_raise_with_a_clear_message(self):
+        from types import SimpleNamespace
+
+        from jcm.physics.radiation.cloud_optics import host_effective_radii
+        with pytest.raises(ValueError, match="use_host_effective_radii"):
+            host_effective_radii(
+                SimpleNamespace(), jnp.array([1.0e-4]), jnp.array([0.0]),
+                jnp.array([0.5]), 1.0e-3)
+
+    def test_clamps_an_out_of_range_host_radius_in_cloud(self):
+        from jcm.physics.radiation.cloud_optics import (
+            RRTMGP_ICE_RADIUS_RANGE_UM, RRTMGP_LIQUID_RADIUS_RANGE_UM,
+            host_effective_radii,
+        )
+        clouds = self._clouds(r_liq=jnp.array([1.0e4]), r_ice=jnp.array([1.0e-4]))
+        r_liq, r_ice = host_effective_radii(
+            clouds, jnp.array([1.0e-4]), jnp.array([1.0e-4]),
+            jnp.array([0.5]), 1.0e-3)
+        assert float(r_liq[0]) == RRTMGP_LIQUID_RADIUS_RANGE_UM[1]
+        assert float(r_ice[0]) == RRTMGP_ICE_RADIUS_RANGE_UM[0]
+
+    def test_forces_zero_in_a_clear_cell_regardless_of_host_value(self):
+        """A host radius for a condensate-free layer is masked to 0, not trusted."""
+        from jcm.physics.radiation.cloud_optics import host_effective_radii
+        clouds = self._clouds(r_liq=jnp.array([11.0]), r_ice=jnp.array([40.0]))
+        r_liq, r_ice = host_effective_radii(
+            clouds, jnp.array([0.0]), jnp.array([0.0]), jnp.array([0.5]), 1.0e-3)
+        assert float(r_liq[0]) == 0.0
+        assert float(r_ice[0]) == 0.0
+
+    def test_agrees_with_the_internal_law_when_the_host_supplies_it(self):
+        """A host radius equal to jcm's own law passes the clamp unchanged.
+
+        ``cloud_fraction = 1`` in the cloudy cell makes ``in_cloud_condensate``
+        (grid-mean / max(cf, eps)) equal the grid-mean exactly, so the SAME
+        ``qc``/``qi`` can be handed to both the low-level in-cloud law
+        (``echam_cloud_effective_radii``) and the grid-mean-based
+        ``host_effective_radii`` without a separate in-cloud/grid-mean
+        conversion obscuring the comparison.
+        """
+        from jcm.physics.radiation.cloud_optics import (
+            echam_cloud_effective_radii, host_effective_radii)
+        qc = jnp.array([3.0e-4, 0.0])
+        qi = jnp.array([5.0e-5, 0.0])
+        cf = jnp.array([1.0, 0.0])
+        t = jnp.array([260.0, 260.0])
+        p = jnp.array([70000.0, 70000.0])
+        cdnc = jnp.array([1.0e8, 1.0e8])
+        icnc = jnp.array([3.0e5, 3.0e5])
+        want_liq, want_ice = echam_cloud_effective_radii(
+            qc, qi, t, p, cdnc, icnc, False, True)
+        clouds = self._clouds(r_liq=want_liq, r_ice=want_ice)
+        got_liq, got_ice = host_effective_radii(clouds, qc, qi, cf, 1.0e-3)
+        np.testing.assert_array_equal(np.asarray(got_liq), np.asarray(want_liq))
+        np.testing.assert_array_equal(np.asarray(got_ice), np.asarray(want_ice))
+
+    def test_broadcasting_native_over_the_horizontal_layout(self):
+        """A (kx,) column and a (kx, ncols) block agree per column."""
+        from jcm.physics.radiation.cloud_optics import host_effective_radii
+        col_liq, col_ice = jnp.array([9.0, 0.0]), jnp.array([30.0, 0.0])
+        col_cw, col_ci = jnp.array([1.0e-4, 0.0]), jnp.array([2.0e-5, 0.0])
+        col_cf = jnp.array([0.5, 0.0])
+        flat = host_effective_radii(
+            self._clouds(col_liq, col_ice), col_cw, col_ci, col_cf, 1.0e-3)
+
+        ncols = 3
+        bcast = lambda a: jnp.broadcast_to(a[:, None], (2, ncols))  # noqa: E731
+        block = host_effective_radii(
+            self._clouds(bcast(col_liq), bcast(col_ice)),
+            bcast(col_cw), bcast(col_ci), bcast(col_cf), 1.0e-3)
+        for a, b in zip(flat, block):
+            np.testing.assert_array_equal(
+                np.broadcast_to(np.asarray(a)[:, None], (2, ncols)),
+                np.asarray(b))

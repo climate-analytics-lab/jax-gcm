@@ -202,10 +202,17 @@ def make_labeller(base_seed: int = 0):
             ssa_lw_per_band=_f32(batch["ssa_lw_per_band"]),
             asy_lw_per_band=_f32(batch["asy_lw_per_band"]),
         )
+        orbital_phase = _f32(batch["orbital_phase"])
+        # Every SolarGeometry leaf is vmapped over the column axis here, so
+        # the calendar fields (read only by GCR ionisation, never by
+        # radiation) are given per-column zeros rather than their scalar
+        # defaults.
         solar = SolarGeometry(
-            tyear=_f32(batch["orbital_phase"]) / (2.0 * jnp.pi),
-            orbital_phase=_f32(batch["orbital_phase"]),
+            tyear=orbital_phase / (2.0 * jnp.pi),
+            orbital_phase=orbital_phase,
             synodic_phase=_f32(batch["synodic_phase"]),
+            calendar_year=jnp.zeros_like(orbital_phase),
+            day_of_year=jnp.zeros_like(orbital_phase),
         )
         _, diag = vmapped(
             _f32(batch["temperature"]), _f32(batch["specific_humidity"]),

@@ -47,11 +47,11 @@
   (``aerosol_module='jam'``, jcm's analogue of ECHAM's ``lham``) it uses the
   **updraft area** ``pmfu/(zwu·ρ_u)`` — ``ρ_u = p/(R_d·T_u)`` the updraft
   density, ``zwu = 2`` m/s the assumed in-cloud updraft speed — evaluated
-  over the plume profile and ECHAM's sub-cloud taper. This is the identical
-  footprint the JAM convective wet deposition uses for below-cloud washout
-  (``updraft_area_cover`` is shared between the two), so the rain the
-  aerosol scavenging sees and the rain the evaporation depletes agree by
-  construction.
+  over the plume profile and ECHAM's sub-cloud taper. The JAM convective wet deposition uses the
+  same function (``updraft_area_cover``) for below-cloud washout, but with the
+  environment density in place of the updraft density, since
+  ``ConvectionData`` publishes no updraft temperature (a difference under
+  2 %), so the two footprints agree closely rather than exactly.
 - **SPEEDY convection** (``jcm/physics/convection/speedy_convection.py::diagnose_convection``)
   — SPEEDY's simplified Tiedtke (1993) mass-flux scheme with a
   conditional-instability trigger on saturation moist static energy.
@@ -78,8 +78,11 @@ carries, where the plume stops and where it rains are hard comparisons in
    surface evaporation has it delivered to the lowest layer. Under a
    dynamical core the dynamics part is the received humidity minus the
    carried post-physics humidity (``_post_physics_state``, the state the
-   dynamics advanced from), so the part of the previous physics tendency the
-   spectral projection discarded is not read as convergence: ECHAM's
+   dynamics advanced from). That is exact whatever the core does with the
+   physics increment; Dinosaur keeps humidity on the grid by default, as
+   ECHAM does, and where it is stored spectrally
+   (``dycore.nodal_humidity: false``) the part of the previous physics
+   tendency the projection discarded is still not read as convergence: ECHAM's
    ``pqte`` is the gridpoint dynamics tendency and has no such term, and
    counting it raises ``zdqpbl`` exactly where convection dried a column, a
    grid-scale positive feedback that stipples the convective precipitation.
@@ -182,24 +185,44 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   ``t63-echam-1m``) that is a heating dipole estimated at order 10 K/hr,
   which jcm does not reproduce. Wherever it is at most one interface above,
   the two agree.
-- `science` / `compute` (stopgap) — ECHAM bounds the mass flux, not the
-  heating: the cloud-base flux and the per-level entrainment are held to the
-  layer's air mass per step (``zmfmax = layer_mass/dt``, ``mo_cumastr.f90``
-  and ``mo_cuascent.f90::cuasc``, both ported). jcm adds a safety net ECHAM
-  does not have (#961): an explicitly-labelled stopgap caps the convective
-  T-tendency at 5 K/hr
-  (``_DTDT_MAX``) and rescales the **whole** ledger homogeneously — T, q,
-  qc/qi, precipitation, the mass fluxes with the tracer transport they drive,
-  **and the momentum tendencies** ``dudt``/``dvdt``, which share the same mass
-  flux — preserving column conservation by linearity, as ECHAM's ``zmfub1``
-  amplitude scaling does. This cap is the documented cause of a cap-pinned
-  single-layer heating artifact in pathological columns.
+- `science` — the downdraft's rain uptake is bounded by what the FINAL
+  ascent generates, not the first. ECHAM's ``cumastr`` scales the FIRST
+  ascent's downdraft to the closed cloud-base flux and re-runs ``cuasc``
+  rather than re-running the downdraft (``mo_cumastr.f90:944-986``); where
+  the re-run (e.g. deep-to-shallow demoted) ascent rains less than that
+  stale, scaled downdraft takes up, ECHAM's own floor on ``cuflx``'s rain
+  and snow fluxes (``mo_cufluxdts.f90:324-325``) creates the shortfall as
+  water, since ``cudtdq`` still charges the unfloored ``pdmfup + pdmfdp`` to
+  the heat/moisture ledger. ``ConvectionParameters.
+  conservative_downdraft_uptake`` (default ``True``) bounds the uptake
+  instead: ``convective_precip_fluxes`` forgives exactly that shortfall —
+  per phase, since the floor acts on rain and snow independently — from the
+  deepest matching-phase downdraft-active levels upward, before the floor
+  runs, so the column's water and enthalpy budgets close exactly and
+  ``convection.precip_floor_source`` reads ~0; the forgiveness is an exact
+  no-op wherever ECHAM's own floor was never going to bind, so it cannot
+  move a column the deviation does not apply to. ECHAM's own
+  (non-conservative) floor stays reachable bit-for-bit with
+  ``conservative_downdraft_uptake = False``, for an A/B of convective
+  precipitation and the global water budget against the released
+  behaviour. None of the 758 ``echam_cumastr_reference`` columns exercise
+  ECHAM's floor at all (``cumastr_reference_test.py::
+  TestConservativeDowndraft``), and nor does the whole-model RCE column's
+  present (RRTMGP) trajectory over days 40-80
+  ({doc}`../design/rce_testbed`); the deviation is demonstrated on a
+  synthetic column built to exercise it instead
+  (``flux_tendencies_test.py::TestConservativeDowndraftUptake``).
+- `science` / `compute` — ECHAM bounds the mass flux, not the heating: the
+  cloud-base flux and the per-level entrainment are held to the layer's air
+  mass per step (``zmfmax = layer_mass/dt``, ``mo_cumastr.f90:568-569`` and
+  ``mo_cuascent.f90::cuasc`` l.301-367, both ported). jcm applies no further
+  limiter on top of those: the per-level ledger — T, q, qc/qi, precipitation,
+  the mass fluxes with the tracer transport they drive, **and the momentum
+  tendencies** ``dudt``/``dvdt``, which share the same mass flux — is
+  published exactly as ``tiedtke_nordeng_convection`` produces it, with no
+  rescale between the scheme and the published tendencies.
 
 **Status & known limitations.**
-- The 5 K/hr tendency cap is a **safety net, not physics**; it fires only where
-  the parcel-vs-environment balance has gone pathological (healthy tropical deep
-  convection is ~1 K/hr). It has no ECHAM counterpart; whether it can go is
-  a measurement of where it fires and of stability without it (#961).
 - A ``cubase`` column whose sub-cloud layer loses moisture (vertical
   diffusion carrying more out through the cloud base than the surface and
   the dynamics bring in), or whose cloud-base parcel is within 1 % of the
@@ -207,27 +230,21 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   can then give it a plume.
 - SPEEDY and Betts-Miller are idealized alternatives; Betts-Miller is
   specific-humidity-formulated (Isca's mixing-ratio form differs at second order).
-- `differentiability` — SPEEDY's humidity trigger (a value jump in ``qdif``)
-  and its precipitation onset keep their reference values; with
-  ``convection.trigger_smoothing`` / ``precnv_smoothing`` > 0 they carry the
-  derivatives of sigmoid gates and a softplus. The cloud top ``iptop`` is a
-  level index and stays hard. See
+- `differentiability` — SPEEDY's humidity trigger (a value jump in ``qdif``),
+  its precipitation onset and its surface-pressure switch (``psa > psmin``,
+  with the clipped ramp ``psa·min(1, (psa − psmin)·2/(1 − psmin))`` it puts
+  on the cloud-base mass flux: no derivative in ``psmin`` below the switch
+  and, at the default ``psmin``, nowhere the surface pressure exceeds
+  900 hPa) keep their reference values; with ``convection.trigger_smoothing``
+  / ``precnv_smoothing`` / ``psmin_smoothing`` > 0 they carry the derivatives
+  of sigmoid gates, a softplus (of the precipitation onset per unit
+  cloud-base mass flux, so a switching-on plume's tangent rains at the
+  plume's own yield) and a softplus-pair ramp in surface pressure. The
+  cloud top ``iptop`` is a level index and stays hard. See
   {doc}`../design/surrogate_gradients`.
-- **Tiedtke creates water where the downdraft out-takes the plume's rain
-  (#912).** As in ECHAM, ``cumastr`` scales the first ascent's downdraft to the
-  closed flux and re-runs ``cuasc``, and ``cuflx`` floors the rain and snow
-  fluxes at zero while the vapour ledger keeps the unfloored
-  ``pdmfup + pdmfdp``. A second ascent that rains less than the scaled
-  downdraft takes up (a deep-to-shallow demotion) therefore creates the
-  difference as water. The amount is published as
-  ``convection.precip_floor_source``, so a column budget closes as
-  ``E - P + precip_floor_source``; in the whole-model RCE column, with grey
-  or RRTMGP radiation, it is below 0.001 mm/d over days 40-80
-  ({doc}`../design/rce_testbed`).
-
 **Code pointers.**
 - ``jcm/physics/convection/tiedtke_nordeng/`` — ``tiedtke_nordeng.py``
-  (``TiedtkeConvection``, the CFL cap, ``_DTDT_MAX``), ``switches.py`` (the
+  (``TiedtkeConvection``, the CFL cap), ``switches.py`` (the
   decisions' exact values and surrogates: ``ascent_test``,
   ``threshold_switch``, ``relative_threshold_switch``), ``cuadjtq.py`` (``cuadjtq``,
   ``saturation_mixing_ratio``, ``cuadjtq_newton``, ``cuadjtq_newton_evap``), ``flux_tendencies.py``
@@ -411,6 +428,83 @@ Operational notes:
   at ``0.5/(1 − 0.5·vtmpc1) ≈ 0.72`` and its interface values are not
   physical, as in the reference; no plume reaches them.
 
+## In-plume precipitation and the condensate reaching the anvil
+
+**What we do.** ``calculate_updraft`` converts plume condensate to
+precipitation in every layer that the plume crosses with a passed ascent test
+and that lies at least ``zdnoprc`` above cloud base
+(``ConvectionParameters.cu_dnoprc_ocean`` 150 hPa, ``cu_dnoprc_land``
+300 hPa): ``l_new = l/(1 + cprcon·Δφ)``, with ``Δφ`` the layer's geopotential
+depth, and ``(l − l_new)·M`` becomes the layer's precipitation formation
+``pdmfup``. The plume condensate carries no phase. What the plume does not
+precipitate leaves it by turbulent, organized and cloud-top detrainment
+(``plude``), split into the cloud-liquid and cloud-ice tendencies at the
+melting point of the environment temperature (``cudtdq``) and re-split by the
+2M scheme's ``lo2`` test. ``cprcon`` therefore sets how much condensate
+reaches the upper-tropospheric detrainment levels, the convective ice supply
+of anvil cloud. ``cprcon`` defaults to ECHAM6's T31/T63 value 2.5e-4 in the
+scheme; the ``echam-jam-m7`` preset sets ECHAM-HAM's value for its pairing,
+9e-4 with ``entrpen`` 2e-4 (below). It is a differentiable leaf and was a
+lever of the v3.1 release fit.
+
+Because ``cprcon`` multiplies a geopotential difference, the conversion is
+2.45e-3 per metre of ascent: the plume loses half or more of its condensate
+to precipitation in each 400-600 m L47 layer, against about 6 % to
+detrainment. In 3-hourly instantaneous output of the T63L47 JAM (M7)
+configuration in January, deep (``ktype = 1``) plumes over the warm pool
+(90E-180E, 15S-15N) precipitate **87.5 %** of the condensate they form inside
+the plume, detrain **7.9 %** as cloud liquid and **4.6 %** as cloud ice; 0.4 %
+leaves them as ice above 250 hPa. Their condensate falls from about
+0.65 g/kg at 500 hPa to 0.13 g/kg at 200 hPa. The ascent's per-layer ledger is
+pinned against a line-by-line transliteration of ``cuasc``/``cuentr``
+(``cuasc_budget_reference_test.py``).
+
+The constant controls the tropical ice water path strongly. In 30-day January
+runs from a spun-up state, ``cprcon = 1e-4`` raises the 15S-15N ice water
+path from 39 to 69 g/m² (ESA-CCI: 66) and ECHAM-HAM's ``9e-4`` lowers it to
+19 g/m², with the cloud radiative effects moving by 7-10 W/m². Halving the 2M
+ice fall speed or ``ccsaut`` instead raises it by about 20 % and leaves the
+convective ice supply unchanged.
+
+**What ECHAM does.** ``mo_cuascent.f90::cuasc`` lines 452-457:
+``zprcon = MERGE(0, cprcon, zpbase − paphp1(jk) < zdnoprc)``,
+``zlnew = plu/(1 + zprcon·(pgeoh(jk) − pgeoh(jk+1)))``,
+``pdmfup = MAX(0, (plu − zlnew)·pmfu)``, with ``zdnoprc = MERGE(zdlev, 1.5e4,
+ldland)`` and ``zdlev = 3e4`` (lines 168, 454). ``cprcon`` is 2.5e-4 at T31/T63 and
+1.5e-4 at T127/T255 (``mo_echam_conv_constants.f90:122-135``). ECHAM-HAM with
+prognostic CDNC at T63L47 sets 2.5e-4 under Lin-Leaitch activation and 9e-4
+under Abdul-Razzak & Ghan (lines 157-171). The detrained condensate becomes
+``pxtecl``/``pxteci`` at ``tmelt`` of ``pten`` (``mo_cufluxdts.f90:646-666``).
+
+**Why we differ.** We do not, in form.
+- `science` — the scheme's default is ECHAM6's T63 value. The ``echam-jam-m7``
+  preset follows ECHAM-HAM instead: ``mo_echam_conv_constants.f90`` l.140-171
+  re-sets the Tiedtke constants when ``lcdnc_progn`` is on, by truncation,
+  level count and activation scheme, and for T63 L47 with Abdul-Razzak & Ghan
+  activation (``ncd_activ = 2``, the preset's) the pair is ``cprcon = 9e-4``,
+  ``entrpen = 2e-4`` (``cmfctop`` 0.2 and ``entrscv`` 3e-3 are the ECHAM
+  values the scheme already carries). At 2.5e-4 the M7 host's updraft converts
+  3-4 % of its condensate per layer, carries about 10 mg/kg of ice to 250 hPa
+  and detrains it there, the 2M scheme sublimates most of it on arrival, and
+  the tropical 150-400 hPa layer ends 1.4 times ERA5 in specific humidity and
+  1-1.5 K warm, a clear-sky OLR deficit of about 4 W/m²; with HAM's pair the
+  layer is 0.8-1.1 times ERA5 ({doc}`../design/jam_aerosol_retune`, "The
+  structural refit"). HAM's retune also pairs ``ccsaut = 900`` with these;
+  the preset keeps 95 by maintainer decision (2026-11-07): with 9e-4 already
+  thinning the anvil, 900 would leave too little ice (see
+  {doc}`clouds_microphysics`). The other ECHAM presets, whose droplet number
+  is not activated from HAM's aerosol, keep the ECHAM6 values.
+- `differentiability` — ``cprcon`` and ``entrpen`` are pytree leaves of
+  ``ConvectionParameters``, so the calibration and gradients reach them; their
+  values are the calibration's to set within ECHAM's range.
+
+**Status & known limitations.** With HAM's pair the M7 host's tropical upper
+troposphere is 1.5-2.3 K colder than ERA5 at 150-250 hPa, and its relative
+humidity over ice at 200-250 hPa stays 0.10-0.14 above ERA5 (#1196 tracks the
+cold point above it). The tropical ice water path of the T63 JAM
+configurations sits below ESA-CCI at either ``cprcon``; that deficit is the
+conversion's, not a departure from the reference.
+
 ## Heat capacity of the Tiedtke plume and ledger
 
 **What we do.** Every static-energy and latent-heat conversion the Tiedtke
@@ -510,9 +604,19 @@ surface-parcel CAPE diagnostic, is not part of the scheme.
   re-imposed every step never lets vdiff build it. Failure of this assumption is
   silent: the plume simply never exists, while turbulent mixing keeps the
   profiles plausible. See {doc}`../design/convective_trigger_soundings`.
-- A column carries **one plume per step**, as in the reference: ``cuasc``
-  calls ``cubasmc`` only while ``ldcum`` is false in the current ascent, and a
-  ``cubase`` plume sets it at its own cloud base, whose ascent test repeats
-  ``cubase``'s — so no mid-level plume starts above a surface plume that dies
-  partway up. Where a mid-level seed's first step fails, the seed moves to
-  the next qualifying level up, as ``cubasmc``'s does.
+- A column carries **one plume per step**, as in the reference. ``cubasmc``
+  seeds only where ``.NOT.ldcum`` (``mo_cuascent.f90:636``), and ``cuasc`` sets
+  ``ldcum`` at the first interface whose ascent test the plume passes
+  (lines 448-449) and does not clear it again inside the level loop. A
+  ``cubase`` plume passes at its own cloud base, whose test repeats
+  ``cubase``'s, so no mid-level plume starts above a surface plume that rises
+  and then dies partway up. ``cubasmc`` re-seeds in two cases only: where a
+  mid-level seed's first step fails, when the seed moves to the next qualifying
+  level up (``find_midlevel_cloud_base``'s survival retry), and in a column
+  whose surface plume passed no interface in the first ascent, which may take
+  a mid-level plume in the second. jcm picks the cloud base before the ascent
+  scan and reproduces both. In the T63L47 JAM January configuration the deep
+  plumes that carry the convective rain reach the level of neutral buoyancy:
+  over the warm pool, 71 % of deep convective precipitation (3-hourly
+  instantaneous output) comes from plumes topping at 100-150 hPa, and 5 % from
+  plumes topping below 400 hPa.

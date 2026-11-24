@@ -1,5 +1,6 @@
 """Phase 1 tests: ARG activation core + term, incl. Ghosh-2025 Table-3 oracle."""
 
+import itertools
 import unittest
 
 import jax
@@ -18,34 +19,78 @@ from jcm.physics.aerosol.jam.activation.arg import (
 from jcm.physics.aerosol.jam.activation.arg_term import ArgActivation
 
 
-# Ghosh et al. (2025) Table 3: σ_acc -> (f, g, p).
+# Ghosh et al. (2025) Table 3 (GMD 18, 4899): σ_acc -> (f, g, p) for the
+# four widths it tabulates. The table is printed to two decimals and the
+# authors' Eq. 5 closed forms (which jcm implements) differ from it by up to
+# 0.013 in f and 0.009 in g, so f and g are checked to 0.015 here.
 _GHOSH_TABLE3 = {
-    1.4: (0.0109, 0.6608, 0.0462),
-    1.6: (0.0124, 0.5968, 0.3198),
-    1.8: (0.0141, 0.5328, 0.5221),
-    2.0: (0.0160, 0.4688, 0.6659),
-    2.1: (0.0172, 0.4368, 0.7226),
+    1.4: (0.37, 0.67, 0.88),
+    1.6: (0.60, 0.60, 0.96),
+    1.8: (0.97, 0.53, 1.01),
+    2.1: (1.94, 0.45, 1.03),
 }
 
 
+def _ghosh_eq5(sigma_acc, zeta_over_eta):
+    """Ghosh et al. (2025) Eq. 5 evaluated in float64, for exact pins."""
+    s = sigma_acc
+    f = 0.0135 * np.exp(2.367 * s)
+    g = 1.1058 - 0.315 * s
+    p_lim = -0.5073 + 1.5088 * s - 0.3699 * s ** 2
+    p = p_lim if zeta_over_eta > 1.0 else 1.5
+    return f, g, p
+
+
 class ShapeCoefficientTest(unittest.TestCase):
-    def test_ghosh2025_reproduces_table3(self):
-        # ζ/η ≤ 1 selects the p_lim polynomial branch.
-        zeta_over_eta = jnp.asarray(0.5)
+    def test_ghosh2025_matches_table3_to_rounding(self):
+        # ζ/η > 1 selects the kinetically limited polynomial for p, which is
+        # the quantity Table 3 tabulates.
+        zeta_over_eta = jnp.asarray(2.0)
         ln_sigma = jnp.asarray(0.0)  # unused by the ghosh branch
         for sigma_acc, (f_ref, g_ref, p_ref) in _GHOSH_TABLE3.items():
             f, g, p = _shape_coefficients(
                 ln_sigma, zeta_over_eta, sigma_acc, "ghosh2025",
             )
-            self.assertAlmostEqual(float(f), f_ref, delta=2e-4)
-            self.assertAlmostEqual(float(g), g_ref, delta=2e-3)
-            self.assertAlmostEqual(float(p), p_ref, delta=1.2e-2)
+            self.assertAlmostEqual(float(f), f_ref, delta=0.015)
+            self.assertAlmostEqual(float(g), g_ref, delta=0.015)
+            self.assertAlmostEqual(float(p), p_ref, delta=0.005)
 
-    def test_ghosh2025_kinetic_branch_sets_p_1p5(self):
-        f, g, p = _shape_coefficients(
+    def test_ghosh2025_eq5_exact(self):
+        # Pins the closed forms as printed in Eq. 5, independent of Table 3.
+        for sigma_acc in (1.4, 1.5, 1.6, 1.8, 2.0, 2.1):
+            for zeta_over_eta in (0.5, 2.0):
+                f, g, p = _shape_coefficients(
+                    jnp.asarray(0.0), jnp.asarray(zeta_over_eta), sigma_acc,
+                    "ghosh2025",
+                )
+                f_ref, g_ref, p_ref = _ghosh_eq5(sigma_acc, zeta_over_eta)
+                self.assertAlmostEqual(float(f), f_ref, places=6)
+                self.assertAlmostEqual(float(g), g_ref, places=6)
+                self.assertAlmostEqual(float(p), p_ref, places=5)
+
+    def test_ghosh2025_polynomial_branch_for_zeta_over_eta_above_one(self):
+        # Kinetically limited (ζ/η > 1) selects the polynomial exponent.
+        _, _, p = _shape_coefficients(
             jnp.asarray(0.0), jnp.asarray(2.0), 1.8, "ghosh2025",
         )
+        self.assertAlmostEqual(float(p), -0.5073 + 1.5088 * 1.8 - 0.3699 * 1.8 ** 2,
+                               places=5)
+
+    def test_ghosh2025_p_is_1p5_for_zeta_over_eta_at_most_one(self):
+        _, _, p = _shape_coefficients(
+            jnp.asarray(0.0), jnp.asarray(0.5), 1.8, "ghosh2025",
+        )
         self.assertAlmostEqual(float(p), 1.5)
+
+    def test_ghosh2025_clamps_width_to_fitted_range(self):
+        lo = _shape_coefficients(jnp.asarray(0.0), jnp.asarray(0.5), 1.0, "ghosh2025")
+        hi = _shape_coefficients(jnp.asarray(0.0), jnp.asarray(0.5), 3.0, "ghosh2025")
+        ref_lo = _shape_coefficients(jnp.asarray(0.0), jnp.asarray(0.5), 1.4, "ghosh2025")
+        ref_hi = _shape_coefficients(jnp.asarray(0.0), jnp.asarray(0.5), 2.1, "ghosh2025")
+        for a, b in zip(lo[:2], ref_lo[:2]):
+            self.assertAlmostEqual(float(a), float(b), places=6)
+        for a, b in zip(hi[:2], ref_hi[:2]):
+            self.assertAlmostEqual(float(a), float(b), places=6)
 
     def test_arg2000_coefficients(self):
         ln_sigma = jnp.log(jnp.asarray(2.0))
@@ -398,6 +443,29 @@ class ArgTermTest(unittest.TestCase):
         self.assertTrue(bool(jnp.all(diag["activated_cdnc"] >= 0.0)))
         self.assertTrue(bool(jnp.all(diag["activated_fraction"] <= 1.0 + 1e-6)))
 
+    def test_term_publishes_activation_potential_as_activated_cdnc(self):
+        """ARG's own output never has cloud_fraction baked in (jax-gcm#1160),
+        so ``activation_potential`` must be published and must equal
+        ``activated_cdnc`` exactly -- a plain alias, not a second
+        computation.
+        """
+        nlev, ncols = 3, 2
+        term = ArgActivation()
+        from jcm.physics_interface import PhysicsState
+        state = PhysicsState.zeros((nlev, ncols)).copy(
+            temperature=jnp.full((nlev, ncols), 283.0),
+            specific_humidity=jnp.full((nlev, ncols), 0.004),
+        )
+        diagnostics = {
+            "_jam_state": self._jam_state(nlev, ncols),
+            "pressure_full": jnp.full((nlev, ncols), 9.0e4),
+            "air_density": jnp.full((nlev, ncols), 1.1),
+        }
+        _, diag = term(state, diagnostics, None, None)
+        self.assertIn("activation_potential", diag)
+        self.assertTrue(jnp.array_equal(
+            diag["activation_potential"], diag["activated_cdnc"]))
+
     def test_bad_variant_rejected(self):
         with self.assertRaises(ValueError):
             ArgActivation(variant="nope")
@@ -433,6 +501,162 @@ class ArgUpdraftAtZeroTkeTest(unittest.TestCase):
         self.assertAlmostEqual(float(d_live),
                                4 * 0.5 / (2 * np.sqrt(0.5 * 2.0 / 3.0)),
                                places=5)
+
+
+def _jacobian_fn(variant):
+    """Jacobian of all five outputs w.r.t. (w, N, kappa, T, p, r_g, sigma_g)."""
+
+    def f(x):
+        w, n, kappa, t, p, r, sigma = x
+        res = arg_activation(
+            r_dry=jnp.full((1, 1, 1), r),
+            kappa=jnp.full((1, 1, 1), kappa),
+            number_vol=jnp.full((1, 1, 1), n),
+            sigma_g=jnp.full((1, 1, 1), sigma),
+            can_activate=jnp.ones((1, 1, 1), x.dtype),
+            updraft=jnp.full((1, 1), w),
+            temperature=jnp.full((1, 1), t),
+            pressure=jnp.full((1, 1), p),
+            sigma_acc=1.5,
+            variant=variant,
+        )
+        return jnp.stack([jnp.sum(v) for v in res])
+
+    return jax.jit(jax.vmap(jax.jacrev(f)))
+
+
+# The edges of #1109's gradient contract: updraft at zero, below and at the
+# 1e-3 m/s floor; number from none (and a denormal, and one particle per
+# 1e12 m^3) to far past polluted; kappa from zero to a salt-like 100; the
+# full model temperature range. 7*9*6*3 = 1134 points, matching the issue.
+_EDGE_W = (0.0, 1e-4, 1.0e-3, 1e-2, 0.5, 5.0, 50.0)
+_EDGE_N = (0.0, 1e-30, 1e-12, 1.0, 1e6, 1e8, 3e9, 1e11, 1e13)
+_EDGE_K = (0.0, 1e-12, 1e-3, 0.1, 1.1, 100.0)
+_EDGE_T = (200.0, 290.0, 320.0)
+
+
+class ArgGradientContractTest(unittest.TestCase):
+    """float32/float64 reverse-mode Jacobian is finite everywhere (#1109).
+
+    Before the fix (``sm = sqrt(4A^3/(27 kappa r^3))`` and a ``1e-30``
+    number floor), 1099 of these 1134 points had a non-finite Jacobian
+    entry in float32 (ordinary aerosol: kappa=1.1, r=0.1 um already
+    overflows ``d(sm)/d(kappa)``; N=0 NaNs every derivative through the
+    `n_s`/`n_total` floors) — confirmed against the pre-#1109 code as
+    part of this fix. After it, zero are.
+    """
+
+    def _edge_points(self, dtype):
+        pts = [
+            (w, n, k, t, 9.0e4, 0.1e-6, 1.5)
+            for w, n, k, t in itertools.product(_EDGE_W, _EDGE_N, _EDGE_K, _EDGE_T)
+        ]
+        return pts, jnp.asarray(pts, dtype)
+
+    def test_jacobian_finite_at_the_edges_float32(self):
+        for variant in ("arg2000", "ghosh2025"):
+            with self.subTest(variant=variant):
+                pts, x = self._edge_points(jnp.float32)
+                jac = np.asarray(_jacobian_fn(variant)(x))
+                bad = ~np.all(np.isfinite(jac), axis=(1, 2))
+                self.assertFalse(bad.any(), [pts[i] for i in np.flatnonzero(bad)[:5]])
+
+    def test_jacobian_finite_at_the_edges_float64(self):
+        for variant in ("arg2000", "ghosh2025"):
+            with self.subTest(variant=variant):
+                with jax.enable_x64(True):
+                    pts, x = self._edge_points(jnp.float64)
+                    jac = np.asarray(_jacobian_fn(variant)(x))
+                bad = ~np.all(np.isfinite(jac), axis=(1, 2))
+                self.assertFalse(bad.any(), [pts[i] for i in np.flatnonzero(bad)[:5]])
+
+    def test_grad_wrt_kappa_and_radius_does_not_overflow_float32(self):
+        """Regression for the ``sm`` rewrite: ordinary aerosol, float32.
+
+        With the pre-#1109 ``sqrt(4 A^3 / (27 kappa r^3))`` the reverse pass
+        of the division carries ``1/(27*kappa*r^3)**2``; for kappa=1.1,
+        r=0.1 um that denominator is ~3e-20, whose square underflows
+        float32 to 0, so d(sm)/d(kappa) and d(sm)/d(r_dry) were `inf`.
+        """
+        x = jnp.asarray([[0.3, 3e8, 1.1, 290.0, 9e4, 0.1e-6, 1.5]], jnp.float32)
+        jac = np.asarray(_jacobian_fn("arg2000")(x))[0]
+        self.assertTrue(np.all(np.isfinite(jac)))
+
+    def test_grad_wrt_number_vanishes_cleanly_at_zero(self):
+        """N=0 (an empty mode) is finite, not NaN, in every output's grad."""
+        x = jnp.asarray(
+            [[0.3, n, 1.1, 290.0, 9e4, 0.1e-6, 1.5] for n in (0.0, 1e-30, 1e-12)],
+            jnp.float32,
+        )
+        jac = np.asarray(_jacobian_fn("arg2000")(x))
+        self.assertTrue(np.all(np.isfinite(jac)))
+
+    def test_sm_rewrite_matches_golden_to_float32_rounding(self):
+        """The rewritten ``sm`` is the same formula to rounding, not a
+        different one: compare against the plain ``sqrt(4A^3/(27 kappa
+        r^3))`` evaluated at float64 (where it cannot overflow) over a
+        sweep of ordinary kappa/r_dry.
+        """
+        from jcm.physics.aerosol.jam.activation.arg import _T_REF
+        import jcm.constants as c
+
+        a_kelvin = float(2.0 * c.surface_tension_water * c.m_water
+                         / (c.rhow * c.r_universal * _T_REF))
+        for kappa in (1e-10, 1e-3, 0.1, 0.6, 1.1, 100.0):
+            for r in (1e-10, 1e-8, 0.05e-6, 0.1e-6, 1e-6):
+                with self.subTest(kappa=kappa, r=r):
+                    ref = np.sqrt(4.0 * a_kelvin ** 3 / (27.0 * kappa * r ** 3))
+                    got = (2.0 / np.sqrt(27.0 * kappa)) * (a_kelvin / r) ** 1.5
+                    np.testing.assert_allclose(got, ref, rtol=1e-12)
+
+    def test_activated_fraction_does_not_dilute_a_tiny_fully_activated_mode(self):
+        """A floor on ``n_total`` (the first fix's choice, matching ``n_s``)
+        changes the *forward value* of ``activated_fraction`` for any
+        ``0 < N < 1e-12`` -- caught in review, PR #1113. For this
+        (realistic) population, ARG predicts complete activation (``f_act``
+        -> 1) as N -> 0 (negligible competition for water vapour): the
+        fraction must stay exactly 1, at any N > 0, not read back as
+        ``N / 1e-12`` (e.g. 0.1 at N = 1e-13 m^-3 -- a real, consequential
+        10x error in a [0, 1] fraction, not merely a float32-rounding one).
+        """
+        def run(n):
+            n_act, frac, *_ = arg_activation(
+                r_dry=jnp.full((1, 1, 1), 0.05e-6), kappa=jnp.full((1, 1, 1), 0.6),
+                number_vol=jnp.full((1, 1, 1), n), sigma_g=jnp.full((1, 1, 1), 1.8),
+                can_activate=jnp.full((1, 1, 1), 1.0),
+                updraft=jnp.full((1, 1), 0.5), temperature=jnp.full((1, 1), 283.0),
+                pressure=jnp.full((1, 1), 9.0e4), sigma_acc=1.8, variant="arg2000")
+            return float(n_act.ravel()[0]), float(frac.ravel()[0])
+
+        for n in (1e-20, 1e-15, 1e-13, 1e-12, 1e-11, 1e-6, 1.0):
+            with self.subTest(n=n):
+                n_act, frac = run(n)
+                self.assertAlmostEqual(n_act, n, delta=max(n * 1e-5, 1e-30))
+                self.assertAlmostEqual(frac, 1.0, places=5)
+
+        # N = 0 (every particle gone) is the one case that must mask to 0,
+        # not divide-by-zero to 1 or NaN.
+        n_act0, frac0 = run(0.0)
+        self.assertEqual(n_act0, 0.0)
+        self.assertEqual(frac0, 0.0)
+
+    def test_activated_fraction_gradient_finite_down_to_the_smallest_float32(self):
+        """`stable_quotient` must keep the reverse pass finite even where
+        the quotient's own derivative legitimately scales as ``1/N``.
+        """
+        def loss(n):
+            _, frac, *_ = arg_activation(
+                r_dry=jnp.full((1, 1, 1), 0.05e-6), kappa=jnp.full((1, 1, 1), 0.6),
+                number_vol=jnp.full((1, 1, 1), n), sigma_g=jnp.full((1, 1, 1), 1.8),
+                can_activate=jnp.full((1, 1, 1), 1.0),
+                updraft=jnp.full((1, 1), 0.5), temperature=jnp.full((1, 1), 283.0),
+                pressure=jnp.full((1, 1), 9.0e4), sigma_acc=1.8, variant="arg2000")
+            return jnp.sum(frac)
+
+        for n in (0.0, 1e-38, 1e-30, 1e-20, 1e-13, 1.0, 1e13):
+            with self.subTest(n=n):
+                g = jax.jit(jax.grad(loss))(jnp.asarray(n, jnp.float32))
+                self.assertTrue(np.isfinite(float(g)))
 
 
 if __name__ == "__main__":

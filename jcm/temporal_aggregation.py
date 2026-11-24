@@ -8,6 +8,7 @@ inside a differentiated computation.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -42,6 +43,158 @@ def time_cell_operations(cell_methods: str) -> set[str]:
         for index in range(len(words) - 2)
         if words[index:index + 2] == ["time", ":"]
     }
+
+
+# ---------------------------------------------------------------------------
+# Monthly-output scheduling (#903)
+#
+# ``monthly_means``/``MonthlyMeanAccumulator`` above correctly refuse an
+# interval mean that straddles a month boundary -- a precomputed mean cannot
+# be split into its two months after the fact. But a caller integrating with
+# one fixed ``save_interval`` from an arbitrary ``start_time`` has no way to
+# avoid ever producing such an interval: a non-midnight start, or a
+# save_interval that does not tile a 28/29/30/31-day month (5 days, say),
+# will eventually straddle one. ``schedule_monthly_segments`` below is the
+# #876 design's answer ("Real monthly output from fixed daily scans",
+# docs/source/design/datetime_v3_scope.md): lay the run out as a sequence of
+# sub-runs -- the configured ``save_interval`` for most of each month, and a
+# single shorter *edge* sub-run (exactly one output interval) wherever a
+# regular interval would otherwise cross midnight-of-start, a month start, or
+# the run's end. Every caller that wants monthly output from a real
+# ``start_time`` (``jcm.runners.run_chunked``, or any other driver) should
+# build its sequence of ``model.run``/``model.resume`` calls from this
+# schedule rather than passing one ``save_interval`` for the whole run; this
+# is the reusable, chunked-runner-independent form the issue calls "the
+# Python helper".
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class MonthlySegment:
+    """One sub-run of a #903 monthly-output schedule.
+
+    ``offset_seconds``/``duration_seconds`` are relative to the overall
+    run's ``start_time``. A caller integrates this segment with
+    ``save_interval=save_interval_seconds`` and
+    ``total_time=duration_seconds``; for a body segment (``is_edge=False``)
+    that yields ``duration_seconds // save_interval_seconds`` regular
+    intervals, for an edge segment exactly one -- sized to land on the
+    midnight, month start, or run end that the regular grid could not
+    reach without crossing it.
+    """
+
+    offset_seconds: int
+    duration_seconds: int
+    save_interval_seconds: int
+    is_edge: bool
+
+
+def schedule_monthly_segments(start_time, save_seconds: int, total_seconds: int,
+                               dt_seconds: int) -> list[MonthlySegment]:
+    """Lay out a run so no output interval crosses a month boundary.
+
+    Builds the breakpoints that any save-interval grid anchored at
+    ``start_time`` must restart at: the next midnight (only if ``start_time``
+    itself is not already at 00:00 -- #903's "leading segment", needed once,
+    since realigning to a calendar midnight is what makes a whole-day (or
+    multi-day) ``save_interval``'s intervals describe real calendar days
+    rather than an arbitrary offset of them), every month start strictly
+    between that anchor and the run's end, and the run's end itself (a
+    non-tiling total duration gets its own trailing partial interval, #903's
+    "trailing segment"). Between consecutive breakpoints, as many regular
+    ``save_seconds``-long intervals as fit become one body segment, and
+    anything short of the next breakpoint becomes a single edge segment
+    reaching it exactly -- this is also how an interior month start that the
+    regular grid overshoots gets "split": the overshooting interval is
+    truncated to a same-month edge segment, and the grid restarts fresh on
+    the other side (#903's "split any save interval at a month start").
+
+    Every edge segment's duration -- and ``save_seconds`` and
+    ``total_seconds`` themselves -- must be an exact whole number of model
+    steps (``dt_seconds``); this is checked here, before the caller
+    integrates anything, so a request with no valid schedule (e.g. a 7-minute
+    timestep against an off-grid month edge) is rejected up front rather than
+    discovered mid-run. The long-standing cross-month rejection in
+    ``monthly_means``/``MonthlyMeanAccumulator`` stays as the safety net for
+    anything that reaches them without going through a schedule built here.
+
+    Parameters
+    ----------
+    start_time
+        The run's start, in any form ``jcm.date.to_datetime`` accepts.
+    save_seconds, total_seconds, dt_seconds
+        The configured save interval, total run length and model timestep,
+        each in exact whole seconds.
+
+    Returns
+    -------
+    A list of :class:`MonthlySegment`, covering ``[0, total_seconds)`` with
+    no gaps or overlaps, in order.
+
+    """
+    from jcm.date import to_datetime
+
+    if save_seconds <= 0 or total_seconds <= 0 or dt_seconds <= 0:
+        raise ValueError(
+            "save interval, total time and model timestep must all be "
+            "positive numbers of seconds.")
+    if total_seconds % dt_seconds:
+        raise ValueError(
+            f"total_time ({total_seconds} s) is not a whole number of model "
+            f"steps ({dt_seconds} s).")
+    if save_seconds % dt_seconds:
+        raise ValueError(
+            f"run.save_interval ({save_seconds} s) is not a whole number of "
+            f"model steps ({dt_seconds} s); monthly output needs every "
+            "interval edge reachable exactly.")
+
+    start = np.datetime64(to_datetime(start_time).to_datetime64(), "s")
+
+    def offset_of(dt64) -> int:
+        return int((dt64 - start) / np.timedelta64(1, "s"))
+
+    # Breakpoints: start (0), the next midnight if `start` is not already
+    # one, every month start strictly between there and the run's end, and
+    # the run's end. A set because the leading midnight and a month start
+    # coincide exactly when `start_time` is already at 00:00 on the 1st.
+    boundaries = {0, total_seconds}
+    midnight = start.astype("datetime64[D]").astype("datetime64[s]")
+    anchor = start
+    if start != midnight:
+        next_midnight = midnight + np.timedelta64(1, "D")
+        anchor = next_midnight
+        if offset_of(next_midnight) < total_seconds:
+            boundaries.add(offset_of(next_midnight))
+
+    month_start = (anchor.astype("datetime64[M]")
+                  + np.timedelta64(1, "M")).astype("datetime64[s]")
+    while offset_of(month_start) < total_seconds:
+        boundaries.add(offset_of(month_start))
+        month_start = (month_start.astype("datetime64[M]")
+                      + np.timedelta64(1, "M")).astype("datetime64[s]")
+
+    ordered = sorted(boundaries)
+    segments = []
+    for b0, b1 in zip(ordered[:-1], ordered[1:]):
+        span = b1 - b0
+        full = (span // save_seconds) * save_seconds
+        remainder = span - full
+        if full > 0:
+            segments.append(MonthlySegment(b0, full, save_seconds, False))
+        if remainder > 0:
+            if remainder % dt_seconds:
+                edge_start = start + np.timedelta64(b0 + full, "s")
+                edge_end = start + np.timedelta64(b1, "s")
+                raise ValueError(
+                    "run.monthly_means=true: the edge interval "
+                    f"[{edge_start}, {edge_end}) ({remainder} s) is not "
+                    f"reachable in whole model steps ({dt_seconds} s); "
+                    "choose a start_time, save_interval or model timestep "
+                    "whose midnight/month boundaries line up exactly, or "
+                    "set run.end_time to one that does.")
+            segments.append(
+                MonthlySegment(b0 + full, remainder, remainder, True))
+    return segments
 
 
 def _validated_intervals(ds: xr.Dataset) -> tuple[np.ndarray, np.ndarray]:

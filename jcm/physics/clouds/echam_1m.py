@@ -42,6 +42,7 @@ from typing import NamedTuple, Optional
 from flax import struct
 
 import jcm.constants as c
+from jcm.physics.thermodynamics import grid_mean_to_in_cloud
 from jcm.physics.clouds.cloud_utils import (
     moist_isobaric_heat_capacity,
     prescribed_droplet_number,
@@ -642,11 +643,9 @@ def autoconversion_beheng(
         config: parameters (``ccraut``, ``epsilon``).
 
     """
-    qc_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_water / jnp.maximum(cloud_fraction, config.epsilon),
-        0.0,
-    )
+    # #615: the shared jcm.physics.thermodynamics helper, not an inline copy.
+    qc_in_cloud = grid_mean_to_in_cloud(
+        cloud_water, cloud_fraction, eps=config.epsilon)
     depletion = _beheng_depletion(
         qc_in_cloud, air_density, droplet_number * air_density, dt, config.ccraut)
     return depletion / dt * cloud_fraction
@@ -689,11 +688,9 @@ def autoconversion_kk2000(
 
     """
     del dt
-    qc_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_water / jnp.maximum(cloud_fraction, config.epsilon),
-        0.0,
-    )
+    # #615: the shared jcm.physics.thermodynamics helper, not an inline copy.
+    qc_in_cloud = grid_mean_to_in_cloud(
+        cloud_water, cloud_fraction, eps=config.epsilon)
     nc_cm3 = droplet_number * air_density * 1e-6
     has_qc = qc_in_cloud > 0.0
     qc_safe = jnp.where(has_qc, qc_in_cloud, 1.0)
@@ -766,11 +763,9 @@ def ice_autoconversion(
     # the JAX backend on import (#859).
     if air_density is None:
         air_density = jnp.array(1.0)
-    qi_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_ice / jnp.maximum(cloud_fraction, config.epsilon),
-        0.0,
-    )
+    # #615: the shared jcm.physics.thermodynamics helper, not an inline copy.
+    qi_in_cloud = grid_mean_to_in_cloud(
+        cloud_ice, cloud_fraction, eps=config.epsilon)
     has_ice = qi_in_cloud > 0.0
     depletion = _levkov_depletion(
         jnp.where(has_ice, qi_in_cloud, 1.0), air_density, dt, config)
@@ -799,6 +794,56 @@ def lonacc_levels(inversion_level, vertical_velocity, jbmin, jbmax, nlev):
     jb = jnp.asarray(inversion_level)[jnp.newaxis]
     in_window = (jb >= jbmin) & (jb <= jbmax)
     return in_window & (vertical_velocity > 0.0) & ((k == jb) | (k == jb + 1))
+
+
+def cached_inversion_range(coords) -> "tuple[int, int] | None":
+    """ECHAM's ``(jbmin, jbmax)`` for ``coords``, or ``None`` if it cannot be.
+
+    Shared by :class:`Echam1MMicrophysics.cache_coords` and
+    :class:`~jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics.
+    cache_coords` (#705): both terms independently cache the same
+    inversion-search range :class:`~jcm.physics.clouds.sundqvist.
+    SundqvistCloudFraction` caches for its own (same-valued, since all
+    three read the grid's own levels) search, rather than reading it off
+    that term, so each stays composable without it. A minimal test double
+    (e.g. the fake cubed-sphere dycore's ``_FakeVerticalGrid``, which
+    exposes only ``centers``/``layers``) has no level boundaries to search,
+    so this returns ``None`` -- disabling the ``lonacc`` exception there --
+    rather than raising.
+    """
+    from jcm.physics.clouds.echam_cloud_defaults import inversion_levels
+
+    vertical = getattr(coords, "vertical", coords)
+    if hasattr(vertical, "a_boundaries") or hasattr(vertical, "boundaries"):
+        return inversion_levels(coords)
+    return None
+
+
+def resolve_lonacc_mask(diagnostics: dict, state, inversion_range,
+                        vertical_velocity) -> "jnp.ndarray | None":
+    """Return the ``lonacc_mask`` a cloud microphysics term's ``__call__``
+    passes its column sweep, or ``None`` if the exception cannot be
+    evaluated.
+
+    Shared by :class:`Echam1MMicrophysics.__call__` and
+    :class:`~jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics.__call__`
+    (#705): reads ECHAM's ``knvb`` from the public ``"inversion_level"``
+    diagnostic (published by :class:`~jcm.physics.clouds.sundqvist.
+    SundqvistCloudFraction`) via ``.get`` so the term stays composable
+    without that term too -- a -1 sentinel (its own "no level found" value)
+    never satisfies :func:`lonacc_levels`'s range test, so this falls back
+    to "no exception" exactly as it would with a real cover upstream that
+    found none.
+    """
+    if inversion_range is None:
+        return None
+    inversion_level = diagnostics.get(
+        "inversion_level",
+        -jnp.ones(state.temperature.shape[1:], dtype=jnp.int32))
+    jbmin, jbmax = inversion_range
+    return lonacc_levels(
+        inversion_level, vertical_velocity, jbmin, jbmax,
+        state.temperature.shape[0])
 
 
 # ---------------------------------------------------------------------------
@@ -1017,8 +1062,17 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zxlp1c = xlp + zimlt
     zxievap = jnp.where(locc, 0.0, jnp.maximum(0.0, zxip1c))
     zxlevap = jnp.where(locc, 0.0, jnp.maximum(0.0, zxlp1c))
-    zxib = jnp.where(locc, zxip1c * zclcauxi, 0.0)
-    zxlb = jnp.where(locc, zxlp1c * zclcauxi, 0.0)
+    # #615: the shared jcm.physics.thermodynamics helper, not an inline copy.
+    # ``zero_threshold=0.0`` reproduces ``locc = paclc > 0.0`` exactly; the
+    # division floor stays at the helper's own small default (NOT 0.0 -- a
+    # literal zero floor divides by exactly zero in the masked branch, which
+    # even though the outer ``where`` discards the *value* there, poisons
+    # the discarded branch's reverse-mode gradient with 0*inf/0*nan (the
+    # review's B.0 double-where NaN class #615's own gate calls out). ``locc``/
+    # ``zclcauxi`` stay in scope: both are reused below (zxievap/zxlevap here,
+    # the zdep/zcnd updates further down).
+    zxib = grid_mean_to_in_cloud(zxip1c, paclc, zero_threshold=0.0)
+    zxlb = grid_mean_to_in_cloud(zxlp1c, paclc, zero_threshold=0.0)
     loc.update(lo2=zlo2, zclcaux_in=paclc, zxlevap=zxlevap, zxievap=zxievap,
                zxlb_in=zxlb, zxib_in=zxib)
 
@@ -1422,14 +1476,18 @@ def cloud_microphysics_column_sweep(
         dtedt=dtedt, dqdt=dqdt, dqcdt=dqcdt, dqidt=dqidt,
         dqrdt=jnp.zeros_like(dtedt), dqsdt=jnp.zeros_like(dtedt),
     )
-    cloudy = cloud_fraction > 0.0
-    cf_safe = jnp.where(cloudy, cloud_fraction, 1.0)
+    # #615: the shared jcm.physics.thermodynamics helper, not an inline copy.
+    # ``zero_threshold=0.0`` reproduces ``cloudy = cloud_fraction > 0.0``
+    # exactly; see the zxib/zxlb site above for why the division floor stays
+    # at the helper's own small default rather than 0.0.
     state = MicrophysicsState(
         rain_flux=rain_flux, snow_flux=snow_flux,
         rain_source=rain_source, snow_source=snow_source,
         rain_evap_flux=rain_evap_flux, snow_sublimation_flux=snow_sub_flux,
-        qc_in_cloud=jnp.where(cloudy, cloud_water / cf_safe, 0.0),
-        qi_in_cloud=jnp.where(cloudy, cloud_ice / cf_safe, 0.0),
+        qc_in_cloud=grid_mean_to_in_cloud(
+            cloud_water, cloud_fraction, zero_threshold=0.0),
+        qi_in_cloud=grid_mean_to_in_cloud(
+            cloud_ice, cloud_fraction, zero_threshold=0.0),
         autoconv_rate=autoconv_rate, accretion_rate=accretion_rate,
         melting_rate=(inter.zsmlt + inter.zimlt) / dt,
         freezing_rate=inter.zfrl / dt,
@@ -1547,6 +1605,20 @@ class Echam1MMicrophysics(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = (
         "autoconv", "accretn", "wbf", "clouds",
     )
+    # ``"convection"``: same-step (this term runs after ``TiedtkeConvection``
+    # in the default order) and composition-optional — the re-typing it
+    # amends is a no-op without a convection term (class docstring).
+    # ``"pressure_thickness"``: same-step, published by
+    # ``MoistAirColumnState`` (the first term, every step); read via
+    # ``.get()`` only so this term also composes against a host that
+    # supplies the moist-air diagnostics under a different mechanism
+    # (jax-gcm#673).
+    # ``"inversion_level"``: same-step, published by
+    # ``SundqvistCloudFraction`` (#705); read via ``.get()`` so this term
+    # stays composable without it (falls back to "no lonacc exception").
+    optional_requires: ClassVar[tuple[str, ...]] = (
+        "convection", "pressure_thickness", "inversion_level",
+    )
     # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
     # the cover term; this term fills the precip/process-rate fields.
     output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
@@ -1569,17 +1641,29 @@ class Echam1MMicrophysics(PhysicsTerm):
             params or MicrophysicsParameters.default(),
         )
         self.params_are_defaults = params is None or params_are_defaults
+        # Set by ``cache_coords``; ``None`` disables the ``lonacc`` exception
+        # (#705) rather than raising, so a caller that never cached coords
+        # (e.g. an existing direct-construction unit test) keeps working —
+        # the term already ran with no such exception before this feature
+        # existed.
+        self._inversion_range: tuple[int, int] | None = None
 
     def cache_coords(self, coords) -> None:
         """Warn if default parameters were built for another grid.
 
         The parameters were fixed at construction and are not re-resolved;
         parameters the caller supplied are not checked.
+
+        Also caches ``jbmin``/``jbmax`` (#705) via :func:`cached_inversion_range`
+        -- see that function's docstring for why this is independent of
+        :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction`'s own
+        copy, and tolerant of a coords object with no level boundaries.
         """
         if self.params_are_defaults:
             from jcm.physics.resolution_defaults import check_defaults_grid
             check_defaults_grid(type(self).__name__,
                                 self.params.get_value().defaults_truncation, coords)
+        self._inversion_range = cached_inversion_range(coords)
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
@@ -1642,6 +1726,25 @@ class Echam1MMicrophysics(PhysicsTerm):
         cdnc_autoconversion = (
             cdnc_radiation if params.autoconversion_twomey else acdnc)
 
+        # #705: the ``lonacc`` exception on ``zauloc`` needs ECHAM's knvb
+        # (published by SundqvistCloudFraction as "inversion_level") and the
+        # large-scale vertical velocity (the dycore's "omega" field,
+        # published under "_dycore_fields" only when some composed term --
+        # typically TiedtkeConvection's ``cu_lmfmid`` -- already requires it;
+        # read via ``.get`` rather than ``requires_dycore_fields`` so this
+        # term stays composable on any composition that does not require
+        # omega -- e.g. the ``ma-ne30-l47``/``ma-ne30-l95`` presets' own
+        # ``physics.cu_lmfmid: false``, kept off pending that campaign's own
+        # stability validation rather than any backend incapability
+        # (jax-gcm#698 gave pySES an omega provider too)). See
+        # :func:`resolve_lonacc_mask` for the "no exception" fallbacks. This
+        # is a no-op while ``params.cauloc`` stays at ECHAM6.3's own 0.0
+        # default.
+        vertical_velocity = diagnostics.get(
+            "_dycore_fields", {}).get("omega", jnp.zeros_like(state.temperature))
+        lonacc_mask = resolve_lonacc_mask(
+            diagnostics, state, self._inversion_range, vertical_velocity)
+
         micro_tend, micro_state = cloud_microphysics_column_sweep(
             anchor.temperature, anchor.specific_humidity, anchor_qc, anchor_qi,
             increment.temperature, increment.specific_humidity,
@@ -1651,6 +1754,7 @@ class Echam1MMicrophysics(PhysicsTerm):
             acdnc, dt, params,
             detrained_liquid=inputs.detrained_qc, detrained_ice=inputs.detrained_qi,
             autoconversion_droplet_number=cdnc_autoconversion,
+            lonacc_mask=lonacc_mask,
         )
 
         tendency = PhysicsTendency(

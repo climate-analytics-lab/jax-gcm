@@ -75,7 +75,13 @@ SECTOR_DEFAULTS: dict[str, SectorDefaults] = {
 SO4_PRIMARY_FRACTION = 0.025     # fraction of SO2 sulfur → primary SO4 (zfacso2)
 OM_OC_RATIO = 1.4                # OM:OC mass ratio for OC → POA
 
-#: SO₂ mass → SO₄ mass factor (one S atom each).
+#: SO₂ mass → SO₄ mass factor (one S atom each), for the MAM4 default
+#: population. ``AnthropogenicEmissions`` recomputes this same expression
+#: from its own ``spec.species_props("so4").molar_mass`` at construction
+#: (bit-identical here, since MAM4's ``SPECIES["so4"]`` is the object
+#: ``spec.species_props`` returns), so a population with a different so4
+#: (M7's SO₄ proper, 96.0631 g/mol) gets its own factor without this module
+#: changing. This constant remains the MAM4 reference value for tests.
 SO2_TO_SO4_MASS = SPECIES["so4"].molar_mass / GAS_SPECIES["so2"].molar_mass
 
 # Which population classes receive primary SO4 / BC / POA — and in what

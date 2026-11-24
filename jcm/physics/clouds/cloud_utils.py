@@ -3,6 +3,7 @@
 import math
 from math import pi
 
+import jax
 import jax.numpy as jnp
 
 import jcm.constants as c
@@ -92,6 +93,140 @@ def sundqvist_condensation(
                      (1.0 - ice_weight) * zqcdif)
     zdep = jnp.where(dissipation, zqcdif * zifrac, ice_weight * zqcdif)
     return zqcdif, zcnd, zdep
+
+
+# ECHAM's own literals for this formula (mo_cloud_utils.f90:57-60), not
+# jcm's higher-precision ``c.ak``/molar-mass constants: ECHAM rounds the
+# Boltzmann constant and the water-molecule mass to 3 significant figures
+# here, and reproducing that rounding (not the CODATA value) is what makes
+# ``karcher_lohmann_deposition_rate`` match the compiled reference to
+# float64 round-off (#1017 w6).
+_ZQINUCL_KB = 1.38e-23          # Boltzmann constant [J/K], mo_cloud_utils.f90:57
+_ZQINUCL_XMW = 2.992e-26        # mass of one H2O molecule [kg], mo_cloud_utils.f90:59
+_ZQINUCL_ALPHA = 0.5            # deposition coefficient, mo_cloud_utils.f90:58
+
+
+def karcher_lohmann_deposition_rate(
+    nucleation_radius_raw: jnp.ndarray,   # zri (xfrzmstr's own, unclamped) [m]
+    radius_fallback: jnp.ndarray,         # zrid, the section-1 temperature-
+                                           # parameterised radius [m]
+    icnc_before_floor: jnp.ndarray,       # zicncq + zninucl, pre-icemin [1/m3]
+    ice_mmr_previous: jnp.ndarray,        # pxim1 [kg/kg]
+    cloud_fraction: jnp.ndarray,          # paclc [0..1]
+    air_density: jnp.ndarray,             # zrho [kg/m3]
+    air_density_correction: jnp.ndarray,  # zaaa, ice fall-speed density factor
+    dynamic_viscosity: jnp.ndarray,       # zviscos [Pa s]
+    ice_supersaturation: jnp.ndarray,     # zsusatix = sice = max(q/qsi-1,0) [1]
+    temperature_previous: jnp.ndarray,    # ptm1 [K]
+    pressure: jnp.ndarray,                # papm1 [Pa]
+    sat_vap_pres_ice: jnp.ndarray,        # zesi [Pa]
+    humidity_previous: jnp.ndarray,       # pqm1 [kg/kg]
+    qsat_ice: jnp.ndarray,                # zqsi [kg/kg]
+    dt: jnp.ndarray,
+    params: CloudParams2M,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Kaercher-Lohmann deposition rate ``zqinucl`` (``nic_cirrus == 2``).
+
+    ECHAM ``mo_cloud_micro_2m.f90:1046-1102``: the vapour deposited onto the
+    newly homogeneously-frozen crystals (``xfrzmstr``'s own output, section
+    1) this step, with ventilation. This runs entirely on step-start
+    (``*m1``) quantities, before section 5's own humidity/temperature
+    adjustment -- the Fortran computes it in section 1's loop, well before
+    ``column_processes`` even starts, and ``scheme.py`` calls this
+    immediately after ``xfrzmstr`` for the same reason.
+
+    Three pieces, in the Fortran's own order:
+
+    1. ``zri`` clamp (1046-1047): fall back to ``radius_fallback`` when
+       ``xfrzmstr``'s own radius is below ``epsec``, then floor at 1 um.
+    2. The ICNC floor (1062-1066) and mean-crystal-mass fall speed
+       (1068-1085) gated on ``ll_ice = (pxim1 > 0) & (paclc > clc_min)`` --
+       the SAME mask the Fortran reuses for the ventilation factor below
+       (1097), reused here for the same reason.
+    3. The ventilation-corrected deposition rate itself (1089-1102):
+       Fuchs-corrected diffusional growth (``zgtp``/``zvth``/``zb2``/
+       ``zfuchs``) times a Reynolds-number ventilation factor (``zre``/
+       ``zfre``), clamped to the available vapour above/ice below.
+
+    Returns
+    -------
+    (icnc_floored, zqinucl) : the ICNC used by the deposition formula (zicncq
+        after its own icemin floor, the SAME quantity the caller's
+        ``icnc_sedi`` addition reads as ``zicncq_early_k + zninucl_k`` --
+        this function does not re-derive that sum, only floors it) and the
+        deposition rate itself [kg/kg].
+
+    """
+    epsec = params.epsec
+
+    # 1. zri clamp (1046-1047).
+    zri = jnp.where(nucleation_radius_raw >= epsec,
+                     nucleation_radius_raw, radius_fallback)
+    zri = jnp.maximum(zri, 1.0e-6)
+
+    # 2. ICNC floor + mean-crystal-mass fall speed (1062-1085), gated on the
+    # SAME mask the ventilation factor reuses at step 3.
+    ll_ice = (ice_mmr_previous > 0.0) & (cloud_fraction > params.clc_min)
+    icnc_floored = jnp.where(ll_ice,
+                              jnp.maximum(icnc_before_floor, params.icemin),
+                              icnc_before_floor)
+
+    # ``icnc_floored`` is only guaranteed >= icemin on the ll_ice branch
+    # (its own ``jnp.where`` leaves it at the caller's raw, possibly-zero
+    # ``icnc_before_floor`` otherwise); ``jnp.where`` still evaluates this
+    # division on every element, so an extra floor here (a no-op on the
+    # ll_ice branch, where it is already >= icemin) keeps a gated-out
+    # zero-ICNC cell from poisoning the gradient with 0/0 -> nan·0 (the
+    # double-``where`` convention, JAX_gotchas.md / #558).
+    zmmean = jnp.where(
+        ll_ice,
+        jnp.maximum(
+            air_density * ice_mmr_previous
+            / (jnp.maximum(icnc_floored, params.eps)
+               * jnp.maximum(cloud_fraction, params.clc_min)),
+            params.mi),
+        params.mi)
+    ll_small = zmmean < params.ri_vol_mean_1
+    ll_mid = (~ll_small) & (zmmean < params.ri_vol_mean_2)
+    zalfased = jnp.where(ll_small, params.alfased_1, params.alfased_2)
+    zalfased = jnp.where(ll_mid, params.alfased_3, zalfased)
+    zbetased = jnp.where(ll_small, params.betased_1, params.betased_2)
+    zbetased = jnp.where(ll_mid, params.betased_3, zbetased)
+    # NOT clamped to [0.001, 2.0] m/s: that clip belongs to the OTHER
+    # ``sedimentation_ice`` subroutine (mo_cloud_micro_2m.f90:2227-2228,
+    # ``sedimentation_melt.py``'s own fall speed); this formula's own copy
+    # (1084-1085) has no such clip.
+    zxifallmc = (params.fall * zalfased * zmmean ** zbetased
+                 * air_density_correction)
+
+    # 3. Ventilation-corrected deposition rate (1089-1102). ``zastbsti`` is
+    # ECHAM's own thermodynamic term for ICE deposition (``zast``/``zbst``
+    # for ice, mo_cloud_micro_2m.f90:717-721) -- the water-phase analogue
+    # already lives in ``scheme.py`` as ``thermo_term_water``; ``zkair``/
+    # ``zdv`` are recomputed here from the same literals ``scheme.py``'s
+    # ``thermo_term_water``/``bergeron_eta`` use, since neither reaches the
+    # scan as a standalone per-level array.
+    zkair = 4.1867e-3 * (5.69 + 0.017 * (temperature_previous - c.tmelt))
+    zdv = 2.21 / jnp.maximum(pressure, epsec)
+    zastbsti = (
+        c.alhs * (c.alhs / (c.rv * temperature_previous) - 1.0)
+        / (zkair * temperature_previous)
+        + c.rv * temperature_previous
+        / jnp.maximum(zdv * sat_vap_pres_ice, epsec))
+
+    zgtp = 1.0 / (air_density * zastbsti)
+    zvth = jnp.sqrt(8.0 * _ZQINUCL_KB * temperature_previous
+                    / (pi * _ZQINUCL_XMW))
+    zb2 = 0.25 * _ZQINUCL_ALPHA * zvth / zdv
+    zfuchs = 1.0 / (1.0 + zb2 * zri)
+    zre = 2.0 * air_density * zri * zxifallmc / dynamic_viscosity
+    zfre = jnp.where(ll_ice, 1.0 + 0.229 * jnp.sqrt(zre), 1.0)
+
+    zqinucl = (4.0 * pi * zri * ice_supersaturation * icnc_floored
+               * zfre * zgtp * zfuchs * _ZQINUCL_ALPHA * dt)
+    zqinucl = jnp.minimum(zqinucl, humidity_previous - qsat_ice)
+    zqinucl = jnp.maximum(zqinucl, -ice_mmr_previous)
+    return icnc_floored, zqinucl
 
 
 def eff_ice_crystal_radius(
@@ -301,6 +436,313 @@ def detrained_ice_crystal_number(
     number = jnp.where(ll_cv, number, 0.0)
     return jnp.maximum(number, params.cqtmin)
 
+
+def cloud_base_search(
+    cloud_fraction: jnp.ndarray, params: CloudParams2M,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Per-level cloud-base flags, ECHAM's ``get_cloud_bounds`` (``mo_cloud_utils.f90``:136-220).
+
+    Ported for the BASE side only: cloud tops (``kcl_minustop``) are not
+    needed by the two #955 activation sources below. On the
+    physics-internal TOP-FIRST level axis (axis 0; level 0 = the model top,
+    level -1 = the surface), a contiguous run of cloudy levels
+    (``cloud_fraction >= epsec``) has its base at the run's bottom-most
+    (highest-index, nearest-surface) level: ``get_cloud_bounds``'s
+    ``llbas`` test is "cloudy here AND the level below (towards the
+    surface) is clear", with the surface level always passing it —
+    ``zaclcp`` at ``klev`` is never written by that routine's own loop
+    (``ktdia:klev-1``), so it keeps its zero init and satisfies
+    ``< epsec`` unconditionally (lines 160-183).
+
+    ``get_cloud_bounds`` tags every level STRICTLY ABOVE its run's base
+    (``kcl_minusbas``) with the base's own level index, so a per-level
+    field can be gathered there and broadcast up through the run
+    (``mo_cloud_micro_2m.f90``:763-772). This port returns that gather
+    index directly (``base_level_index``) rather than the Fortran's
+    top/base/``kcl_minus*`` four-array encoding — the one thing both
+    activation sources below need.
+
+    Implemented as a single ``lax.scan`` over the level axis with
+    ``reverse=True`` (the scan body therefore runs bottom level first,
+    the direction a run's contiguity needs, while the output still comes
+    back indexed top-first): the carry is the nearest base index found so
+    far, reset to the current level at a base, to -1 outside any cloud,
+    and inherited unchanged while climbing through a run above its base.
+    Runs over axis 0 only; any trailing horizontal axes broadcast (the
+    broadcasting-native convention — no vmap, no reshape).
+
+    Parameters
+    ----------
+    cloud_fraction : (nlev, *horiz) cloud cover ``paclc`` [0, 1].
+    params : threaded scheme parameters (``epsec``).
+
+    Returns
+    -------
+    is_base : (nlev, *horiz) bool. This level is its cloud run's base.
+    base_level_index : (nlev, *horiz) int32. The run's base level index
+        for every cloudy level (itself, at the base); -1 outside any
+        cloud.
+    above_base_mask : (nlev, *horiz) bool. ``cloud_fraction`` is nonzero
+        AND this level is not its own base (ECHAM's ``kcl_minusbas > 0``).
+
+    """
+    is_cloudy = cloud_fraction >= params.epsec
+    # "Clear below": the level nearer the surface (index + 1) is not
+    # cloudy. The last (surface) level has no level below it and always
+    # qualifies, matching get_cloud_bounds' unwritten zaclcp(:,klev) == 0.
+    clear_below = jnp.concatenate(
+        [~is_cloudy[1:], jnp.ones_like(is_cloudy[:1])], axis=0)
+    is_base = is_cloudy & clear_below
+
+    nlev = cloud_fraction.shape[0]
+    levels = jnp.arange(nlev, dtype=jnp.int32).reshape(
+        (nlev,) + (1,) * (cloud_fraction.ndim - 1))
+    levels = jnp.broadcast_to(levels, cloud_fraction.shape)
+
+    def _step(carry, level_inputs):
+        cloudy_k, base_k, level_k = level_inputs
+        found = jnp.where(base_k, level_k, carry)
+        new_carry = jnp.where(cloudy_k, found, -1)
+        return new_carry, new_carry
+
+    init_carry = -jnp.ones(cloud_fraction.shape[1:], dtype=jnp.int32)
+    _, base_level_index = jax.lax.scan(
+        _step, init_carry, (is_cloudy, is_base, levels), reverse=True)
+
+    above_base_mask = is_cloudy & ~is_base
+    return is_base, base_level_index, above_base_mask
+
+
+def stratiform_activation_at_cloud_base(
+    droplet_number: jnp.ndarray,         # Original: zcdnc, entry value
+    cdnc_min: jnp.ndarray,                # Original: zcdnc_min
+    activated_cdnc: jnp.ndarray,          # Original: zcdncact
+    temperature_m1: jnp.ndarray,          # Original: ptm1
+    liquid_tendency_mass: jnp.ndarray,    # Original: ztmst·pxlte (sign only)
+    cloud_fraction: jnp.ndarray,          # Original: paclc
+    cloud_fraction_prev: jnp.ndarray,     # Original: zaclc_tm1
+    water_supersaturation: jnp.ndarray,   # Original: zsusatw (signed)
+    params: CloudParams2M,
+) -> jnp.ndarray:
+    """Stratiform cloud-droplet activation at cloud base, copied to the cloud above it.
+
+    Transliterates ``mo_cloud_micro_2m.f90``:742-782, ECHAM-HAM's
+    section-1 activation (``cloud_subm_1``'s ``zcdncact`` converted into
+    newly-formed droplets, ``zqlnuc``). This is a SEPARATE replenishment
+    path from the deeper, later ``update_in_cloud_water`` re-activation
+    (``mo_cloud_micro_2m.f90``:2594-2608,
+    :func:`~jcm.physics.clouds.lohmann_2m.assembly.update_in_cloud_water`'s
+    own ``ll2``): that one only fires once CDNC has already decayed all
+    the way to the floor ``cdnc_min``. This one fires at the cloud base on
+    ANY of four parcel-theory triggers — a fresh updraft, growing liquid, a
+    growing cloud, or supersaturated air — so it replenishes CDNC long
+    before a column has been stripped bare (jax-gcm#955; the gap this
+    closes is why a large aerosol perturbation barely moved CDNC in a
+    marine-cloud-brightening sensitivity test, since without it the only
+    reactivation available needed CDNC to have fallen to 40 cm⁻³ first).
+
+    At a cloud-base level (:func:`cloud_base_search`'s ``is_base``, and
+    warmer than ``cthomi``), the number of newly-activated droplets is
+    ``max(activated_cdnc - droplet_number, 0)`` wherever any of
+
+      - ``droplet_number <= cdnc_min`` (no previous nucleation this step),
+      - ``liquid_tendency_mass > 0`` (the liquid is still growing),
+      - ``cloud_fraction > cloud_fraction_prev`` (the cover just grew),
+      - ``water_supersaturation > eps`` (the air is supersaturated),
+
+    holds (lines 742-752). The base's updated CDNC is then copied,
+    verbatim, to every level strictly above it in the SAME cloud run,
+    provided the base itself nucleated a strictly positive number there
+    (lines 763-782) — a base that satisfied the trigger but gained zero
+    droplets (``activated_cdnc <= droplet_number`` there) leaves the
+    levels above it untouched, exactly as the Fortran's own
+    ``zqlnuc_bas > 0`` gate does.
+
+    Levels outside any cloud, or at/below ``cthomi``, pass through
+    unchanged. This is purely an entry-level replenishment: ECHAM's own
+    phase-consistency correction that follows it in the Fortran (lines
+    784-797, crediting supercooled CDNC to ICNC) is a different, later
+    concern handled by this scheme's own freezing terms and is out of
+    scope here (jax-gcm#955 cites only 742-782 for this item). The caller
+    still applies the ``minimum_CDNC`` floor afterwards, as before this
+    function existed.
+
+    Parameters
+    ----------
+    droplet_number : (nlev, *horiz) cqtmin-floored grid-mean CDNC [1/m^3],
+        BEFORE the ``minimum_CDNC`` floor — ECHAM floors CDNC to
+        ``cdnc_min`` only later, in ``update_in_cloud_water``, not here.
+    cdnc_min : (nlev, *horiz) the per-level minimum CDNC [1/m^3]
+        (:func:`minimum_CDNC` of the in-cloud liquid BEFORE this step's
+        convective detrainment).
+    activated_cdnc : (nlev, *horiz) the UNMASKED activation potential
+        (ECHAM's ``zcdncact``; jax-gcm#1160), NOT any cloud-fraction-
+        weighted number — the caller passes
+        ``Lohmann2MMicrophysics``'s ``activation_potential``, never
+        ``activated_cdnc`` itself, which under MACv2-SP is a GRID-MEAN
+        floor masked by that cell's own stratiform cover. F749's
+        ``ztmp1_2d = zcdncact - zcdnc`` reads the unmasked diagnostic
+        directly; the "is this cell applicable" question is answered
+        entirely by ``is_base`` (this function's own cloud-base search),
+        not by zeroing the value in a non-base cell.
+    temperature_m1 : (nlev, *horiz) step-start temperature [K].
+    liquid_tendency_mass : (nlev, *horiz) this step's liquid increment
+        EXCLUDING convective detrainment [kg/kg] (``ztmst·pxlte`` has the
+        same sign as ``pxlte`` since ``ztmst`` > 0).
+    cloud_fraction, cloud_fraction_prev : (nlev, *horiz) this step's and
+        the PREVIOUS step's cloud cover [0, 1].
+    water_supersaturation : (nlev, *horiz) signed ``q/qsat_water - 1`` at
+        the step-start state (NOT the clipped-negative evaporation form
+        the rain-evaporation chain uses elsewhere in this scheme).
+    params : threaded scheme parameters.
+
+    Returns
+    -------
+    (nlev, *horiz) CDNC [1/m^3] after this activation step.
+
+    """
+    is_base, base_level_index, above_base_mask = cloud_base_search(
+        cloud_fraction, params)
+
+    trigger = is_base & (temperature_m1 > params.cthomi) & (
+        (droplet_number <= cdnc_min)
+        | (liquid_tendency_mass > 0.0)
+        | (cloud_fraction > cloud_fraction_prev)
+        | (water_supersaturation > params.eps)
+    )
+    newly_activated = jnp.where(
+        trigger, jnp.maximum(activated_cdnc - droplet_number, 0.0), 0.0)
+    droplet_number_at_base = jnp.where(
+        trigger, droplet_number + newly_activated, droplet_number)
+
+    # Gather the (possibly just-updated) base CDNC, and its own newly-
+    # activated number, up through the run (lines 763-772). The index is
+    # clipped to a valid position so ``take_along_axis`` never reads out
+    # of bounds where there is no cloud (index -1); ``above_base_mask``
+    # gates its use to genuinely cloudy, non-base levels only, so the
+    # clip never leaks a spurious value.
+    safe_index = jnp.clip(base_level_index, 0, droplet_number.shape[0] - 1)
+    gathered_cdnc = jnp.take_along_axis(
+        droplet_number_at_base, safe_index, axis=0)
+    gathered_newly_activated = jnp.take_along_axis(
+        newly_activated, safe_index, axis=0)
+
+    copy_mask = above_base_mask & (gathered_newly_activated > 0.0)
+    return jnp.where(copy_mask, gathered_cdnc, droplet_number_at_base)
+
+
+def convective_detrainment_droplet_number(
+    droplet_number: jnp.ndarray,               # Original: zcdnc (post item 1)
+    activated_cdnc: jnp.ndarray,                # Original: cdncact_cv (this level)
+    activated_cdnc_at_convective_base: jnp.ndarray,  # Original: cdncact_cv (iclbas)
+    has_convective_cloud_base: jnp.ndarray,     # Original: iclbas > 0
+    temperature_m1: jnp.ndarray,                # Original: ptm1
+    detrainment_is_ice: jnp.ndarray,             # Original: lo2_2d (section 1)
+    detrained_condensate: jnp.ndarray,          # Original: ztmst·zxtec (mass)
+    cloud_fraction: jnp.ndarray,                # Original: paclc
+    stratiform_liquid: jnp.ndarray,             # Original: pxlm1+ztmst·pxlte
+    params: CloudParams2M,
+) -> jnp.ndarray:
+    """Droplet number of detrained convective liquid, LWC-weighted into CDNC.
+
+    Transliterates ``mo_cloud_micro_2m.f90``:889-941, the ``zqlnuccv``
+    droplet source jax-gcm#955 cites as its second item. ECHAM-HAM's
+    convection scheme runs its own aerosol activation call at the
+    convective updraft and publishes the result as ``cdncact_cv`` — a
+    per-level profile of "the number ARG would activate if cloud base
+    were here" (``mo_ham_activ.f90``/``mo_activ.f90``). jcm has no second,
+    convective-updraft activation call: the SAME ``activation_potential``
+    that feeds :func:`stratiform_activation_at_cloud_base` stands in for
+    ``cdncact_cv`` here too, simply read at a different level (the
+    convective base instead of the stratiform one) — the deliberate
+    simplification ``docs/source/design/lohmann_2m_column_processes.md``
+    records, and what jax-gcm#955 means by "build [the convective-base
+    bookkeeping] once ... and consume it in both" items. Both operands
+    are the UNMASKED potential, not the cloud-fraction-weighted
+    ``activated_cdnc`` diagnostic (jax-gcm#1160 — see the ``Parameters``
+    section below).
+
+    The detrained liquid's droplet number is the lesser of the activated
+    number AT THIS LEVEL and AT THE CONVECTIVE BASE (further activation
+    above the base is capped by what activated below it; lines 902-914),
+    gated by ``ll3_2d`` (lines 892-899): a convective base exists, this
+    level received detrained condensate this step, and the condensate
+    counts as liquid — warmer than ``tmelt``, or in the mixed-phase window
+    with the section-1 WBF criterion ``lo2_2d`` false. The result is then
+    blended into CDNC weighted by the stratiform and detrained in-cloud
+    liquid water contents (lines 920-937), and the blend is never allowed
+    to lower CDNC (line 939): a cell with no detrained liquid, or no
+    convective base, is returned exactly as received.
+
+    Parameters
+    ----------
+    droplet_number : (nlev, *horiz) grid-mean CDNC [1/m^3] after
+        :func:`stratiform_activation_at_cloud_base`.
+    activated_cdnc : (nlev, *horiz) the per-level UNMASKED activation
+        potential, standing in for ``cdncact_cv`` at this level (see
+        above) — ``Lohmann2MMicrophysics``'s ``activation_potential``,
+        NEVER the cloud-fraction-weighted ``activated_cdnc`` diagnostic
+        (jax-gcm#1160): F905-917's ``cdncact_cv`` is read unmasked here
+        too, so passing the masked value would read a spurious zero at a
+        convective base sitting over clear stratiform sky — the gap a
+        Codex review on PR #1160 found at the convective-base operand
+        below, equally present at this (this-level) operand.
+    activated_cdnc_at_convective_base : (*horiz,) the SAME unmasked
+        potential gathered at the column's convective cloud-base level
+        (ECHAM's ``cdncact_cv`` read at ``iclbas``); 0 where there is
+        none.
+    has_convective_cloud_base : (*horiz,) bool, ECHAM's ``iclbas > 0``:
+        this column has an active convective updraft this step.
+    temperature_m1 : (nlev, *horiz) step-start temperature [K].
+    detrainment_is_ice : (nlev, *horiz) bool, section 1's ``lo2_2d`` (the
+        same array :func:`detrained_ice_crystal_number` reads).
+    detrained_condensate : (nlev, *horiz) this step's total detrained
+        condensate mass [kg/kg] (both phases; ECHAM's ``zxtec`` is a rate,
+        this scheme's own ``zxtec`` is already the per-step mass, so no
+        extra ``dt`` factor is applied here).
+    cloud_fraction : (nlev, *horiz) cloud cover ``paclc`` [0, 1].
+    stratiform_liquid : (nlev, *horiz) grid-mean in-cloud liquid mixing
+        ratio EXCLUDING this step's convective detrainment [kg/kg]
+        (``qc_m1 + qc_increment``).
+    params : threaded scheme parameters.
+
+    Returns
+    -------
+    (nlev, *horiz) CDNC [1/m^3] after this blend.
+
+    """
+    ll3 = (
+        has_convective_cloud_base
+        & (detrained_condensate > 0.0)
+        & (
+            (temperature_m1 > params.tmelt)
+            | ((temperature_m1 > params.cthomi)
+               & (temperature_m1 < params.tmelt)
+               & ~detrainment_is_ice)
+        )
+    )
+    candidate = jnp.maximum(
+        jnp.minimum(activated_cdnc, activated_cdnc_at_convective_base), 0.0)
+    detrained_droplet_number = jnp.where(ll3, candidate, 0.0)
+    detrained_lwc = jnp.where(ll3, detrained_condensate, 0.0)
+
+    has_stratiform = ((cloud_fraction >= params.epsec)
+                       & (stratiform_liquid >= params.epsec))
+    stratiform_lwc = jnp.where(
+        has_stratiform,
+        stratiform_liquid / jnp.maximum(cloud_fraction, params.epsec),
+        0.0,
+    )
+
+    total_lwc = stratiform_lwc + detrained_lwc
+    blended = (
+        (droplet_number * stratiform_lwc
+         + detrained_droplet_number * detrained_lwc)
+        / jnp.maximum(total_lwc, params.epsec)
+    )
+    return jnp.maximum(jnp.maximum(droplet_number, blended), params.cqtmin)
+
+
 def turbulent_updraft_velocity(
     tke: jnp.ndarray, params: CloudParams2M,
 ) -> jnp.ndarray:
@@ -449,6 +891,56 @@ def gridbox_frac_falling_hydrometeor(
     total_precip_frac = jnp.where(ll1, weighted_precip_frac, 0.0)
 
     return total_precip_frac
+
+def rain_mixing_ratio_from_flux(
+    rain_flux: jnp.ndarray,             # prfl entering the level [kg/m^2/s]
+    precip_cover: jnp.ndarray,          # pclcpre entering the level [0..1]
+    air_density_13: jnp.ndarray,        # pqrho = 1.3/prho [m^3/kg]
+    params: CloudParams2M,
+) -> jnp.ndarray:
+    """Marshall-Palmer inversion of the rain flux entering a level (ECHAM ``zxrp1``).
+
+    ``mo_cloud_micro_2m.f90`` section 7 (eq. 10.70 of Roeckner et al. 2003, MPI
+    report 349): the rain mixing ratio "from above" that ``precip_formation_warm``
+    needs for the accretion term ``zrac1``, recovered from the column's carried
+    rain flux and precip cover (ECHAM carries no rain tracer at all). ``12.45``
+    comes from the Marshall-Palmer intercept ``a_10*(n_0r)**(-1/8) =
+    90.8*(8e6)**(-1/8)``. The two guards are ECHAM's own: the ``eps`` gate on
+    ``precip_cover`` (``> params.epsec`` here) and the ``cqtmin`` gate on the
+    flux itself, both ``MERGE``d to zero outside them. Double-where on the
+    fractional power base: ``rain_flux`` or ``precip_cover`` can be exactly 0
+    where the mask is False, and ``x**(8/9)`` has an infinite derivative there.
+    """
+    rain_present = jnp.logical_and(precip_cover > params.epsec, rain_flux > params.cqtmin)
+    clcpre_safe = jnp.maximum(precip_cover, params.epsec)
+    base = jnp.where(
+        rain_present,
+        jnp.maximum(rain_flux, params.cqtmin) / (12.45 * clcpre_safe * jnp.sqrt(air_density_13)),
+        1.0,
+    )
+    return jnp.where(rain_present, base ** (8.0 / 9.0), 0.0)
+
+def snow_mixing_ratio_from_flux(
+    snow_flux: jnp.ndarray,             # pssfl entering the level [kg/m^2/s]
+    precip_cover: jnp.ndarray,          # pclcpre entering the level [0..1]
+    params: CloudParams2M,
+) -> jnp.ndarray:
+    """Marshall-Palmer inversion of the snow flux entering a level (ECHAM ``zxsp1``).
+
+    ``mo_cloud_micro_2m.f90`` section 7 (eq. 10.74 of Roeckner et al. 2003, MPI
+    report 349): the snow mixing ratio "from above" that ``precip_formation_cold``
+    needs for the riming/accretion terms, recovered from the carried snow flux
+    and precip cover the same way :func:`rain_mixing_ratio_from_flux` recovers
+    the rain mixing ratio. Same ``eps``/``cqtmin`` gates and double-where guard.
+    """
+    snow_present = jnp.logical_and(precip_cover > params.epsec, snow_flux > params.cqtmin)
+    clcpre_safe = jnp.maximum(precip_cover, params.epsec)
+    base = jnp.where(
+        snow_present,
+        jnp.maximum(snow_flux, params.cqtmin) / (params.cvtfall * clcpre_safe),
+        1.0,
+    )
+    return jnp.where(snow_present, base ** (1.0 / 1.16), 0.0)
 
 def effective_2_volmean_radius_param_Schuman_2011(
     prieff: jnp.ndarray, params: CloudParams2M,
@@ -622,6 +1114,44 @@ def prescribed_droplet_number(
             * per_column(cdnc_factor, horiz))
 
 
+def safe_cbrt_quotient(
+    numerator: jnp.ndarray, denominator: jnp.ndarray, valid: jnp.ndarray,
+) -> jnp.ndarray:
+    """``numerator**(1/3) / denominator**(1/3)``, reverse-mode safe (#1130).
+
+    The two cube roots are taken SEPARATELY, never of their quotient: the
+    combined form's float32 reverse pass overflows when a tiny-but-positive
+    numerator sits over a denominator a caller has floored near zero (the
+    original bug, #1130) -- its derivative wrt the denominator is
+    ``~numerator**(-2/3) * denominator**(-4/3)``, and that product clears
+    float32's 3.4e38 ceiling well before either factor alone would. Split,
+    each factor's own derivative (``numerator**(-2/3)``,
+    ``denominator**(-4/3)``) stays in range on its own; the primal differs
+    from the unsplit quotient by rounding only (<= 2 ulp f32).
+
+    ``valid`` must already fold in every condition that keeps a cube root's
+    LOCAL derivative finite at the particular ``numerator``/``denominator``
+    pair, in particular ``numerator != 0`` -- a numerator that underflows to
+    exactly 0.0 in float32 (reachable for liquid/ice content near the
+    smallest normal, ~1.2e-38, even though the physical mask that let it
+    through is True) still has ``0**(1/3)``'s infinite local derivative,
+    which a zero incoming cotangent turns into ``0 * inf = NaN`` (jcm #866;
+    confirmed for two of #1130's three sites by probing this exact
+    expression with ``numerator`` at float32's smallest normal value). This
+    helper substitutes the off-``valid`` branch's numerator/denominator with
+    1.0 (cube root 1, zero gradient), exactly as a caller's own outer
+    ``jnp.where(valid, ..., <forward value off valid>)`` already does for
+    the result -- the double-where convention in ``JAX_gotchas.md``.
+    Callers choose their own floor on ``denominator`` and their own
+    ``numerator != 0`` re-check (the right floor and underflow threshold are
+    scheme-specific), fold both into ``valid``, and apply the forward-value
+    ``jnp.where`` themselves.
+    """
+    safe_numerator = jnp.where(valid, numerator, 1.0)
+    safe_denominator = jnp.where(valid, denominator, 1.0)
+    return safe_numerator ** (1.0 / 3.0) / safe_denominator ** (1.0 / 3.0)
+
+
 def eff_liquid_droplet_radius(
     liquid_in_cloud: jnp.ndarray,
     air_density: jnp.ndarray,
@@ -683,17 +1213,25 @@ def eff_liquid_droplet_radius(
     # 0 * inf = NaN. The radiation differentiates through this radius in every
     # cell of every column, clear ones included, so the guard is load-bearing.
     has_liquid = jnp.logical_and(liquid_cloud_flag, liquid_in_cloud > 0.0)
-    radius_base = (
-        (3.0 / (4.0 * pi * c.rhow)) * liquid_in_cloud * air_density
-        / jnp.maximum(cdnc, eps)
-    )
-    # Positive liquid can still underflow to a zero base in the arithmetic
-    # above. Guard the computed base too: preserve its zero forward radius,
-    # but never differentiate the cube root at zero. Use != 0 rather than
-    # > 0 so invalid negative/NaN bases remain visible, not silently masked.
-    has_liquid = jnp.logical_and(has_liquid, radius_base != 0.0)
-    radius_base = jnp.where(has_liquid, radius_base, 1.0)
-    liq_eff_radius = 1.0e6 * breadth * radius_base ** (1.0 / 3.0)
+    # #1130: was ``(q*rho/max(N,eps))**(1/3)``, the cube root of the
+    # QUOTIENT -- its derivative wrt N is
+    # ``~(q*rho)**(-2/3) * N**(-4/3)`` once N clears the floor, and for a
+    # trace of liquid (q as small as ~1e-22 kg/kg) that product exceeds
+    # float32's 3.4e38 ceiling even at N orders of magnitude above the
+    # 1e-12 m^-3 floor (d/dN NaN at N = 0, -inf just above it). See
+    # :func:`safe_cbrt_quotient` for why splitting the cube root fixes
+    # this and ``test_matches_unsplit_quotient_form_to_rounding`` for the
+    # pinned <= 2 ulp f32 primal bound.
+    numerator = (3.0 / (4.0 * pi * c.rhow)) * liquid_in_cloud * air_density
+    denominator = jnp.maximum(cdnc, eps)
+    # Positive liquid can still underflow to a zero numerator in the
+    # arithmetic above (jcm #866) -- fold that into ``has_liquid`` so
+    # :func:`safe_cbrt_quotient` never differentiates the cube root there.
+    # Use != 0 rather than > 0 so invalid negative/NaN values remain
+    # visible, not silently masked.
+    has_liquid = jnp.logical_and(has_liquid, numerator != 0.0)
+    liq_eff_radius = 1.0e6 * breadth * safe_cbrt_quotient(
+        numerator, denominator, has_liquid)
     return jnp.where(has_liquid, liq_eff_radius, 0.0)
 
 def threshold_vert_vel(

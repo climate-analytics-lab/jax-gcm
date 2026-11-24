@@ -116,10 +116,10 @@ jobs:
     needs: lint
     runs-on: ubuntu-latest
     # The default is 6 h, so a hung compile or a deadlocked test would
-    # otherwise burn a whole runner day before anyone noticed. 110 was ~2x the
-    # then-slowest green run (52 min); this job has since been measured at 67
-    # min, so the headroom is nearer 1.6x — raise it if the suite grows again.
-    timeout-minutes: 110
+    # otherwise burn a whole runner day before anyone noticed. Green runs take
+    # 67-107 min (2026-10/11), longer when other PR runs share the runners;
+    # 170 is ~1.6x the slowest. Keep that margin if the suite grows again.
+    timeout-minutes: 170
     permissions:
       contents: read
       actions: write  # for the cancel step below
@@ -256,9 +256,9 @@ jobs:
   extras-tests:
     needs: lint
     runs-on: ubuntu-latest
-    # First green run (PR #952): 11 min, of which 10 min of tests and under a
-    # minute of setup. 30 leaves the headroom of the other jobs' timeouts.
-    timeout-minutes: 30
+    # 16-24 min with the m7 core's tests (Oct 2026), and past 30 on a slow
+    # runner, where a 30 limit cancelled a run whose 100 tests had all passed.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v3
       - uses: ./.github/actions/setup-jcm
@@ -274,13 +274,11 @@ jobs:
       # PyPI wheel brings the CUDA stack (~4.4 GB installed) to a CPU-only
       # runner; the CPU build satisfies the same requirement.
       - name: Install every optional extra
-        # jax-cosp comes from GitHub first: the `cosp` extra names it without
-        # a URL (PyPI refuses direct-URL dependencies in published metadata)
-        # and it is not on PyPI, so the extra resolves only once it is
-        # installed.
+        # The extras' not-on-PyPI dependencies come from GitHub first
+        # (tools/ci/extras_preinstall.txt says why), so the extras resolve.
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"
+          pip install -r tools/ci/extras_preinstall.txt
           pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
 
       - name: Report runner resources
@@ -325,8 +323,11 @@ jobs:
     runs-on: ubuntu-latest
     # ~68 min of tests measured in CI (PR #970, which added the parameter-
     # gradient section of term_gradients_test.py, ~16 min) plus ~4 min setup
-    # and shard check.
-    timeout-minutes: 90
+    # and shard check. Measured at 78 min on 2026-10-15 while two other PR
+    # runs shared the runners, so 90 left no headroom; 120 is the same ~1.6x
+    # margin `fast-tests` carries. The limit exists to stop a hung compile
+    # burning a runner day, and 2 h still does that.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v3
       - uses: ./.github/actions/setup-jcm
@@ -341,7 +342,7 @@ jobs:
 
       - name: Test with pytest (slow suite, radiation shard)
         run: |
-          pytest -v -s -m "slow" $(python tools/ci/slow_shards.py args radiation) \
+          pytest -v -s -m "slow" --durations=25 $(python tools/ci/slow_shards.py args radiation) \
             --cov=jcm --cov-config=.coveragerc-pr
           mv .coverage .coverage.radiation
           python -c "import coverage; print(coverage.__version__)" > coverage-version.txt
@@ -362,8 +363,14 @@ jobs:
     needs: lint
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # ~62 min of tests measured in CI plus ~3 min setup.
-    timeout-minutes: 90
+    # ~62 min of tests measured in CI plus ~3 min setup when the shard was
+    # split; it has grown since (every new slow test file lands here by
+    # construction) and on 2026-10-15/16 this job was cancelled at 90 min
+    # eight times across five PRs while its tests were still passing, with
+    # one or two other PR runs on the runners. 120 restores the ~1.6x margin
+    # `fast-tests` carries; split the shard again (tools/ci/slow_shards.py)
+    # before raising this further.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v3
 
@@ -389,7 +396,7 @@ jobs:
 
       - name: Test with pytest (slow suite, rest shard)
         run: |
-          pytest -v -s -m "slow" $(python tools/ci/slow_shards.py args rest) \
+          pytest -v -s -m "slow" --durations=25 $(python tools/ci/slow_shards.py args rest) \
             --cov=jcm --cov-config=.coveragerc-pr
           mv .coverage .coverage.rest
           python -c "import coverage; print(coverage.__version__)" > coverage-version.txt

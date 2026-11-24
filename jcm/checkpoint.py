@@ -34,7 +34,7 @@ import dataclasses
 import functools
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from importlib import metadata
 from pathlib import Path
 
@@ -56,7 +56,20 @@ logger = logging.getLogger(__name__)
 #:     kg/kg value (the contract PR #824 settled).
 # 2 — exact Gregorian run clock and its origin/timestep. Older states may
 # be imported as initial conditions, but cannot resume a different season.
-SCHEMA_VERSION = 2
+# 3 — per-band direct/diffuse surface albedo quartet on the radiation carry
+#     (jax-gcm#959): radiation.surface_albedo_{vis,nir}_{dir,dif}. Restored
+#     by the generic name-matched migration like any other new field; a file
+#     from an earlier schema gets each missing quartet leaf from its own
+#     broadband value rather than the fresh carry's zero, via
+#     _DERIVED_ON_MIGRATION (keyed on the field names present, not on this
+#     stamp, so the bump itself is provenance only -- see that mapping's
+#     docstring).
+# 4 — the TTE-TKE carry's TKE, theta_v variance and exchange coefficients
+#     (vertical_diffusion.tke/.thv_variance/.km/.kh) moved from full levels to
+#     ECHAM's interface rows (#996): row k is now the interface BELOW full
+#     level k, where it was the interface above. An older file's rows are
+#     shifted up one by _migrate_tte_tke_to_interface_rows.
+SCHEMA_VERSION = 4
 
 #: Schema of a file with no stamp: anything written before this policy.
 _UNSTAMPED_SCHEMA = 0
@@ -480,6 +493,425 @@ def _seed_value(name, want, seeds, path, group):
     return value.astype(want.dtype) if value.dtype != want.dtype else value
 
 
+#: Physics-carry fields that a migration should DERIVE from another
+#: already-restored field (or fields), rather than seed from a fresh carry,
+#: when the field itself is absent from the checkpoint. Keyed by the
+#: derived field's dotted name (as :func:`_named_leaves` spells it); each
+#: value is ``(source field's dotted name(s), fn(model, *source_arrays) ->
+#: derived_array | None)`` -- the source side is a single dotted name for a
+#: one-source ``fn``, or a tuple of dotted names (in the order ``fn`` takes
+#: them) when the derivation needs more than one restored sibling. Every
+#: ``fn`` takes the destination ``model`` FIRST, even one that ignores it
+#: (e.g. ``emis2``'s below), so the one calling convention covers both a
+#: pure function of the source arrays and one that also needs to ask the
+#: live model something -- see the albedo quartet below. ``fn`` may return
+#: ``None`` to say "cannot derive this restore" (the live model has no
+#: term to ask), in which case the field falls through to the ordinary
+#: fresh-carry seed as if it were not registered at all.
+#:
+#: Register a new entry here whenever a field is introduced as a
+#: deterministic function of one or more fields the checkpoint already
+#: carries — the fresh-carry seed is wrong for exactly those fields, because
+#: it reflects the term's documented *initial* value rather than a function
+#: of whatever the restored sibling field(s) evolved to. Two different
+#: shapes of that same problem are registered below:
+#:
+#: - ``_mod_radcon.emis2`` (speedy_shortwave/speedy_longwave's ``-expm1``-
+#:   based longwave layer emissivity, #571), a ONE-source derivation that
+#:   ignores ``model``: a checkpoint written before it existed otherwise
+#:   restores the evolved ``tau2`` alongside a freshly-seeded, mismatched
+#:   ``emis2`` (the class default, "fully emissive") for the one or two
+#:   steps before the next radiation sub-step recomputes both together —
+#:   Codex review, PR #1124 thread 4275798697. ``fn`` here is the
+#:   numerically-stable complement ``1 - tau2``.
+#: - ``radiation.surface_albedo_{vis,nir}_{dir,dif}`` (jax-rrtmgp's per-band
+#:   direct/diffuse surface albedo quartet, jax-gcm#959), a TWO-source
+#:   derivation that DOES need ``model``: a checkpoint written before the
+#:   quartet existed carries only the broadband ``surface_albedo_vis``/
+#:   ``_nir`` pair, but which value each backend's pre-quartet solve
+#:   actually used it for is backend-specific -- RRTMGP and the NN emulator
+#:   blended both into one scalar for every band (``0.46*vis + 0.54*nir``),
+#:   while grey two-stream solved its two SW bands with the RAW pair
+#:   (Codex review on this PR: a version of this entry that always blended
+#:   was wrong for a resumed grey carry, and an even earlier version that
+#:   derived each leaf from only ONE of the two siblings was wrong for
+#:   RRTMGP/the emulator whenever ``vis != nir`` -- both are the same root
+#:   cause, guessing the backend's convention instead of asking it). So
+#:   ``fn`` asks the RESUMED model's own composed radiation term --
+#:   found generically by ``category == "radiation"``, never a backend
+#:   class name here -- for its ``legacy_surface_albedo_quartet(vis, nir)``
+#:   (one method every radiation ``PhysicsTerm`` implements: grey returns
+#:   the raw pair, RRTMGP and the emulator return the blend) and takes the
+#:   matching element. ``load_checkpoint`` always has a ``model`` in hand
+#:   (it is a required, not optional, argument), so this never needs the
+#:   checkpoint's own metadata as a fallback; a composition with no
+#:   radiation term, or a hypothetical term that does not implement the
+#:   method, returns/raises rather than guessing (see
+#:   ``_legacy_albedo_quartet_component``). The result either way is a
+#:   resumed run whose HELD radiation diagnostic (republished verbatim on a
+#:   cached, non-solve step; the live radiation term itself never reads
+#:   this carry leaf back, only the step-local ``SURFACE_OPTICS_KEY``)
+#:   reads precisely as it would have under the old, single-albedo scheme
+#:   until the next solve publishes a real quartet.
+#: - ``radiation.r_eff_{liq,ice}_at_solve`` (the host-effective-radii carry,
+#:   jax-gcm#1135), a TWO-source derivation shaped exactly like the albedo
+#:   quartet above: a checkpoint written before this carry existed has no
+#:   way to report what a resumed CACHED radiation step's last solve used
+#:   -- the generic fresh-carry zero would republish zero instead until the
+#:   next solve recomputes it (Codex review on PR #1146, mirroring the
+#:   quartet's own history). ``fn`` again asks the RESUMED model's own
+#:   composed radiation term, via ``legacy_effective_radii_at_solve(r_eff_liq,
+#:   r_eff_ice)``, rather than assuming one fixed relationship: RRTMGP and
+#:   the NN emulator always published their last solve's radius onto
+#:   ``clouds.r_eff_liq``/``r_eff_ice`` even before this PR (no host-radii
+#:   door existed pre-#1135), so for them the restored pair IS the answer
+#:   (identity); grey two-stream never formed an effective radius at all, so
+#:   its own ``clouds.r_eff_liq``/``r_eff_ice`` is itself an inert zero
+#:   placeholder for a grey composition, and the method returns zero rather
+#:   than that placeholder pair (same reasoning, not a coincidence that they
+#:   agree).
+#:
+#: - ``radiation.<sw field>_trans`` (the shortwave transmissivities the
+#:   radiation carries between solves, ECHAM ``trsol``/``trsof``), derived
+#:   from the stored flux and ``toa_sw_down`` by
+#:   :func:`_legacy_sw_transmissivity`. Without it a resumed run would apply a
+#:   zero transmissivity until the next solve.
+#:
+#: This does not change ``_fresh_carry_seeds``'s fallback for a checkpoint
+#: where a SOURCE field also has to be seeded (an even older file, or a
+#: composition that never carried it): nothing is restored to derive from
+#: there, so the fresh-carry seed stands.
+def _radiation_term_for_migration(model):
+    """Return the model's composed radiation term, or ``None``.
+
+    Generic by ``category == "radiation"`` (the same test
+    ``ComposablePhysics`` itself uses, e.g. for its band config) rather
+    than any backend class name, so this module imports no radiation
+    package and stays agnostic to how many radiation backends exist.
+    """
+    terms = getattr(getattr(model, "physics", None), "terms", None)
+    if not terms:
+        return None
+    for term in terms:
+        if getattr(term, "category", None) == "radiation":
+            return term
+    return None
+
+
+def _legacy_albedo_quartet_component(index):
+    """Build the ``fn`` for one quartet leaf, selecting ``index`` of the
+    4-tuple the live radiation term's own ``legacy_surface_albedo_quartet``
+    returns (0..3 = vis_dir, vis_dif, nir_dir, nir_dif).
+    """
+    def fn(model, vis, nir):
+        term = _radiation_term_for_migration(model)
+        if term is None:
+            return None
+        get_quartet = getattr(term, "legacy_surface_albedo_quartet", None)
+        if get_quartet is None:
+            raise ValueError(
+                f"{type(term).__name__} has no legacy_surface_albedo_quartet "
+                "method, needed to migrate a pre-schema-3 radiation carry's "
+                "surface albedo quartet (jax-gcm#959) from its own "
+                "broadband (vis, nir) pair -- every radiation PhysicsTerm "
+                "must implement it. Add it to this term, or start the run "
+                "from a fresh initial state instead of resuming this file."
+            )
+        return get_quartet(vis, nir)[index]
+    return fn
+
+
+def _legacy_effective_radii_at_solve_component(index):
+    """Build the ``fn`` for one ``r_eff_{liq,ice}_at_solve`` leaf, selecting
+    ``index`` of the pair the live radiation term's own
+    ``legacy_effective_radii_at_solve`` returns (0 = liq, 1 = ice).
+    """
+    def fn(model, r_eff_liq, r_eff_ice):
+        term = _radiation_term_for_migration(model)
+        if term is None:
+            return None
+        get_radii = getattr(term, "legacy_effective_radii_at_solve", None)
+        if get_radii is None:
+            raise ValueError(
+                f"{type(term).__name__} has no legacy_effective_radii_at_solve "
+                "method, needed to migrate a pre-jax-gcm#1135 radiation "
+                "carry's r_eff_{liq,ice}_at_solve from its own restored "
+                "clouds.r_eff_{liq,ice} -- every radiation PhysicsTerm must "
+                "implement it. Add it to this term, or start the run from a "
+                "fresh initial state instead of resuming this file."
+            )
+        return get_radii(r_eff_liq, r_eff_ice)[index]
+    return fn
+
+
+def _legacy_sw_transmissivity(model, flux, incoming):
+    """Derive a ``radiation.<sw field>_trans`` leaf from a file that predates it.
+
+    The radiation carry used to hold the shortwave itself, scaled to the
+    current sun, so the transmissivity is the stored flux over the stored
+    incoming beam wherever there is one. A column that was dark when the file
+    was written has no recoverable transmissivity (its flux was driven to
+    zero); it gets 0 and picks up a real one at the next radiation solve,
+    which is at most one ``radiation_interval`` away. The shortwave is rebuilt
+    from these every step (``jcm.physics.radiation.apply_insolation``), so a
+    resumed run needs nothing else.
+    """
+    lit = incoming > 0.0
+    safe = np.where(lit, incoming, 1.0)
+    return np.where(lit, flux / safe, 0.0)
+
+
+_DERIVED_ON_MIGRATION: dict[
+    str, tuple[str | tuple[str, ...], Callable]] = {
+    "_mod_radcon.emis2": (
+        "_mod_radcon.tau2", lambda model, tau2: 1.0 - tau2),
+    # SPEEDY's clear-sky diagnostic pass (ClearSkyRadiationData). A file
+    # written before it existed restores the clear-sky fields from their
+    # all-sky counterparts, so a resumed run reads a zero cloud radiative
+    # effect -- not a fully opaque cloud-free atmosphere (the fresh seed's
+    # tau2 = 0) -- until its next shortwave step, at most nstrad steps
+    # later, recomputes them. Diagnostic only: nothing reads them back.
+    "_clear_sky.tau2": ("_mod_radcon.tau2", lambda model, tau2: tau2),
+    "_clear_sky.emis2": ("_mod_radcon.emis2", lambda model, emis2: emis2),
+    "_clear_sky.ftop_sw": ("_shortwave_rad.ftop", lambda model, ftop: ftop),
+    "_clear_sky.rsds": ("_shortwave_rad.rsds", lambda model, rsds: rsds),
+    "_clear_sky.olr": ("_longwave_rad.ftop", lambda model, ftop: ftop),
+    "radiation.surface_albedo_vis_dir": (
+        ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
+        _legacy_albedo_quartet_component(0)),
+    "radiation.surface_albedo_vis_dif": (
+        ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
+        _legacy_albedo_quartet_component(1)),
+    "radiation.surface_albedo_nir_dir": (
+        ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
+        _legacy_albedo_quartet_component(2)),
+    "radiation.surface_albedo_nir_dif": (
+        ("radiation.surface_albedo_vis", "radiation.surface_albedo_nir"),
+        _legacy_albedo_quartet_component(3)),
+    **{
+        f"radiation.{name}_trans": (
+            (f"radiation.{name}", "radiation.toa_sw_down"),
+            _legacy_sw_transmissivity)
+        for name in (
+            "sw_flux_up", "sw_flux_down", "sw_heating_rate",
+            "sw_flux_up_clear", "sw_flux_down_clear",
+            "surface_sw_down", "surface_sw_up", "toa_sw_up",
+            "toa_sw_up_clear", "toa_sw_up_noa", "toa_sw_up_clear_noa")
+    },
+    "radiation.r_eff_liq_at_solve": (
+        ("clouds.r_eff_liq", "clouds.r_eff_ice"),
+        _legacy_effective_radii_at_solve_component(0)),
+    "radiation.r_eff_ice_at_solve": (
+        ("clouds.r_eff_liq", "clouds.r_eff_ice"),
+        _legacy_effective_radii_at_solve_component(1)),
+}
+
+
+def _apply_derived_migrations(
+    leaves: list[np.ndarray],
+    template: list[tuple[str, np.ndarray]],
+    seeded: list[str],
+    path,
+    group: str,
+    model,
+) -> list[str]:
+    """Overwrite a seeded leaf with its registered derivation, in place.
+
+    Only when EVERY field it derives from was itself genuinely restored
+    (not also seeded, in which case there is nothing, or not everything,
+    to derive from and the fresh-carry seed in ``leaves`` already stands).
+    A registered source may be one dotted name or a tuple of them (see
+    :data:`_DERIVED_ON_MIGRATION`'s docstring); ``fn`` is called as
+    ``fn(model, *source_arrays)``, positionally in that same source order.
+    ``fn`` returning ``None`` (rather than raising) means it could not
+    derive a value from ``model`` either (e.g. no composed radiation term
+    to ask) -- that leaf is left at its fresh-carry seed and not counted
+    as derived, exactly as if this entry did not exist. Returns the names
+    actually derived, so the caller can log them distinctly from a plain
+    fresh-carry seed.
+    """
+    if not seeded or not _DERIVED_ON_MIGRATION:
+        return []
+    seeded_set = set(seeded)
+    index_of = {name: i for i, (name, _) in enumerate(template)}
+    derived: list[str] = []
+    for derived_name, (source_names, fn) in _DERIVED_ON_MIGRATION.items():
+        sources = (source_names,) if isinstance(source_names, str) else source_names
+        if derived_name not in seeded_set or any(s in seeded_set for s in sources):
+            continue
+        derived_index = index_of.get(derived_name)
+        source_indices = [index_of.get(s) for s in sources]
+        if derived_index is None or any(i is None for i in source_indices):
+            continue
+        want = template[derived_index][1]
+        value = fn(model, *(leaves[i] for i in source_indices))
+        if value is None:
+            continue
+        leaves[derived_index] = value.astype(want.dtype)
+        derived.append(derived_name)
+    if derived:
+        logger.info(
+            "Checkpoint %s: physics carry field(s) %s absent from the "
+            "file; derived from their restored companion field rather "
+            "than seeded from a fresh carry",
+            path, derived,
+        )
+    return derived
+
+
+#: The TTE-TKE carry fields that live on interface rows since schema 4.
+_TTE_TKE_INTERFACE_FIELDS = (
+    "vertical_diffusion.tke",
+    "vertical_diffusion.thv_variance",
+    "vertical_diffusion.km",
+    "vertical_diffusion.kh",
+)
+
+#: Those whose surface row the scheme writes as 0.
+_TTE_TKE_ZERO_SURFACE_ROW = ("vertical_diffusion.km", "vertical_diffusion.kh")
+
+#: First schema whose TTE-TKE carry is on interface rows (see SCHEMA_VERSION).
+_TTE_TKE_INTERFACE_SCHEMA = 4
+
+
+def _migrate_tte_tke_to_interface_rows(named: Mapping, path) -> dict:
+    """Move a pre-schema-4 TTE-TKE carry onto ECHAM's interface rows (#996).
+
+    Before schema 4 the TTE-TKE term stored TKE, the θ_v variance and the
+    exchange coefficients on full levels, row ``k`` holding the interface
+    *above* full level ``k`` (row 0 repeated the first interface). Since
+    schema 4 row ``k`` is the interface *below* full level ``k`` and the last
+    row the surface layer's, so the old row ``k + 1`` is the new row ``k``.
+    The new surface row has no old counterpart. It takes what the scheme
+    itself writes there: 0 for ``km``/``kh`` (the surface exchange is the
+    ``surface_exchange_*`` fields), the lowest interior interface's value for
+    the θ_v variance (``vdiff.f90`` l.865) and, for TKE, the same, standing
+    in for the surface layer's ``tkevn``, which the scheme diagnoses afresh
+    every step and which is read before that only by a consumer that runs
+    before the vertical diffusion on the first resumed step. Keyed on the
+    field names the file carries; the vertical axis is axis 0 on every host.
+    """
+    out = dict(named)
+    moved = []
+    for name in _TTE_TKE_INTERFACE_FIELDS:
+        if name not in out:
+            continue
+        old = np.asarray(out[name])
+        if old.ndim == 0 or old.shape[0] < 2:
+            continue
+        new = old.copy()
+        new[:-1] = old[1:]
+        if name in _TTE_TKE_ZERO_SURFACE_ROW:
+            new[-1] = 0
+        out[name] = new
+        moved.append(name)
+    if moved:
+        logger.info(
+            "Checkpoint %s: TTE-TKE carry field(s) %s moved from full levels "
+            "to interface rows (schema %d layout, #996)",
+            path, moved, _TTE_TKE_INTERFACE_SCHEMA,
+        )
+    return out
+
+
+#: The dycore-state leaf that holds specific humidity.
+_HUMIDITY_LEAF = "tracers.specific_humidity"
+
+#: Physics-carry leaves holding the gridpoint humidity the physics saw or the
+#: dycore advanced from on the step before the file was written. Read one
+#: step later as ``q_now - q_then``, so they are only consistent with the
+#: restored humidity when its gridpoint values are unchanged by the load.
+_POST_PHYSICS_VALID_LEAF = "_post_physics_state.valid"
+_PREV_STEP_HUMIDITY_LEAF = "_prev_step.specific_humidity"
+
+
+def _migrate_humidity_representation(
+    stored: Mapping,
+    template: list[tuple[str, np.ndarray]],
+    model,
+    path,
+) -> tuple[dict, str | None]:
+    """Convert a stored humidity to this model's representation, by shape.
+
+    The Dinosaur semi-Lagrangian core carries ``specific_humidity`` either on
+    the grid (``(nlev, nlon, nlat)``, ``dycore.nodal_humidity``, the default)
+    or as spectral coefficients (``(nlev, *modal_shape)``). A file of the
+    other kind is converted here rather than refused, so states written on
+    either side of that choice restore on both:
+
+    * modal -> nodal: ``to_nodal`` and clip at 0. The modal field rings
+      slightly negative in the driest air (Gibbs); the physics never saw
+      those values (``verify_state`` clips them), so the clipped field is
+      exactly the gridpoint humidity the donor's physics would have read
+      next, and the carried humidity copies stay consistent with it.
+    * nodal -> modal: ``to_modal``. The gridpoint values change by what the
+      truncation cannot hold, so the carried copies are no longer the
+      donor's previous step of THIS field: the caller invalidates them (see
+      :func:`_invalidate_humidity_anchors`).
+
+    Returns the (possibly) converted mapping and the direction converted
+    (``"to_nodal"``, ``"to_modal"`` or ``None``). Anything that is neither
+    shape is left for :func:`_check_leaf` to reject.
+    """
+    want = dict(template).get(_HUMIDITY_LEAF)
+    horizontal = getattr(getattr(getattr(model, "dycore", None), "coords", None),
+                         "horizontal", None)
+    if want is None or _HUMIDITY_LEAF not in stored or horizontal is None:
+        return dict(stored), None
+    got = np.asarray(stored[_HUMIDITY_LEAF])
+    if got.shape == want.shape or got.ndim != 3:
+        return dict(stored), None
+    nodal = tuple(horizontal.nodal_shape)
+    modal = tuple(horizontal.modal_shape)
+    out = dict(stored)
+    if got.shape[1:] == modal and want.shape[1:] == nodal:
+        converted = np.maximum(np.asarray(horizontal.to_nodal(got)), 0.0)
+        direction = "to_nodal"
+    elif got.shape[1:] == nodal and want.shape[1:] == modal:
+        converted = np.asarray(horizontal.to_modal(got))
+        direction = "to_modal"
+    else:
+        return out, None
+    out[_HUMIDITY_LEAF] = converted.astype(got.dtype)
+    logger.info(
+        "Checkpoint %s: specific humidity stored as %s coefficients, "
+        "converted %s for this model's %s humidity (dycore.nodal_humidity)",
+        path, "spectral" if direction == "to_nodal" else "gridpoint",
+        direction.replace("_", " "),
+        "gridpoint" if direction == "to_nodal" else "spectral",
+    )
+    return out, direction
+
+
+def _invalidate_humidity_anchors(stored: Mapping, path) -> dict:
+    """Mark the carried humidity copies as absent after a nodal -> modal load.
+
+    The post-physics anchor gets ``valid = 0`` and ``_prev_step``'s humidity
+    zeros, which the consumers read as "no previous step" (Tiedtke
+    ``qte_dynamics`` = 0, the cloud schemes' gridpoint fallback) for the one
+    step until the model writes them again. Left as stored, their difference
+    from the projected humidity would be read as one step of dynamics
+    tendency equal to the truncation residual.
+    """
+    out = dict(stored)
+    reset = []
+    if _POST_PHYSICS_VALID_LEAF in out:
+        out[_POST_PHYSICS_VALID_LEAF] = np.zeros_like(
+            np.asarray(out[_POST_PHYSICS_VALID_LEAF]))
+        reset.append(_POST_PHYSICS_VALID_LEAF)
+    if _PREV_STEP_HUMIDITY_LEAF in out:
+        out[_PREV_STEP_HUMIDITY_LEAF] = np.zeros_like(
+            np.asarray(out[_PREV_STEP_HUMIDITY_LEAF]))
+        reset.append(_PREV_STEP_HUMIDITY_LEAF)
+    if reset:
+        logger.info(
+            "Checkpoint %s: carried humidity copies %s reset to 'no previous "
+            "step' after the humidity was projected onto the spectral basis",
+            path, reset,
+        )
+    return out
+
+
 def _match_by_name(
     stored: Mapping,
     template: list[tuple[str, np.ndarray]],
@@ -605,6 +1037,7 @@ def _load_unstamped(
     physics_template: list[tuple[str, np.ndarray]],
     unstamped_scale: Mapping[str, float] | None,
     candidates: list[str],
+    model=None,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Read a pre-stamp checkpoint, only against an explicit scale assertion.
 
@@ -673,6 +1106,13 @@ def _load_unstamped(
                 f"{key!r} group either, so it is not a jcm checkpoint."
             )
         stored = _ordered_legacy(raw[key], path, key)
+        if key == "dycore_leaves" and len(stored) == len(template):
+            # The humidity representation is identified by shape, so it
+            # migrates the same way as in a stamped file.
+            named, _ = _migrate_humidity_representation(
+                {name: got for (name, _), got in zip(template, stored)},
+                template, model, path)
+            stored = [named[name] for name, _ in template]
         if len(stored) != len(template):
             raise ValueError(
                 f"Checkpoint {path} does not match the composed model: "
@@ -725,7 +1165,11 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
     logged at INFO on the ``jcm.checkpoint`` logger so a resume is
     auditable. Carry fields are diagnostics recomputed within a step or
     two, with one bounded exception: a radiation sub-cycle cache seeded
-    this way starts one radiation interval stale, which is accepted.
+    this way starts one radiation interval stale, which is accepted. A
+    field registered in :data:`_DERIVED_ON_MIGRATION` is computed from its
+    source field's own restored value instead of the generic seed — see
+    that mapping's docstring for the per-band surface albedo quartet
+    (jax-gcm#959) and ``mod_radcon.emis2`` (#571).
 
     A leaf present in both whose shape or dtype differs is an error
     naming the file and the leaf — that is a different grid, level count
@@ -858,8 +1302,12 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
     if schema == _UNSTAMPED_SCHEMA:
         dycore_leaves, physics_leaves = _load_unstamped(
             raw, path, dycore_template, physics_template, unstamped_scale,
-            _mass_mixing_ratio_leaves(model, dycore_template),
+            _mass_mixing_ratio_leaves(model, dycore_template), model=model,
         )
+        names = [name for name, _ in physics_template]
+        migrated = _migrate_tte_tke_to_interface_rows(
+            dict(zip(names, physics_leaves)), path)
+        physics_leaves = [migrated[name] for name in names]
     else:
         if unstamped_scale is not None:
             raise ValueError(
@@ -874,8 +1322,10 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
                     f"Checkpoint {path} claims schema {schema} but has no "
                     f"{key!r} group of named arrays."
                 )
+        stored_dycore, humidity_migration = _migrate_humidity_representation(
+            raw["dycore"], dycore_template, model, path)
         dycore_leaves, _, _ = _match_by_name(
-            raw["dycore"], dycore_template,
+            stored_dycore, dycore_template,
             path=path, group="dycore state", fill_missing=False,
         )
         # Protect what either side calls prognostic: this model's
@@ -888,11 +1338,23 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
         # seeded — it re-runs the structural probe.
         seeds = functools.lru_cache(maxsize=1)(
             lambda: _fresh_carry_seeds(model))
+        stored_physics = raw["physics"]
+        if humidity_migration == "to_modal":
+            stored_physics = _invalidate_humidity_anchors(stored_physics, path)
+        if schema < _TTE_TKE_INTERFACE_SCHEMA:
+            stored_physics = _migrate_tte_tke_to_interface_rows(stored_physics, path)
         physics_leaves, seeded, dropped = _match_by_name(
-            raw["physics"], physics_template,
+            stored_physics, physics_template,
             path=path, group="physics carry", fill_missing=True,
             protected=protected, seeds=seeds,
         )
+        # A seeded field registered in _DERIVED_ON_MIGRATION gets overwritten
+        # with a value derived from its restored companion rather than left
+        # at the generic fresh-carry seed — see that mapping's docstring.
+        derived = _apply_derived_migrations(
+            physics_leaves, physics_template, seeded, path, "physics carry",
+            model)
+        seeded = [name for name in seeded if name not in derived]
         if seeded:
             logger.info(
                 "Checkpoint %s: physics carry field(s) %s absent from the "
@@ -908,9 +1370,9 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
             )
         logger.info(
             "Checkpoint %s: restored schema %d written by jcm %s "
-            "(%d carry field(s) seeded, %d dropped)",
+            "(%d carry field(s) seeded, %d derived, %d dropped)",
             path, schema, raw.get("jcm_version", "unknown"),
-            len(seeded), len(dropped),
+            len(seeded), len(derived), len(dropped),
         )
 
     _, dycore_treedef = jax.tree_util.tree_flatten(model.dycore_state)

@@ -1,0 +1,38 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routines": "mo_ham_dust.f90:685-747 (verbatim-extracted, mo_ham_dust.f90::bgc_read_annual_fields's k_dust_easo and ndust=5 MSG-source-override block): the ONLY new arithmetic jax-gcm#1017's ndust=5 preset adds. This block is wind- and soil-moisture-INDEPENDENT (it runs once at annual-field read time on mat_s1..mat_s17/mat_psrc/mat_msg, before any time-stepping), so a representative set of soil-mixture/dust_msg combinations is the complete input space -- wind speed and soil moisture do not enter it at all. They DO enter the downstream saltation/threshold-velocity chain (MB95 (5)-(7)/(15)/(28)/(33)), which ndust=5 shares bit-for-bit with the already-ported, already-tested ndust=4 path (dust_test.py's ThresholdVelocityTest/RedistributionTest/SingleClassFluxTest, hand-derived from the same Fortran constants) and is therefore NOT re-validated by this harness.",
+  "md5": {
+   "mo_ham_dust.f90": "f893c8b65a9c3c3ebb7c49114f64b227"
+  }
+ },
+ "harness": {
+  "path": "/scr/dwatsonparris/ham-m7/w7/dust-harness",
+  "driver": "driver.f90 declares mat_s1..mat_s17/mat_psrc/mat_msg/Z01/Z02 as (nproma=7, ngpblks=1) arrays (matching mo_ham_dust.f90's own module-level declarations/types) for 7 synthetic test cells, sets k_dust_easo=2, ndust=5, r_dust_z0s=0.001 (the ndust=4/5 CASE (4,5) namelist defaults), then INCLUDEs snippet_annual_override.f90.txt -- the UNMODIFIED mo_ham_dust.f90:685-747 text, extracted with `sed -n '685,747p'` (zero retyping risk) -- unchanged.",
+  "stubs": "mo_kind.f90: only the dp kind parameter (SELECTED_REAL_KIND(12, 307)), matching mo_kind.f90's own definition. No other module is pulled in -- the extracted block references no other USE dependency.",
+  "repository": "private scratch harness, not pushed, not part of jax-gcm (RULES.md: ECHAM/HAM source is never committed to the jax-gcm repository; only these numbers are)"
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-ffree-line-length-none (both -O0 and -O2, see checks below)",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "checks": {
+  "O0_vs_O2_max_abs": 0.0,
+  "fortran_vs_jcm_max_rel_error": {
+   "residual (mat_s1 - mat_s2 - mat_s3 - mat_s4 - mat_s6 - east_sum, land-weighted)": 0.0,
+   "mat_s2 (land-weighted)": 0.0,
+   "mat_s3 (land-weighted)": 0.0,
+   "mat_s4 (land-weighted)": 0.0,
+   "mat_s6 (land-weighted)": 0.0,
+   "mat_psrc": 0.0
+  },
+  "note": "Exact (0.0) only with JAX x64 enabled (jax.config.update('jax_enable_x64', True)); jcm's float32 default otherwise introduces ~1e-8 relative rounding noise against the Fortran's REAL(dp), which is a dtype artifact, not a logic difference -- confirmed by re-running compare.py with x64 off and seeing the same ~1e-8 gap vanish at x64."
+ },
+ "cells": {
+  "count": 7,
+  "labels": ["sahara_msg_inactive", "sahara_msg_active_weak", "sahara_msg_strong",
+            "non_saharan_mixed_soil", "east_asia_msg_inactive",
+            "east_asia_msg_active_weak", "msg_at_boundary_0p01"],
+  "coverage": "dust_msg in {0 (inactive), 0.005 (active-but-not-strong, 0 < msg < 0.01), 0.01 (the ndust=5 'strong' boundary, inclusive), 0.02 (strong)}, soil mixtures spanning a pure-Zobler-type-2 Saharan cell, a non-Saharan Zobler mix (type3+type6), and an East-Asian cell (type15) both with and without an active MSG override -- the regimes jax-gcm#1017's task asked for (0, between 0 and 0.01, >= 0.01, Saharan and non-Saharan) plus the k_dust_easo x ndust=5 interaction and the 0.01 boundary itself."
+ },
+ "regenerate": "cd /scr/dwatsonparris/ham-m7/w7/dust-harness && gfortran -ffree-line-length-none -c mo_kind.f90 && gfortran -ffree-line-length-none -I. -c driver.f90 && gfortran -o dust_msg_harness mo_kind.o driver.o && JAX_PLATFORMS=cpu <venv>/bin/python compare.py"
+}

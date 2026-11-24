@@ -1,6 +1,9 @@
+import dataclasses
+import math
 import warnings
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
@@ -18,6 +21,10 @@ from jcm.data.bc.interpolate import interpolate_to_daily, upsample_forcings_ds
 from jcm.data.input_resolution import expand_yearly_files as expand_yearly_files
 from jcm.date import (
     DateData,
+    SECONDS_PER_DAY,
+    day_of_year_elapsed,
+    days_in_month,
+    get_year,
     gregorian_ymd_from_days,
 )
 from jcm.ozone_climatology import OzoneClimatology
@@ -57,17 +64,31 @@ def _validate_bc_fields(ds) -> None:
     # unit error or corrupt input.
     HARD_RANGES = {
         "stl":  (180.0, 350.0),  # K — Antarctic plateau winter ≈ 180 K, hottest desert summer ≈ 330 K
-        # AMIP-style SST files commonly carry the under-ice
-        # temperature of the underlying water (down to ~220 K in
-        # extreme Antarctic-pack winters); some authoring conventions
-        # also extrapolate below freezing in fill regions. The lower
-        # bound here is loose enough to admit real-world climatologies
-        # while still catching unit errors (a Celsius file would have
-        # values near 0).
+        # Under sea ice, ``sst`` follows one of two conventions.
+        # Water-temperature files (the ERA5 ``sstk``, PCMDI AMIP
+        # ``tosbcs`` and CMIP ``tos`` bundles from ``jcm.data.mirror``)
+        # sit near the saline freezing point there. Skin-temperature
+        # files (the packaged SPEEDY T30 climatology) carry the
+        # ice-blended surface temperature instead, which is far below
+        # freezing in polar winter: its median under icec > 0.9 is
+        # ~255 K, and its minimum ~237 K. The lower bound admits the
+        # skin-temperature convention while still catching unit errors
+        # (a Celsius file would have values near 0).
         "sst":  (220.0, 320.0),  # K
+        # Sea-ice surface temperature: no colder than the coldest land
+        # surface (``stl``'s floor) and no warmer than a melting ice surface,
+        # with a little slack for interpolation; a Celsius file (values near
+        # 0) or an SST written in its place (open water ≫ 275 K) fails.
+        "sea_ice_temperature": (180.0, 275.0),  # K
         "icec": (0.0,   1.0),    # fraction
         "alb":  (0.0,   1.0),    # fraction
-        "soilw_am": (0.0, 5.0),  # kg/m^2 (column-integrated soil water)
+        # Dimensionless root-zone availability index ws/wsmx (#1057) — SPEEDY's
+        # vegetation-weighted blend of the 7-28 cm layer, clipped to [0, 1] at
+        # construction (``jcm.data.bc.compile.compute_soilw_am``,
+        # ``jcm.data.mirror.bundles.translate_land``). NOT a column-integrated
+        # water depth; the range check below matches the production builders'
+        # own clip, same as ``jcm.data.regridding._CONDITIONAL_RANGE``.
+        "soilw_am": (0.0, 1.0),
         # Relative soil wetness ws/wsmx — a fraction by construction, so
         # anything outside [0, 1] means it was written as a volumetric content
         # or a water depth instead (#787).
@@ -154,6 +175,30 @@ BY_DATE_INTERP = 2  # as BY_DATE, but linearly interpolate between samples.
 PERSIST_STRICT = 0
 PERSIST_HOLD = 1
 
+# `TimeSeries.anchors` codes: how a 12-record ``WRAP_YEAR`` climatology's
+# records are dated, i.e. what instant within its month each one represents
+# (#902). Only meaningful for a *direct* 12-record WRAP_YEAR leaf — a
+# pre-expanded 365/366-record daily table (the surface climatology path,
+# ``jcm.data.bc.interpolate.interpolate_to_daily``) already baked its choice
+# of anchor into the table at load time, and any other length (``BY_DATE``/
+# ``BY_DATE_INTERP``, MACv2-SP's weekly cycle) ignores this field entirely.
+# ``MONTH_START``: the pre-#902 behaviour — record ``m`` is held constant
+# from the 1st of Gregorian month ``m`` to the 1st of month ``m+1`` (a
+# zero-order hold). Correct for categorical/interval-total products (e.g.
+# emissions: interpolating an interval total would change the annual
+# integral) and for the Tegen dust-source climatology, which the Fortran
+# itself (``bgc_dust_read_monthly``) steps the same way.
+# ``MID_MONTH``: ECHAM's reconstruction (``mo_time_control.f90::
+# time_weights``, L1547-1612) — record ``m`` represents the INSTANT at the
+# middle of month ``m``, and the value at any other instant is a linear
+# blend of the current month's record with whichever neighbour (previous
+# before mid-month, next after) is closer, weighted by the actual lengths
+# (leap February included) of the two months being blended. See
+# :func:`_echam_time_weights`.
+MONTH_START = 0
+MID_MONTH = 1
+_ANCHOR_MODES = {"month_start": MONTH_START, "mid_month": MID_MONTH}
+
 # Default scalar CO2 mixing ratio (ppmv) when no time series is supplied.
 # 420 ppmv is the value the ECHAM/RRTMGP physics was calibrated against (it was
 # previously hard-coded in ``ChemistryParameters``); SPEEDY's ``ablco2`` simply
@@ -200,6 +245,7 @@ class TimeSeries:
     times: jdt.Datetime
     align_mode: jnp.ndarray   # int scalar, stored as a 0-d jnp array
     persist: Any = None       # int scalar (0-d jnp array); None = strict
+    anchors: Any = None       # int scalar (0-d jnp array); None reads as MID_MONTH
 
 
 def persist_code(persist, config_key: str = "persist") -> int:
@@ -219,12 +265,47 @@ def persist_code(persist, config_key: str = "persist") -> int:
             else PERSIST_STRICT)
 
 
-def make_time_series(values, times, align_mode=BY_DATE, persist="strict"):
+def anchors_code(anchors, config_key: str = "forcing.monthly_anchors") -> int:
+    """Return the ``TimeSeries.anchors`` code of a mode name (or code).
+
+    Accepts ``"month_start"`` / ``"mid_month"`` or an already-resolved int
+    code (see :data:`MONTH_START` / :data:`MID_MONTH`).
+    """
+    if isinstance(anchors, (int, np.integer)) and not isinstance(anchors, bool):
+        code = int(anchors)
+        if code not in (MONTH_START, MID_MONTH):
+            raise ValueError(f"{config_key}={anchors!r}: unknown anchors code.")
+        return code
+    try:
+        return _ANCHOR_MODES[str(anchors)]
+    except KeyError:
+        raise ValueError(
+            f"{config_key}={anchors!r}: expected 'month_start' or "
+            "'mid_month'.") from None
+
+
+def make_time_series(values, times, align_mode=BY_DATE, persist="strict",
+                     anchors="month_start"):
     """Build a validated `TimeSeries` with a strictly increasing time axis.
 
     ``persist`` is the leaf's declared out-of-range policy (``"strict"``,
     the default, or ``"hold"``; see :class:`TimeSeries`) — only meaningful
-    for a date-aligned leaf.
+    for a date-aligned leaf. ``anchors`` (``"month_start"``, the default
+    here, or ``"mid_month"``) is the declared reconstruction of a direct
+    12-record ``WRAP_YEAR`` climatology (#902) — meaningless for every
+    other leaf shape, but always stored so the struct stays one pytree
+    layout.
+
+    This low-level default is deliberately the PRE-#902 behaviour
+    (``month_start``), unlike the higher-level loaders
+    (:meth:`ForcingData.from_dataset`, :func:`jcm.ozone_climatology.
+    OzoneClimatology.from_file`, :func:`read_oxidant_vmr`), whose own
+    ``anchors``/``monthly_anchors`` parameter defaults to ``"mid_month"``.
+    A caller building a ``TimeSeries`` directly (every existing unit test
+    that constructs one without an opinion on #902) keeps its current
+    numbers; the user-facing config knob (``forcing.monthly_anchors``,
+    threaded from those loaders) is what actually defaults to the new
+    ECHAM-faithful reconstruction for real forcing files.
     """
     values = jnp.asarray(values)
     raw_times = np.asarray(times) if not isinstance(times, jdt.Datetime) else None
@@ -276,6 +357,7 @@ def make_time_series(values, times, align_mode=BY_DATE, persist="strict"):
         times=times,
         align_mode=jnp.asarray(align_mode, dtype=jnp.int32),
         persist=jnp.asarray(persist_code(persist), dtype=jnp.int32),
+        anchors=jnp.asarray(anchors_code(anchors), dtype=jnp.int32),
     )
 
 
@@ -291,12 +373,26 @@ class SolarGeometry:
     tyear: jnp.ndarray            # fractional year [0, 1) — SPEEDY shortwave
     orbital_phase: jnp.ndarray    # 2π × fraction-of-year, jax_solar convention
     synodic_phase: jnp.ndarray    # 2π × fraction-of-day,   jax_solar convention
+    # Raw calendar facts (jax-gcm#1017 Kazil/GCR task, Part B): GCR ionisation's
+    # geomagnetic dipole axis needs the actual (year, day-of-year), not just
+    # the fraction-of-year `tyear` above -- the IGRF epoch table it interpolates
+    # is indexed by calendar year, not a repeating annual cycle. Defaulted (not
+    # required at every call site, like the three fields above) so direct
+    # `SolarGeometry(...)` constructions that never feed GCR ionisation
+    # (`jcm/rce.py`'s perpetual-sun geometry) need not supply them; a caller
+    # that vmaps every leaf over columns (`tools/radiation_emulator/
+    # generate_training_data.py`) passes per-column values instead.
+    calendar_year: jnp.ndarray = dataclasses.field(
+        default_factory=lambda: jnp.zeros((), dtype=jnp.float32))
+    day_of_year: jnp.ndarray = dataclasses.field(
+        default_factory=lambda: jnp.zeros((), dtype=jnp.float32))
 
     @classmethod
     def zero(cls):
         """Build a null SolarGeometry for placeholder / static `ForcingData` objects."""
         zero = jnp.zeros((), dtype=jnp.float32)
-        return cls(tyear=zero, orbital_phase=zero, synodic_phase=zero)
+        return cls(tyear=zero, orbital_phase=zero, synodic_phase=zero,
+                   calendar_year=zero, day_of_year=zero)
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +467,7 @@ class ForcingData:
 
     sice_am: jnp.ndarray # sea ice concentration (or TimeSeries thereof)
     snowc_am: jnp.ndarray # snow cover SWE/sd2sc; min(1, .) is the cover fraction (SPEEDY snowcl_ob; ECHAM land albedo, #672)
-    soilw_am: jnp.ndarray # soil moisture (used to be soilwcl_ob in fortran - but one day of that was soilw_am)
+    soilw_am: jnp.ndarray # dimensionless root-zone soil-water availability index ws/wsmx in [0, 1] (#1057), read by speedy_surface_flux.py's land_wetness; used to be soilwcl_ob in fortran - but one day of that was soilw_am
     stl_am: jnp.ndarray # temperature over land
     sea_surface_temperature: jnp.ndarray # SST, should come from sea_model.py or some default value
 
@@ -482,6 +578,10 @@ class ForcingData:
     dust_soil_types: Any = None
     dust_regions: Any = None
     dust_roughness: Any = None
+    # The MSG-SEVIRI Saharan dust-source-activation frequency (jax-gcm#1017),
+    # static, in [0, 1]. Consumed only by ``ndust = 5``
+    # (``DustParameters.use_msg_source``); every other preset leaves it unset.
+    dust_msg: Any = None
 
     # Prescribed oxidant volume mixing ratios for the JAM sulfur chemistry
     # (#496 follow-up): a mapping ``{"oh"|"no3"|"o3"|"h2o2": TimeSeries}`` of
@@ -503,6 +603,23 @@ class ForcingData:
     # (sector, species) so new channels need no struct change; ``select(date)``
     # slices the per-channel ``TimeSeries`` leaves like any other forcing leaf.
     anthropogenic_emissions: Any = None
+
+    # Volcanic SO₂ point sources (#1190), mapped onto model columns by
+    # :func:`read_volcanic_emissions`: a dict of small static arrays (no
+    # ``TimeSeries``), because eruptions are selected per day by
+    # :class:`~jcm.physics.aerosol.jam.emissions.volcanic.VolcanicEmissions`
+    # from ``solar.calendar_year``/``day_of_year``. ``None`` ⇒ no volcanic source.
+    volcanic_emissions: Any = None
+
+    # MACv2 natural aerosol background (:func:`read_natural_aerosol`): one
+    # mapping holding the coarse mode and pre-industrial fine mode optics per
+    # RRTMG band and their layer fractions as mid-month ``WRAP_YEAR``
+    # ``TimeSeries`` leaves on the model grid, plus the band limits and layer
+    # bounds as small static arrays. Read by
+    # :class:`~jcm.physics.aerosol.macv2_natural.Macv2NaturalAerosol`, which
+    # adds it to the plumes' optics for the radiation. ``None`` ⇒ no natural
+    # background (the term passes the aerosol slot through).
+    natural_aerosol: Any = None
 
     # Prescribed *already-speciated* aerosol emissions (#498), the CAM6/MAM4-
     # faithful counterpart to ``anthropogenic_emissions``. A mapping
@@ -540,20 +657,49 @@ class ForcingData:
 
     # Ocean surface current [m/s], eastward/northward on the model grid
     # (2-D ``(ix, il)`` maps or ``TimeSeries``), for a coupler to feed back
-    # from its ocean. RESERVED, NOT YET USED: in ECHAM the surface stress and
-    # the open-water 10 m wind are relative to this current
-    # (mo_surface_ocean.f90, ``zudif = u - ocu``; ``wind10w``), and the
-    # TTE-TKE solve already takes a momentum target for it, but the
-    # vertical diffusion still applies a zero current regardless of these
-    # fields. They exist so the coupling API is stable before that lands
-    # (#915); see docs/source/design/surface_exchange.md. ``None`` = no
-    # current.
+    # from its ocean, or from ``forcing.ocean_current`` (file or uniform
+    # constants, mirroring ``forcing.prescribed_surface_flux``'s doors; see
+    # :func:`read_ocean_current`). Consumed by the ECHAM TTE-TKE vertical
+    # diffusion (jax-gcm#915): the water-tile-only open-water 10 m speed
+    # (``surface_exchange.wind_speed_relative_to_current``, ECHAM's
+    # ``wind10w``) and the momentum Robin row's surface target (scaled by
+    # the non-land fraction, matching ``mo_surface_ocean.f90``'s
+    # ``zudif = u - ocu`` and ``vdiff.f90``'s box-averaged momentum row) are
+    # both relative to this current. SPEEDY does not read it. ``None``
+    # (default) = no current (the stress and wind10w are against a surface
+    # at rest, bit-identical to a run that never sets these fields). See
+    # docs/source/design/surface_exchange.md.
     ocean_u: Any = None
     ocean_v: Any = None
+    # Prescribed land skin temperature [K], a model-grid array or TimeSeries.
+    # Absence preserves the stl_am fallback in prescribed-temperature mode.
+    land_skin_temperature: Any = None
+    # Sea-ice surface temperature [K] (SPEEDY's ``tice_am``), a model-grid
+    # array or TimeSeries: the skin of the ice-covered part of the sea. It is
+    # read from the optional ``sea_ice_temperature`` file variable, or set by
+    # a coupler from a thermodynamic sea-ice model. The SPEEDY sea-surface
+    # flux blends it into ``tsea`` by the ice fraction; ECHAM integrates its
+    # own ice temperature and does not read it. ``None`` (default, and
+    # whenever the file has no such variable) means the ice surface is taken
+    # as the SST capped at the saline freezing point, ``min(sst, sstfr)``;
+    # that fallback lives in ``speedy_surface_flux._sea_fluxes`` next to
+    # ``sstfr`` so every construction path (file, ``zeros``/``ones``, a
+    # hand-built forcing) gets the same ice temperature without having to
+    # derive it from an SST that may itself be a TimeSeries.
+    sea_ice_temperature: Any = None
+    # SLIM's prescribed land-surface properties (``land_model: slim``): a
+    # mapping ``{name: TimeSeries | array}`` read by
+    # :func:`jcm.physics.surface.slim.properties.read_slim_properties` from
+    # ``forcing.slim_file`` — the monthly ``alb_{g,s}{v,n}{d,f}``,
+    # ``bucketdepth``, ``snowmask``, ``evap_res``, ``roughness``,
+    # ``soil_tk_1d``/``soil_cv_1d``/``glc_tk_1d``/``glc_cv_1d`` (WRAP_YEAR
+    # ``TimeSeries``, stepped by month as SLIM's ``nc_import`` does) and the
+    # static ``glc_mask``. ``None``: no SLIM properties (the prescribed land).
+    slim_properties: Any = None
 
     @classmethod
     def zeros(cls,nodal_shape,
-              alb0=None,sice_am=None,snowc_am=None,
+              alb0=None,sice_am=None,sea_ice_temperature=None, snowc_am=None,
               soilw_am=None,stl_am=None,sea_surface_temperature=None,
               soilw_rel=None,
               forest_fraction=None,
@@ -564,7 +710,9 @@ class ForcingData:
               ozone_climatology=None,
               ch4_vmr=None,
               n2o_vmr=None,
-              nplumes=9):
+              nplumes=9,
+              land_skin_temperature=None
+              ):
         # Land + SST temperatures default to ~15 °C — a sensible global
         # mean surface temperature — so that ``ForcingData.zeros(...)``
         # yields a physically plausible state when no forcing file is
@@ -574,10 +722,14 @@ class ForcingData:
         return cls(
             alb0=alb0 if alb0 is not None else jnp.zeros((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)),
+            # No default: ``None`` selects the min(sst, sstfr) fallback (see
+            # the field's declaration).
+            sea_ice_temperature=sea_ice_temperature,
             snowc_am=snowc_am if snowc_am is not None else jnp.zeros((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)),
             # No zeros default: absence has to stay distinguishable from a dry
             # soil (see the field's declaration).
+            land_skin_temperature=land_skin_temperature,
             soilw_rel=soilw_rel,
             forest_fraction=forest_fraction,
             glacier_fraction=glacier_fraction,
@@ -597,7 +749,7 @@ class ForcingData:
 
     @classmethod
     def ones(cls,nodal_shape,
-             alb0=None,sice_am=None,snowc_am=None,
+             alb0=None,sice_am=None,sea_ice_temperature=None, snowc_am=None,
              soilw_am=None,stl_am=None,sea_surface_temperature=None,
              soilw_rel=None,
              forest_fraction=None,
@@ -608,15 +760,21 @@ class ForcingData:
              ozone_climatology=None,
              ch4_vmr=None,
              n2o_vmr=None,
-             nplumes=9):
+             nplumes=9,
+             land_skin_temperature=None
+             ):
         return cls(
             alb0=alb0 if alb0 is not None else jnp.ones((nodal_shape)),
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)),
+            # Left absent unless asked for: ``None`` selects the
+            # min(sst, sstfr) fallback rather than a 1 K ice surface.
+            sea_ice_temperature=sea_ice_temperature,
             snowc_am=snowc_am if snowc_am is not None else jnp.ones((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)),
             # Left absent unless asked for: an all-ones relative wetness is a
             # globally saturated soil, which would silently switch dust
             # emission off in every test built from ``ones``.
+            land_skin_temperature=land_skin_temperature,
             soilw_rel=soilw_rel,
             forest_fraction=forest_fraction,
             glacier_fraction=glacier_fraction,
@@ -637,7 +795,7 @@ class ForcingData:
     @classmethod
     def from_file(cls, filename, coords: CoordinateSystem = None,
                   align_mode: str = "auto", validate: bool = True,
-                  persist: str = "strict"):
+                  persist: str = "strict", monthly_anchors: str = "mid_month"):
         """Initialize forcing data from one or more netCDF files.
 
         Thin wrapper around `from_dataset`: opens `filename` with xarray
@@ -651,7 +809,9 @@ class ForcingData:
         pass ``False`` to bypass the BC sanity check, e.g. for synthetic
         test fixtures). ``persist`` (``"strict"`` | ``"hold"``) is the
         declared out-of-range policy of a date-aligned file, forwarded to
-        `from_dataset` (``forcing.persist``, #900).
+        `from_dataset` (``forcing.persist``, #900). ``monthly_anchors``
+        (``"mid_month"`` default | ``"month_start"``) forwards to
+        `from_dataset` (#902) — see its docstring.
         """
         import xarray as xr
         align_mode = resolve_align(align_mode, paths=filename,
@@ -665,11 +825,13 @@ class ForcingData:
             ds = xr.open_dataset(filename)
         return cls.from_dataset(ds, coords=coords,
                                 align_mode=align_mode, validate=validate,
-                                persist=persist)
+                                persist=persist, monthly_anchors=monthly_anchors)
 
     @classmethod
     def from_bundles(cls, coords, *, aerosol=None, surface="pd", years=None,
-                     fetch=None, persist="strict"):
+                     fetch=None, persist="strict", monthly_anchors="mid_month",
+                     land_skin_temperature_file=None,
+                     volcanic_eruption_year=None, natural_aerosol=True):
         """Build the canonical mirror-bundle forcing set for a composition.
 
         The Python counterpart of the CLI's ``forcing=…`` + ``auto`` defaults:
@@ -685,7 +847,11 @@ class ForcingData:
         the repo-packaged MACv2-SP file (:func:`packaged_macv2_path`) into
         ``forcing.macv2_file`` so the real plume weights are attached — the file
         is resolution-invariant and shipped in the wheel, so it needs no mirror
-        fetch. Unpublished-grid / sigma degradations (``auto`` → nothing) mirror
+        fetch — and, on a real surface, fetches the per-grid MACv2 natural
+        aerosol background the plumes sit on (``natural_aerosol_file``; read
+        by :class:`~jcm.physics.aerosol.macv2_natural.Macv2NaturalAerosol`).
+        ``natural_aerosol=False`` leaves the background out, for a physics
+        that does not compose that term. Unpublished-grid / sigma degradations (``auto`` → nothing) mirror
         the CLI for the other products; ``auto`` ozone likewise mirrors the CLI
         in RAISING on a hybrid grid it cannot resolve (#774). ``fetch``
         (default: the HF cache) pre-resolves the composed surface bundle via the
@@ -698,6 +864,10 @@ class ForcingData:
         (default): ``years`` outside a transient product's coverage raise, and
         ``Model.run`` refuses a window its dated inputs do not cover;
         ``"hold"`` declares holding the endpoint values intended.
+
+        ``volcanic_eruption_year`` is the CLI's ``forcing.volcanic_eruption_year``:
+        ``None`` emits the eruptions of the years the model calendar passes
+        through, a year replays that year's every model year (#1190).
 
         Era consistency (F1): the surface epoch selects the ancillary epoch, so
         an 1870s PI surface is not silently paired with present-day ancillaries.
@@ -747,15 +917,31 @@ class ForcingData:
             "dust_file": "auto", "dust_preferential_file": "auto",
             "dust_soil_types_file": "auto", "dust_regions_file": "auto",
             "dust_roughness_file": "auto",
+            # Opt-in, unlike the four dust companions above: only ndust=5
+            # reads the MSG map, so other callers neither fetch nor carry it.
+            # A caller that wants ndust=5 passes dust_msg_file="auto" itself
+            # (see jcm/config/configuration/t63-echam-jam.yaml).
+            "dust_msg_file": None,
             "oxidants_file": "auto", "align": "auto",
+            "volcanic_file": "auto",
+            # The natural background pairs with the simple plumes; JAM
+            # carries its own natural aerosol, and no aerosol means none.
+            "natural_aerosol_file": (
+                "auto" if aerosol == "macv2sp" and natural_aerosol else None),
+            "volcanic_eruption_year": volcanic_eruption_year,
             "macv2_file": macv2_file,
+            "land_skin_temperature_file": land_skin_temperature_file,
             "years": years, "available_years": None,
             "ozone_available_years": None, "emissions_available_years": None,
             "oxidants_available_years": None,
+            # Validate now (raises on an unknown mode); the dict carries the
+            # NAME, which `_attach_ozone`/`_attach_oxidants` forward as-is.
+            "monthly_anchors": monthly_anchors,
             **{k: persist for k in ("persist", "ozone_persist",
                                     "emissions_persist", "oxidants_persist",
                                     "macv2_persist")},
         }
+        anchors_code(monthly_anchors, config_key="forcing.monthly_anchors")
 
         # Pin the era-consistent ancillary epoch (F1). "pd" is the manifest
         # auto=True product, so it stays "auto" (keeping the silent-degrade on an
@@ -807,7 +993,9 @@ class ForcingData:
                     forcing_dict["align"] = sr.alignment
             forcing_dict["file"] = file_spec
 
-        physics_dict = {"aerosol_module": "jam"} if aerosol == "jam" else {}
+        physics_dict = ({"aerosol_module": "jam"} if aerosol == "jam"
+                        else {"natural_aerosol": (aerosol == "macv2sp"
+                                                  and bool(natural_aerosol))})
         cfg = OmegaConf.create(
             {"forcing": forcing_dict, "physics": physics_dict})
         # Drive the forcing-side engine directly — the SAME engine the CLI door
@@ -823,7 +1011,7 @@ class ForcingData:
     @classmethod
     def from_dataset(cls, ds, coords: CoordinateSystem = None,
                      align_mode: str = "auto", validate: bool = True,
-                     persist: str = "strict"):
+                     persist: str = "strict", monthly_anchors: str = "mid_month"):
         """Initialize forcing data from an in-memory xarray Dataset.
 
         Time-varying variables are wrapped as `TimeSeries` leaves so the
@@ -853,6 +1041,24 @@ class ForcingData:
                 fails at start (:func:`check_forcing_coverage`); `"hold"`
                 declares that holding the first/last sample outside it is
                 intended. Ignored for `"wrap_year"`, which covers every date.
+            monthly_anchors: `"mid_month"` (default, ``forcing.
+                monthly_anchors`` in the CLI) or `"month_start"` — the
+                reconstruction of a ``wrap_year`` **surface** climatology's
+                annual cycle (#902): `"mid_month"` follows ECHAM
+                (``mo_time_control.f90::time_weights``) — the 12 records
+                are kept as a direct WRAP_YEAR leaf (no daily-table
+                expansion) and the mid-month blend is recomputed fresh at
+                every step from the actual simulated date, exactly like
+                ozone/oxidants, so it is correct for every model year
+                regardless of which year's file supplied it; `"month_start"`
+                is the pre-#902 behaviour — expanded once to a 365/366-record
+                daily table by periodic Dec/Jan **linear** interpolation
+                between month-start knots
+                (:func:`jcm.data.bc.interpolate.interpolate_to_daily`).
+                CHANGES THE CLIMATE of every run forced this way — see
+                ``docs/source/design/forcing_time_semantics.md``. Ignored
+                for a file that is not a 12-record ``wrap_year``
+                climatology.
 
         """
         expected_structure = {
@@ -869,6 +1075,10 @@ class ForcingData:
         # silently transposed by the TimeSeries wrapper.
         if "soilw_rel" in ds.data_vars:
             expected_structure["soilw_rel"] = ("lon", "lat", "time")
+
+        if "sea_ice_temperature" in ds.data_vars:
+            expected_structure["sea_ice_temperature"] = ("lon", "lat", "time")
+
         # Optional static land-cover maps for the ECHAM land albedo (#672).
         for name in ("forest", "glac", "lsm"):
             if name in ds.data_vars:
@@ -895,25 +1105,41 @@ class ForcingData:
         resolved_align_mode = align_mode_code(resolve_align(
             align_mode, config_key="forcing.align"))
         persist = persist_code(persist, config_key="forcing.persist")
+        # Validate now (raises on an unknown mode).
+        anchors_code(monthly_anchors, config_key="forcing.monthly_anchors")
         is_wrap_year_monthly = (resolved_align_mode == WRAP_YEAR
                                 and _is_monthly_climatology(ds))
-        if is_wrap_year_monthly:
-            # Surface climatologies are continuous boundary conditions. Expand
-            # them with periodic Dec/Jan interpolation regardless of whether
-            # horizontal regridding is also needed. The interpolation works on
-            # a Gregorian month-start axis, so a climatology whose axis is
-            # not datetime64 — a numeric month index, or cftime labels in an
-            # idealised calendar (360_day, noleap year 0) that pandas cannot
-            # hold — is first put on the nominal month labels WRAP_YEAR uses
-            # anyway (``_wrap_year_times``). One interpolation path then
-            # serves every axis kind; a datetime64 axis is interpolated on its
-            # own year exactly as before (a leap-year source keeps Feb 29).
+        if is_wrap_year_monthly and monthly_anchors != "mid_month":
+            # month_start (the pre-#902 behaviour): expand to a 365/366-record
+            # daily table by periodic Dec/Jan month-start linear interpolation,
+            # regardless of whether horizontal regridding is also needed. The
+            # interpolation works on a Gregorian month-start axis, so a
+            # climatology whose axis is not datetime64 — a numeric month
+            # index, or cftime labels in an idealised calendar (360_day,
+            # noleap year 0) that pandas cannot hold — is first put on the
+            # nominal month labels WRAP_YEAR uses anyway (``_wrap_year_times``).
+            # One interpolation path then serves every axis kind; a
+            # datetime64 axis is interpolated on its own year exactly as
+            # before (a leap-year source keeps Feb 29).
             if not np.issubdtype(np.asarray(ds["time"].values).dtype,
                                  np.datetime64):
                 nominal = np.asarray(
                     _wrap_year_times(ds).to_datetime64()).astype("datetime64[ns]")
                 ds = ds.assign_coords(time=("time", nominal))
-            ds = interpolate_to_daily(ds)
+            ds = interpolate_to_daily(ds, anchors=monthly_anchors)
+            # mid_month (the default, #902): deliberately NOT expanded here.
+            # A pre-baked daily table fixes its mid-month knot POSITIONS to
+            # whichever single calendar year supplied the file (leap or not),
+            # so replaying it in a model year of different leap-ness would
+            # reproduce the wrong intra-February blend for every day that
+            # isn't an exact knot — a real defect a strict-vs-leap-year
+            # comparison test caught in review. The 12 raw records instead
+            # flow straight into the general WRAP_YEAR `TimeSeries` path
+            # below with `anchors="mid_month"`, exactly like ozone/oxidants:
+            # `_select_time_series`'s n_time==12 branch
+            # (`_echam_time_weights`) recomputes the blend fresh every step
+            # from the ACTUAL simulated date, so it is correct for every
+            # model year regardless of which year's file supplied it.
 
         if target_resolution is None:
             ix, il, n_times = ds['stl'].shape
@@ -941,14 +1167,34 @@ class ForcingData:
         times = _times_for_mode(ds, resolved_align_mode)
 
         def _ts(values):
-            """Wrap an `(lon, lat, time)` array as a `TimeSeries` leaf with
-            time as the leading axis (matching `_select_time_series`'s
-            convention).
+            """Wrap any time-varying array of this dataset as a `TimeSeries`
+            leaf — the ONE choke point every such leaf (a gridded
+            `(lon, lat, time)` surface field, or a scalar `(time,)` GHG
+            series below) goes through, so `align_mode`/`persist`/
+            `monthly_anchors` can never silently diverge between fields of
+            the same `wrap_year` product. Classifies by SHAPE, not by
+            name: an array with more than one dimension is a gridded field
+            whose trailing time axis is moved to the front (matching
+            `_select_time_series`'s leading-time convention); a 1-D array
+            is already a time-first scalar series. (Before the #1126
+            review this generalised a separate, hand-written helper for
+            the GHG scalars that forgot to pass `anchors` — they silently
+            kept the `month_start` reconstruction while the gridded fields
+            moved to `mid_month`; a single shared function is what
+            prevents that recurring for a future field.)
+
+            `anchors=monthly_anchors` matters only for an UNEXPANDED
+            12-record WRAP_YEAR leaf (the `mid_month` case above); it is
+            ignored by `_select_time_series` for every other leaf shape
+            (a month_start-expanded 365/366-record table, a native daily/
+            multi-year axis, or a dated BY_DATE/BY_DATE_INTERP leaf), so
+            passing it unconditionally here is safe.
             """
             arr = jnp.asarray(values)
-            arr = jnp.moveaxis(arr, -1, 0)  # (time, lon, lat)
+            if arr.ndim > 1:
+                arr = jnp.moveaxis(arr, -1, 0)  # (lon, lat, time) -> (time, lon, lat)
             return make_time_series(arr, times, align_mode=resolved_align_mode,
-                                    persist=persist)
+                                    persist=persist, anchors=monthly_anchors)
 
         # annual-mean surface albedo (no time axis)
         alb0 = jnp.asarray(ds["alb"])
@@ -958,6 +1204,11 @@ class ForcingData:
         # which downstream scheme guards (e.g. ``sqrt(1 - sice)``) treat
         # as NaNs.
         sice_am = _ts(jnp.clip(jnp.asarray(ds["icec"]), 0.0, 1.0))
+        # Optional prescribed ice-surface temperature; absent → ``None``, the
+        # min(sst, sstfr) fallback (see the ``ForcingData`` field).
+        sea_ice_temperature = (_ts(ds["sea_ice_temperature"])
+                               if "sea_ice_temperature" in ds.data_vars
+                               else None)
 
         # Snow cover ``SWE/sd2sc`` (consumers take ``min(1, .)`` as the cover
         # fraction); implausible values are zeroed.
@@ -1000,8 +1251,10 @@ class ForcingData:
             arr = jnp.asarray(ds[name])
             if arr.ndim == 0:
                 return arr
-            return make_time_series(arr, times, align_mode=resolved_align_mode,
-                                    persist=persist)
+            # Through `_ts`, the SAME choke point the gridded surface
+            # fields above use — see its docstring for why this is a
+            # unified function rather than a second, hand-written wrapper.
+            return _ts(arr)
 
         co2_vmr = _optional_ghg("co2")
         ch4_vmr = _optional_ghg("ch4")
@@ -1009,7 +1262,7 @@ class ForcingData:
 
         return cls.zeros(
             nodal_shape=alb0.shape,
-            alb0=alb0, sice_am=sice_am, snowc_am=snowc_am, stl_am=stl_am,
+            alb0=alb0, sice_am=sice_am, sea_ice_temperature=sea_ice_temperature, snowc_am=snowc_am, stl_am=stl_am,
             soilw_am=soilw_am, sea_surface_temperature=sea_surface_temperature,
             soilw_rel=soilw_rel,
             forest_fraction=forest_fraction,
@@ -1018,7 +1271,7 @@ class ForcingData:
         )
 
     def copy(self,alb0=None,
-             sice_am=None,snowc_am=None,soilw_am=None, stl_am=None,
+             sice_am=None, sea_ice_temperature=None, snowc_am=None,soilw_am=None, stl_am=None,
              sea_surface_temperature=None,
              soilw_rel=None,
              forest_fraction=None,
@@ -1036,8 +1289,11 @@ class ForcingData:
              dust_soil_types=None,
              dust_regions=None,
              dust_roughness=None,
+             dust_msg=None,
              oxidant_vmr=None,
              anthropogenic_emissions=None,
+             volcanic_emissions=None,
+             natural_aerosol=None,
              prescribed_aerosol_emissions=None,
              prescribed_sensible_heat_flux=None,
              prescribed_evaporation=None,
@@ -1045,7 +1301,10 @@ class ForcingData:
              prescribed_stress_v=None,
              prescribed_flux_time_bounds=None,
              ocean_u=None,
-             ocean_v=None):
+             ocean_v=None,
+             land_skin_temperature=_UNSET,
+             slim_properties=None,
+             ):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
         # the natural value for "no nudging target wired" — falling back to
         # ``self.nudging_target`` only when the caller didn't supply the
@@ -1053,6 +1312,7 @@ class ForcingData:
         return ForcingData(
             alb0=alb0 if alb0 is not None else self.alb0,
             sice_am=sice_am if sice_am is not None else self.sice_am,
+            sea_ice_temperature=sea_ice_temperature if sea_ice_temperature is not None else self.sea_ice_temperature,
             snowc_am=snowc_am if snowc_am is not None else self.snowc_am,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             soilw_rel=soilw_rel if soilw_rel is not None else self.soilw_rel,
@@ -1086,11 +1346,18 @@ class ForcingData:
                           else self.dust_regions),
             dust_roughness=(dust_roughness if dust_roughness is not None
                             else self.dust_roughness),
+            dust_msg=dust_msg if dust_msg is not None else self.dust_msg,
             oxidant_vmr=oxidant_vmr if oxidant_vmr is not None else self.oxidant_vmr,
             anthropogenic_emissions=(
                 anthropogenic_emissions if anthropogenic_emissions is not None
                 else self.anthropogenic_emissions
             ),
+            volcanic_emissions=(
+                volcanic_emissions if volcanic_emissions is not None
+                else self.volcanic_emissions
+            ),
+            natural_aerosol=(natural_aerosol if natural_aerosol is not None
+                             else self.natural_aerosol),
             prescribed_aerosol_emissions=(
                 prescribed_aerosol_emissions
                 if prescribed_aerosol_emissions is not None
@@ -1123,6 +1390,11 @@ class ForcingData:
             ),
             ocean_u=ocean_u if ocean_u is not None else self.ocean_u,
             ocean_v=ocean_v if ocean_v is not None else self.ocean_v,
+            land_skin_temperature=(self.land_skin_temperature
+                                   if land_skin_temperature is _UNSET
+                                   else land_skin_temperature),
+            slim_properties=(slim_properties if slim_properties is not None
+                             else self.slim_properties),
         )
 
     def isnan(self):
@@ -1418,6 +1690,31 @@ def align_mode_code(align_mode: str) -> int:
 def _slice_time_series_leaves(forcing: ForcingData, date: DateData) -> ForcingData:
     """Return `forcing` with every `TimeSeries` leaf replaced by its slice
     at `date`. Non-`TimeSeries` leaves are passed through unchanged.
+
+    An earlier version of this function tried to de-duplicate the per-step
+    lookup across leaves that share one time axis (#904's "compute the
+    index once per distinct axis", grouping by Python ``id()`` of the
+    concrete ``times.delta.days`` array). That only works if `forcing`'s
+    pytree leaves retain their object identity up to this call. In the real
+    run loop they do not: `Model._run_from_state` passes `forcing` as a
+    dynamic (non-static) ``jax.jit`` argument, and jit's own argument
+    flattening substitutes a FRESH tracer for every leaf POSITION in the
+    pytree, even ones that were the literal same array object before
+    entering the trace (confirmed both by a standalone probe — two fields
+    sharing one array, passed through ``jax.jit``, come out as two
+    different-``id()`` tracers inside the traced function — and by local
+    Codex review of this change). The grouping therefore degenerated to one
+    group per leaf in the compiled model, with no measured benefit over
+    calling :func:`_select_time_series` per leaf directly (confirmed by
+    benchmarking both ways inside a compiled ``lax.fori_loop`` matching
+    real per-step usage). Reliable cross-leaf sharing would need
+    `ForcingData`/`TimeSeries` restructured so a shared axis is represented
+    ONCE in the pytree's static STRUCTURE (not detected at runtime) — a
+    bigger change than this PR's scope, and not needed: #904's O(log N)
+    :func:`_by_date_index` on its own already keeps the per-leaf lookup
+    within noise of a short axis's cost at 350,400 records (see
+    `forcing_test.py`'s `TestLexicographicSearch` /
+    `TestForcingLookupScalesWithAxisLength`).
     """
     def slice_leaf(leaf):
         if isinstance(leaf, TimeSeries):
@@ -1438,58 +1735,122 @@ def _select_time_series(ts: TimeSeries, date: DateData) -> jnp.ndarray:
         # Defensive — shouldn't happen, but a 0-length axis would NaN downstream
         return ts.values
 
-    # Every branch has to produce the same shape, which they do (scalar idx).
     # WRAP_YEAR (a climatology replayed every model year) selects by real
     # calendar position; the table length is static, so the rule is chosen
-    # at trace time: twelve records are January..December held from the 1st
-    # of each Gregorian month (#805); 365/366 records are a nominal-date
-    # daily table (a 365-record table holds Feb 28 through Feb 29); any
-    # other length (e.g. MACv2-SP's weekly annual cycle) keeps equal
-    # fractions of the actual year. ``make_time_series`` validated the
-    # month/day order of the first two layouts.
+    # at trace time: twelve records are either January..December held from
+    # the 1st of each Gregorian month (#805, `anchors=MONTH_START`) or
+    # blended between mid-month anchors following ECHAM's `time_weights`
+    # (#902, `anchors=MID_MONTH`, the default for a declared forcing
+    # product — see `make_time_series`); 365/366 records are a nominal-date
+    # daily table, already reconstructed at load time by
+    # `jcm.data.bc.interpolate.interpolate_to_daily` (a 365-record table
+    # holds Feb 28 through Feb 29); any other length (e.g. MACv2-SP's weekly
+    # annual cycle) keeps equal fractions of the actual year.
+    # `make_time_series` validated the month/day order of the first two
+    # layouts.
     if n_time == 12:
-        idx_wrap = _monthly_climatology_index(date)
+        idx_hold = _monthly_climatology_index(date)
+        wrap_hold = jnp.take(ts.values, idx_hold, axis=0)
+        idx_other, wgt_hold, wgt_other = _echam_time_weights(date)
+        idx_other = jnp.clip(idx_other, 0, n_time - 1)
+        wrap_other = jnp.take(ts.values, idx_other, axis=0)
+        wrap_value = jnp.where(
+            ts.anchors == MID_MONTH,
+            wgt_hold * wrap_hold + wgt_other * wrap_other,
+            wrap_hold,
+        )
     elif n_time in (365, 366):
         idx_wrap = _daily_climatology_index(ts.times, date)
+        wrap_value = jnp.take(ts.values, idx_wrap, axis=0)
     else:
         idx_wrap = jnp.floor(date.tyear() * n_time).astype(jnp.int32) % n_time
-    idx_date = _by_date_index(ts.times, date)
-    idx = jnp.where(ts.align_mode == WRAP_YEAR, idx_wrap, idx_date)
-    idx = jnp.clip(idx, 0, n_time - 1)
-    stepped = jnp.take(ts.values, idx, axis=0)
-    if n_time < 2:
-        return stepped
+        wrap_value = jnp.take(ts.values, idx_wrap, axis=0)
 
-    # BY_DATE_INTERP: linear interpolation between the bracketing samples,
-    # clamped to the end values outside the axis. The clamp is the mechanism
-    # of a declared ``persist=hold``; a strict leaf is never asked for a date
-    # outside its coverage, because every entry point checks the run window
-    # first (``check_forcing_coverage``). `align_mode` is traced, so
-    # both the stepped and interpolated values are computed and selected with
-    # `where` (cheap: one extra gather + fma per leaf per step).
-    lo = jnp.clip(idx_date, 0, n_time - 2)
-    t_lo = jdt.Datetime(jdt.Timedelta(
-        days=jnp.take(ts.times.delta.days, lo),
-        seconds=jnp.take(ts.times.delta.seconds, lo)))
-    t_hi = jdt.Datetime(jdt.Timedelta(
-        days=jnp.take(ts.times.delta.days, lo + 1),
-        seconds=jnp.take(ts.times.delta.seconds, lo + 1)))
-    elapsed = date.dt - t_lo
-    interval = t_hi - t_lo
-    # Cast before multiplying: Timedelta stores int32 days and a century-scale
-    # out-of-range query would otherwise overflow before the fraction clamps.
-    elapsed_seconds = elapsed.days.astype(jnp.float32) * 86400.0 + elapsed.seconds
-    interval_seconds = interval.days.astype(jnp.float32) * 86400.0 + interval.seconds
-    frac = jnp.clip(elapsed_seconds / jnp.maximum(interval_seconds, 1), 0.0, 1.0)
-    interp = ((1.0 - frac) * jnp.take(ts.values, lo, axis=0)
-              + frac * jnp.take(ts.values, lo + 1, axis=0))
-    return jnp.where(ts.align_mode == BY_DATE_INTERP, interp, stepped)
+    idx_date = _by_date_index(ts.times, date)
+    idx_date_clamped = jnp.clip(idx_date, 0, n_time - 1)
+    stepped = jnp.take(ts.values, idx_date_clamped, axis=0)
+    if n_time < 2:
+        date_value = stepped
+    else:
+        # BY_DATE_INTERP: linear interpolation between the bracketing samples,
+        # clamped to the end values outside the axis. The clamp is the mechanism
+        # of a declared ``persist=hold``; a strict leaf is never asked for a date
+        # outside its coverage, because every entry point checks the run window
+        # first (``check_forcing_coverage``). `align_mode` is traced, so
+        # both the stepped and interpolated values are computed and selected with
+        # `where` (cheap: one extra gather + fma per leaf per step).
+        lo = jnp.clip(idx_date, 0, n_time - 2)
+        t_lo = jdt.Datetime(jdt.Timedelta(
+            days=jnp.take(ts.times.delta.days, lo),
+            seconds=jnp.take(ts.times.delta.seconds, lo)))
+        t_hi = jdt.Datetime(jdt.Timedelta(
+            days=jnp.take(ts.times.delta.days, lo + 1),
+            seconds=jnp.take(ts.times.delta.seconds, lo + 1)))
+        elapsed = date.dt - t_lo
+        interval = t_hi - t_lo
+        # Cast before multiplying: Timedelta stores int32 days and a century-scale
+        # out-of-range query would otherwise overflow before the fraction clamps.
+        elapsed_seconds = elapsed.days.astype(jnp.float32) * 86400.0 + elapsed.seconds
+        interval_seconds = interval.days.astype(jnp.float32) * 86400.0 + interval.seconds
+        frac = jnp.clip(elapsed_seconds / jnp.maximum(interval_seconds, 1), 0.0, 1.0)
+        interp = ((1.0 - frac) * jnp.take(ts.values, lo, axis=0)
+                  + frac * jnp.take(ts.values, lo + 1, axis=0))
+        date_value = jnp.where(ts.align_mode == BY_DATE_INTERP, interp, stepped)
+
+    return jnp.where(ts.align_mode == WRAP_YEAR, wrap_value, date_value)
 
 
 def _monthly_climatology_index(date: DateData) -> jnp.ndarray:
     """Select a Gregorian calendar month (January is record zero)."""
     _, month, _ = gregorian_ymd_from_days(date.dt.delta.days)
     return (month - 1).astype(jnp.int32)
+
+
+def _echam_time_weights(date: DateData) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """ECHAM mid-month monthly-climatology interpolation (#902).
+
+    Reimplements ``mo_time_control.f90::time_weights`` (L1547-1612 of
+    ``echam6.3.0-ham2.3-moz1.0.r7492/src``, read-only reference — not
+    copied; reproduced independently and verified against its formula on
+    specific dates in ``forcing_test.py``), consumed for SST/sea-ice in
+    ``clsst.f90`` L95-96 and for ozone in ``mo_o3clim.f90`` L711/L748. A
+    twelve-record climatology's record ``m`` represents the INSTANT at the
+    middle of Gregorian month ``m``, not its 1st: the value at any other
+    instant is a linear blend of month ``m``'s record with whichever
+    neighbour is closer (the previous month before mid-month, the next
+    month after), weighted by the ACTUAL lengths — in days, leap February
+    included — of the two months being blended, not a fixed 30-day segment.
+
+    Returns ``(other_month, weight_on_current_month, weight_on_other_month)``
+    — all 0-based month indices/weights (January is record 0), matching
+    :func:`_monthly_climatology_index`'s convention for the current month.
+    """
+    year, month, day = gregorian_ymd_from_days(date.dt.delta.days)
+    seconds_in_day = date.dt.delta.seconds
+    # Seconds elapsed since the start of the CURRENT month (ECHAM's `zsec`,
+    # via `isec = (dy-1)*NDAYLEN + seconds`).
+    seconds_in_month = (day - 1).astype(jnp.float32) * SECONDS_PER_DAY + seconds_in_day
+    month_prev = jnp.where(month == 1, 12, month - 1)
+    month_next = jnp.where(month == 12, 1, month + 1)
+    # Only the current month's own Feb-ness can be leap-year-dependent here:
+    # the previous/next month of a Jan/Dec current month is Dec/Jan of an
+    # ADJACENT year, but Dec and Jan are never leap-dependent, so every
+    # length below is safely evaluated against the CURRENT date's `year`.
+    half_cur = days_in_month(year, month).astype(jnp.float32) * (SECONDS_PER_DAY / 2.0)
+    half_prev = days_in_month(year, month_prev).astype(jnp.float32) * (SECONDS_PER_DAY / 2.0)
+    half_next = days_in_month(year, month_next).astype(jnp.float32) * (SECONDS_PER_DAY / 2.0)
+    before_mid = seconds_in_month <= half_cur
+    # First half of the month: blend toward the previous month's record,
+    # growing from `half_prev / (half_prev + half_cur)` at the 1st to 1 at
+    # mid-month. Second half: blend toward the next month's record,
+    # shrinking from 1 at mid-month to `half_next / (half_cur + half_next)`
+    # at the end of the month.
+    wgt_cur_before = (half_prev + seconds_in_month) / (half_prev + half_cur)
+    wgt_cur_after = 1.0 - (seconds_in_month - half_cur) / (half_cur + half_next)
+    wgt_cur = jnp.where(before_mid, wgt_cur_before, wgt_cur_after)
+    month_other = jnp.where(before_mid, month_prev, month_next)
+    return ((month_other - 1).astype(jnp.int32),
+            wgt_cur.astype(jnp.float32), (1.0 - wgt_cur).astype(jnp.float32))
 
 
 def _daily_climatology_index(times: jdt.Datetime, date: DateData) -> jnp.ndarray:
@@ -1504,11 +1865,57 @@ def _daily_climatology_index(times: jdt.Datetime, date: DateData) -> jnp.ndarray
 
 def _by_date_index(times: jdt.Datetime, date: DateData) -> jnp.ndarray:
     """Date-aligned: nearest exact datetime entry at-or-before `date`."""
-    # `searchsorted(side='right') - 1` puts us at the entry whose timestamp
-    # is the latest one <= target, which is the natural piecewise-constant
-    # left interpretation of the forcing axis.
-    raw = jdt.searchsorted(times, date.dt, side='right') - 1
-    return jnp.clip(raw, 0, times.delta.days.shape[0] - 1).astype(jnp.int32)
+    n = times.delta.days.shape[0]
+    raw = _lexicographic_upper_bound(
+        times.delta.days, times.delta.seconds,
+        date.dt.delta.days, date.dt.delta.seconds) - 1
+    return jnp.clip(raw, 0, n - 1).astype(jnp.int32)
+
+
+def _lexicographic_upper_bound(days: jnp.ndarray, seconds: jnp.ndarray,
+                               query_day: jnp.ndarray,
+                               query_second: jnp.ndarray) -> jnp.ndarray:
+    """O(log N) equivalent of ``jax_datetime.searchsorted(side='right')``.
+
+    `jax_datetime` 0.1.x's `searchsorted` compares the query against every
+    record (jax-gcm#904): fine for a ~500-record AMIP axis, measurably not
+    for a multi-decade hourly one (1.94 ms at 350,400 records vs 0.09 ms at
+    456, linear in N). `days`/`seconds` is `(day, second-of-day)` — exact
+    whole-second precision — and cannot be safely collapsed to one scalar
+    (`day*86400 + second`) without widening past int32 (it overflows by
+    ~2038), and `jax_enable_x64` is not assumed on (most of this codebase's
+    physics runs float32). This instead does a genuine binary search,
+    comparing `(day, second)` LEXICOGRAPHICALLY at each step — exact at any
+    date, with a fixed `ceil(log2(N+1))` number of `lax.fori_loop`
+    iterations (``N`` is a static leaf shape, so the loop depth is a
+    trace-time constant, not a dynamic trip count).
+
+    Returns the index of the first record STRICTLY AFTER `(query_day,
+    query_second)` (`side='right'`'s convention), i.e. in ``[0, N]``;
+    `_by_date_index` subtracts one and clamps.
+    """
+    n = days.shape[0]
+    if n == 0:
+        return jnp.zeros((), dtype=jnp.int32)
+    depth = max(1, math.ceil(math.log2(n + 1)))
+
+    def at_or_before(i):
+        d = jnp.take(days, i)
+        s = jnp.take(seconds, i)
+        return (d < query_day) | ((d == query_day) & (s <= query_second))
+
+    def body(_, carry):
+        lo, hi = carry
+        mid = (lo + hi) // 2
+        le = at_or_before(mid)
+        lo = jnp.where(le, mid + 1, lo)
+        hi = jnp.where(le, hi, mid)
+        return lo, hi
+
+    lo, _ = jax.lax.fori_loop(
+        0, depth, body,
+        (jnp.zeros((), dtype=jnp.int32), jnp.asarray(n, dtype=jnp.int32)))
+    return lo
 
 
 def _solar_from_date(date: DateData) -> SolarGeometry:
@@ -1522,10 +1929,17 @@ def _solar_from_date(date: DateData) -> SolarGeometry:
     fraction_of_day = date.dt.delta.seconds / 86400.0
     tyear = date.tyear()
     two_pi = 2.0 * jnp.pi
+    # Truncated (floor, matching the Fortran's `aint` for positive values) to
+    # an integer day -- `gcr_ionization`'s own `idoy = aint(get_year_day(...))`
+    # (mo_ham_gcrion.f90:274); unlike `tyear` above, sub-day resolution plays
+    # no role in the IGRF epoch interpolation this feeds.
+    day_of_year = jnp.floor(day_of_year_elapsed(date.dt))
     return SolarGeometry(
         tyear=jnp.asarray(tyear, dtype=jnp.float32),
         orbital_phase=jnp.asarray(two_pi * tyear, dtype=jnp.float32),
         synodic_phase=jnp.asarray(two_pi * fraction_of_day, dtype=jnp.float32),
+        calendar_year=jnp.asarray(get_year(date.dt), dtype=jnp.float32),
+        day_of_year=jnp.asarray(day_of_year, dtype=jnp.float32),
     )
 
 
@@ -1581,6 +1995,15 @@ def read_anthropogenic_emissions(ds, align_mode: str = "auto",
     (:func:`check_forcing_coverage`, #900). Inputs are flux rates, not interval
     totals: an input stored as per-interval totals must be converted to a
     rate before it is read, as nothing here divides by interval bounds.
+
+    A 12-record ``wrap_year`` product is held from the 1st of each month —
+    NOT ECHAM's mid-month ``time_weights`` reconstruction (#902): this is
+    deliberate, not an oversight. Even a flux-RATE input is the mean rate
+    *over* its month, and mid-month linear interpolation between two such
+    means does not preserve either month's mean — the categorical/
+    interval-total case the #902 design calls out by name. There is no
+    ``anchors`` parameter to opt in; `make_time_series`'s own default
+    (``"month_start"``) is what is wanted here, so none is passed below.
     """
     emis_names = [str(v) for v in ds.data_vars if str(v).startswith("emis_")]
     if not emis_names:
@@ -1620,8 +2043,9 @@ def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto",
     (``lev`` before the horizontal), which :class:`PreSpeciatedEmissions`
     reshapes to ``(nlev, ncols)``. Fields must already be on the model grid (no
     regridding here — use :mod:`jcm.data.emissions.prepare`). Time alignment,
-    out-of-range ``persist`` policy and the flux-rate contract as in
-    :func:`read_anthropogenic_emissions`.
+    out-of-range ``persist`` policy, the flux-rate contract AND the pinned
+    ``month_start`` (never mid-month) ``wrap_year`` anchoring as in
+    :func:`read_anthropogenic_emissions` (#902).
     """
     prefix = "aero_emis_"
     names = [str(v) for v in ds.data_vars if str(v).startswith(prefix)]
@@ -1669,6 +2093,135 @@ def validate_emissions_grid(mapping, coords, path):
 
 
 # ---------------------------------------------------------------------------
+# Volcanic SO₂ point sources (#1190)
+# ---------------------------------------------------------------------------
+
+#: Seconds over which one eruption's SO₂ is injected: the CMIP7 dataset's own
+#: recommendation (Aubry et al. 2026, §V.2), which its daily records assume.
+VOLCANIC_ERUPTION_SECONDS = 86400.0
+
+_VOLCANIC_VARS = ("degassing_lat", "degassing_lon", "degassing_so2",
+                  "degassing_altitude_interface", "eruption_time",
+                  "eruption_lat", "eruption_lon", "eruption_height",
+                  "eruption_depth", "eruption_so2")
+
+
+def gaussian_grid_columns(lat_deg, lon_deg, solid_angle, radius):
+    """Column locator and areas for a regular-longitude Gaussian grid.
+
+    Returns ``(locate, area)``: ``locate(lat, lon)`` gives the flat column
+    index (lon-major, the order the JAM terms ravel ``(lon, lat)`` fields in)
+    of the cell CONTAINING each point, and ``area`` the ``(ncols,)`` cell areas
+    [m²]. Cell boundaries come from ``solid_angle`` (the grid's quadrature
+    weights, ``(nlon, nlat)``, summing to 4π): latitude edges are where their
+    cumulative weight puts them in sin(latitude), so a point source is placed
+    in the cell whose area normalises its flux, and the model's own global
+    integral returns the source mass exactly.
+    """
+    lat_deg = np.asarray(lat_deg, dtype=float)
+    lon_deg = np.asarray(lon_deg, dtype=float)
+    solid_angle = np.asarray(solid_angle, dtype=float)
+    nlon, nlat = lon_deg.size, lat_deg.size
+    if solid_angle.shape != (nlon, nlat):
+        raise ValueError(f"solid_angle shape {solid_angle.shape} is not "
+                         f"(nlon, nlat) = {(nlon, nlat)}")
+    if not np.all(np.diff(lat_deg) > 0):
+        raise ValueError("gaussian_grid_columns expects ascending latitudes")
+    dlon = 360.0 / nlon
+    if not np.allclose(np.diff(lon_deg), dlon):
+        raise ValueError("gaussian_grid_columns expects uniform longitudes")
+    sin_edges = np.concatenate(
+        [[-1.0], -1.0 + np.cumsum(solid_angle[0] * nlon / (2.0 * np.pi))])
+    sin_edges[-1] = 1.0
+
+    def locate(lat, lon):
+        lat = np.asarray(lat, dtype=float)
+        lon = np.asarray(lon, dtype=float)
+        ilon = np.mod(np.rint((lon - lon_deg[0]) / dlon).astype(int), nlon)
+        ilat = np.clip(np.searchsorted(sin_edges, np.sin(np.deg2rad(lat)),
+                                       side="right") - 1, 0, nlat - 1)
+        return ilon * nlat + ilat
+
+    return locate, radius ** 2 * solid_angle.reshape(-1)
+
+
+def read_volcanic_emissions(ds, locate, area, *, eruption_year=None):
+    """Map the grid-free volcanic SO₂ product onto model columns (#1190).
+
+    ``ds`` is the product :mod:`jcm.data.mirror.volcanic` builds; ``locate``
+    maps ``(lat, lon)`` [degrees] to flat column indices and ``area`` is the
+    ``(ncols,)`` column area [m²] (:func:`gaussian_grid_columns`, or the pySES
+    columns' own). Each source's mass rate is divided by the area of the column
+    it lands in, so the emitted mass is the product's whatever the grid;
+    degassing sources sharing a column are summed.
+
+    Eruptions keep their own calendar year, so a run emits the eruptions of the
+    years its calendar passes through. ``eruption_year`` instead takes that
+    year's eruptions and emits them every model year (``eruption_year`` is
+    stored as ``-1``, "any year"), for a climatological run whose calendar is
+    not the eruption year it should see. An eruption's flux lasts
+    :data:`VOLCANIC_ERUPTION_SECONDS` from 00:00 UTC on its day.
+
+    Returns a dict of arrays for ``ForcingData.volcanic_emissions``:
+    ``degassing_cell`` (int32), ``degassing_flux`` [kg SO₂ m⁻² s⁻¹ per layer],
+    ``degassing_altitude_interface`` [m a.s.l., bottom first], per eruption
+    ``eruption_cell`` (int32), ``eruption_flux`` [kg SO₂ m⁻² s⁻¹],
+    ``eruption_height`` [m a.s.l.], ``eruption_depth`` [m],
+    ``eruption_year`` and ``eruption_day`` (1-based day of year), and
+    ``eruption_span``, the list's ``[start, end)`` in seconds since 1970
+    (unbounded for a replayed year), which the term checks the run against.
+    """
+    import pandas as pd
+
+    missing = [v for v in _VOLCANIC_VARS if v not in ds.variables]
+    if missing:
+        raise ValueError(
+            f"volcanic file lacks {missing}; build it with "
+            "jcm.data.mirror.volcanic.build_volcanic_product")
+    area = np.asarray(area, dtype=float)
+
+    cells = locate(ds["degassing_lat"].values, ds["degassing_lon"].values)
+    rate = np.asarray(ds["degassing_so2"].values, dtype=float)
+    d_cell, inverse = np.unique(cells, return_inverse=True)
+    d_rate = np.zeros((d_cell.size, rate.shape[1]))
+    np.add.at(d_rate, inverse, rate)
+
+    when = pd.DatetimeIndex(ds["eruption_time"].values)
+    if eruption_year is None:
+        keep = np.ones(when.size, dtype=bool)
+        year = np.asarray(when.year, dtype=float)
+        bounds = np.array([when.min(), when.max() + pd.Timedelta(days=1)],
+                          dtype="datetime64[s]")
+        span = bounds.astype(np.int64).astype(float)
+    else:
+        keep = np.asarray(when.year == int(eruption_year))
+        year = np.full(int(keep.sum()), -1.0)
+        span = np.array([-np.inf, np.inf])
+        if not keep.any():
+            warnings.warn(
+                f"forcing.volcanic_eruption_year={eruption_year}: the "
+                f"volcanic product lists no eruption that year (it covers "
+                f"{when.min().date()} to {when.max().date()}), so the run "
+                "emits volcanic degassing only.", stacklevel=2)
+    e_cell = locate(ds["eruption_lat"].values[keep], ds["eruption_lon"].values[keep])
+    e_mass = np.asarray(ds["eruption_so2"].values, dtype=float)[keep]
+    return {
+        "degassing_cell": jnp.asarray(d_cell, dtype=jnp.int32),
+        "degassing_flux": jnp.asarray(d_rate / area[d_cell][:, None]),
+        "degassing_altitude_interface": jnp.asarray(
+            ds["degassing_altitude_interface"].values, dtype=float),
+        "eruption_cell": jnp.asarray(e_cell, dtype=jnp.int32),
+        "eruption_flux": jnp.asarray(
+            e_mass / VOLCANIC_ERUPTION_SECONDS / area[e_cell]),
+        "eruption_height": jnp.asarray(ds["eruption_height"].values[keep], dtype=float),
+        "eruption_depth": jnp.asarray(ds["eruption_depth"].values[keep], dtype=float),
+        "eruption_year": jnp.asarray(year),
+        "eruption_day": jnp.asarray(np.asarray(when.day_of_year, dtype=float)[keep]),
+        "eruption_span": jnp.asarray(span),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Natural-emission / oxidant climatology readers (HAMMOZ-style files)
 # ---------------------------------------------------------------------------
 
@@ -1711,17 +2264,26 @@ def _orient_to_model_grid(da, lat_deg=None, lon_deg=None, name=""):
     file_lat = np.asarray(da["lat"].values, dtype=float)
     if lat_deg is not None:
         lat_deg = np.asarray(lat_deg, dtype=float)
-        if np.allclose(file_lat, lat_deg, atol=_LATLON_TOL_DEG):
+        # A different POINT COUNT can never match (``np.allclose`` on
+        # mismatched shapes raises a numpy broadcast error rather than
+        # returning False, which would leak as an opaque "operands could
+        # not be broadcast together" instead of this function's own
+        # pointed message) — short-circuit straight to the raise below.
+        same_count = file_lat.shape == lat_deg.shape
+        if same_count and np.allclose(file_lat, lat_deg, atol=_LATLON_TOL_DEG):
             pass
-        elif np.allclose(file_lat[::-1], lat_deg, atol=_LATLON_TOL_DEG):
+        elif same_count and np.allclose(
+                file_lat[::-1], lat_deg, atol=_LATLON_TOL_DEG):
             # N→S file on a S→N model grid — flip to model orientation.
             da = da.isel(lat=slice(None, None, -1))
         else:
             raise ValueError(
                 f"{name or da.name}: file latitudes "
-                f"[{file_lat[0]:.3f}..{file_lat[-1]:.3f}] match the model grid "
-                f"[{lat_deg[0]:.3f}..{lat_deg[-1]:.3f}] neither directly nor "
-                "flipped. Regrid the file onto the model Gaussian grid first."
+                f"[{file_lat[0]:.3f}..{file_lat[-1]:.3f}] ({file_lat.size} "
+                f"points) match the model grid [{lat_deg[0]:.3f}.."
+                f"{lat_deg[-1]:.3f}] ({lat_deg.size} points) neither "
+                "directly nor flipped. Regrid the file onto the model "
+                "Gaussian grid first."
             )
     elif file_lat.size > 1 and file_lat[0] > file_lat[-1]:
         # No model grid to validate against (e.g. unit tests) — still
@@ -1730,11 +2292,14 @@ def _orient_to_model_grid(da, lat_deg=None, lon_deg=None, name=""):
     if lon_deg is not None:
         file_lon = np.mod(np.asarray(da["lon"].values, dtype=float), 360.0)
         lon_deg = np.mod(np.asarray(lon_deg, dtype=float), 360.0)
-        if not np.allclose(file_lon, lon_deg, atol=_LATLON_TOL_DEG):
+        # Same point-count guard as latitude above.
+        if file_lon.shape != lon_deg.shape or not np.allclose(
+                file_lon, lon_deg, atol=_LATLON_TOL_DEG):
             raise ValueError(
                 f"{name or da.name}: file longitudes "
-                f"[{file_lon[0]:.3f}..{file_lon[-1]:.3f}] don't match the "
-                f"model grid [{lon_deg[0]:.3f}..{lon_deg[-1]:.3f}]. Regrid "
+                f"[{file_lon[0]:.3f}..{file_lon[-1]:.3f}] ({file_lon.size} "
+                f"points) don't match the model grid [{lon_deg[0]:.3f}.."
+                f"{lon_deg[-1]:.3f}] ({lon_deg.size} points). Regrid "
                 "the file onto the model Gaussian grid first."
             )
     others = [d for d in da.dims if d not in ("lat", "lon")]
@@ -1758,6 +2323,34 @@ def read_dms_seawater(ds, lat_deg=None, lon_deg=None, var_name="DMS_sea",
     Returned as a monthly ``WRAP_YEAR`` :class:`TimeSeries` shaped
     ``(time, lon, lat)`` on the model orientation (see
     :func:`_orient_to_model_grid`).
+
+    Out of #902's scope, and deliberately so: this stays on
+    ``make_time_series``'s own ``month_start`` default rather than exposing
+    ``forcing.monthly_anchors``, the way SST/ozone/oxidants do. Unlike those
+    three, ECHAM-HAMMOZ does not read DMS seawater concentration through
+    ``mo_time_control.f90::time_weights`` (the mid-month blend #902 ports);
+    ``mo_hammoz_emi_ocean.f90::init_emi_ocean`` defines the boundary
+    condition with ``ef_timedef = EF_IGNOREYEAR`` and leaves
+    ``ef_interpolate`` at its default, ``EF_NOINTER`` (``mo_boundary_
+    condition.f90``), so ``bc_apply1d``/``bc_apply2d`` never blend it — the
+    generic, non-interpolating boundary-condition path holds whichever
+    record is active, switching the instant the model date reaches the next
+    record's own file-encoded timestamp (``mo_external_field_processor.f90``
+    ``ef_get_first_timeindex``/``ef_get_next_timeindex``, consumed by
+    ``mo_boundary_condition.f90::bc_list_read``). The shipped climatology
+    (``emiss_fields_dms_sea_monthly_T63.nc``) encodes every record's
+    timestamp as the 1st of its month at 00:00 (its ``time`` axis is
+    ``days since 2000-01-01``, values ``0, 31, 60, ..., 335`` — the
+    1st-of-month offsets of a leap reference year), and ``EF_IGNOREYEAR``
+    replays month/day/hour/minute/second unchanged every simulated year
+    (only the year itself is substituted), so ECHAM's DMS record switches
+    exactly at 00:00 on the civil 1st of each Gregorian month. That is
+    exactly :func:`_monthly_climatology_index`'s convention (the
+    ``month_start`` default this function already uses), confirmed by this
+    reading rather than assumed — see #1127 for the full record-selection
+    trace and ``docs/source/design/forcing_time_semantics.md`` for where
+    this is recorded, and ``test_dms_seawater_held_across_month_boundary``
+    in ``forcing_test.py`` for the pin.
     """
     if var_name not in ds.data_vars:
         raise ValueError(
@@ -1824,6 +2417,11 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
     # ``bgc_dust_read_monthly`` does: a twelve-record climatology holds
     # record m from the 1st of Gregorian month m
     # (``_monthly_climatology_index``, shared by every monthly climatology).
+    # Pinned to `make_time_series`'s own ``month_start`` default — #902's
+    # mid-month reconstruction does NOT apply here: the Fortran reference
+    # itself steps this climatology by calendar month, so "held" is the
+    # faithful behaviour, not a shortcut. No ``anchors`` parameter is
+    # exposed on this reader; ``forcing.monthly_anchors`` never reaches it.
     if ds.sizes["time"] != _DUST_MONTHS:
         raise ValueError(
             f"{var_name}: the HAMMOZ potential-source climatology has "
@@ -1861,6 +2459,26 @@ def read_dust_preferential(ds, lat_deg=None, lon_deg=None, var_name="source"):
             f"{sorted(map(str, ds.data_vars))}.")
     arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
     arr = _drop_degenerate_time(arr, ds, var_name)
+    return jnp.asarray(np.clip(np.nan_to_num(arr, nan=0.0), 0.0, 1.0))
+
+
+def read_dust_msg_source(ds, lat_deg=None, lon_deg=None, var_name="dsaf"):
+    """Read the MSG-SEVIRI Saharan dust-source map for ``ForcingData.dust_msg``.
+
+    HAM's ``dust_msg_pot_sources.nc`` (jax-gcm#1017; ``mo_ham_dust.f90::
+    bgc_read_annual_fields``, ``ndust = 5`` only): ``dsaf (lat, lon)`` with
+    **no time axis at all** — unlike ``dust_preferential_sources.nc``'s
+    degenerate-time ``source``, the Fortran reads this one with
+    ``read_var_nf77_2d``. The Schepanski et al. (2007, GRL; 2012, RSE)
+    MSG-SEVIRI dust-source-activation frequency, March 2006-February 2010,
+    in [0, 1] (observed max ~0.39). Returned as a static ``(lon, lat)`` array;
+    ``DustEmissions`` thresholds it at 0 and 0.01.
+    """
+    if var_name not in ds.data_vars:
+        raise ValueError(
+            f"MSG dust-source file has no {var_name!r} variable; found "
+            f"{sorted(map(str, ds.data_vars))}.")
+    arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
     return jnp.asarray(np.clip(np.nan_to_num(arr, nan=0.0), 0.0, 1.0))
 
 
@@ -1951,6 +2569,10 @@ def read_dust_roughness(ds, lat_deg=None, lon_deg=None, var_name="surfrough",
     (``surface_rough_12m.nc``), as a monthly ``WRAP_YEAR`` :class:`TimeSeries`.
     Consumed only on the ``ndurough = 0`` sensitivity path — with the default
     constant roughness ``bgc_dust_read_monthly`` overwrites it immediately.
+
+    Pinned ``month_start`` like :func:`read_dust_source` — same
+    ``bgc_dust_read_monthly`` stepped-by-month Fortran reference, no
+    ``anchors`` parameter exposed.
     """
     if var_name not in ds.data_vars:
         raise ValueError(
@@ -1986,7 +2608,8 @@ _OXIDANT_VAR_MAP = {
 
 
 def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
-                     align_mode: str = "wrap_year", persist: str = "strict"):
+                     align_mode: str = "wrap_year", persist: str = "strict",
+                     anchors: str = "mid_month"):
     """Read a monthly oxidant climatology for ``ForcingData.oxidant_vmr``.
 
     Expects the HAMMOZ/MACC ``ham_oxidants_monthly_T63L47_macc.nc`` layout:
@@ -2011,7 +2634,11 @@ def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
     default. ``persist`` (``"strict"`` | ``"hold"``,
     ``forcing.oxidants_persist``) is a dated series' declared out-of-range
     policy, checked against the run window at run start
-    (:func:`check_forcing_coverage`, #900).
+    (:func:`check_forcing_coverage`, #900). ``anchors`` (``"mid_month"``
+    default | ``"month_start"``, ``forcing.monthly_anchors``) is a 12-record
+    climatology's annual-cycle reconstruction (#902) — ECHAM's mid-month
+    ``time_weights`` interpolation versus the pre-#902 held-from-the-1st
+    behaviour; ignored for a transient oxidant series.
     """
     missing = [v for v in _OXIDANT_VAR_MAP if v not in ds.data_vars]
     if missing:
@@ -2060,7 +2687,7 @@ def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
         # as zero oxidant rather than let NaN poison the sulfur chemistry.
         arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
         out[key] = make_time_series(arr, times, align_mode=mode,
-                                    persist=persist)
+                                    persist=persist, anchors=anchors)
     return out
 
 
@@ -2104,6 +2731,77 @@ def validate_oxidant_levels(ds, coords, path):
             "done). Use the matching L-grid file (e.g. the T63L47 MACC file "
             "with grid=echam_t63_l47_hybrid) or re-interpolate it."
         )
+
+
+#: ``macv2_natural_aerosol`` bundle variables held as monthly ``TimeSeries``
+#: on ``ForcingData.natural_aerosol`` (the longwave asymmetry is not read: the
+#: longwave treatment is absorption only).
+NATURAL_AEROSOL_MONTHLY = (
+    "aod_sw_coarse", "ssa_sw_coarse", "asy_sw_coarse",
+    "aod_sw_fine", "ssa_sw_fine", "asy_sw_fine",
+    "aod_lw_coarse", "ssa_lw_coarse",
+    "layer_fraction_coarse", "layer_fraction_fine",
+)
+#: ...and its band limits [cm⁻¹] and layer bounds [m above sea level], static.
+NATURAL_AEROSOL_STATIC = (
+    "wavenumber_lower_sw", "wavenumber_upper_sw",
+    "wavenumber_lower_lw", "wavenumber_upper_lw",
+    "layer_bottom", "layer_top",
+)
+
+
+def read_natural_aerosol(ds, lat_deg=None, lon_deg=None,
+                         anchors: str = "mid_month"):
+    """Read a ``macv2_natural_aerosol`` bundle for ``ForcingData.natural_aerosol``.
+
+    Expects the layout :mod:`jcm.data.mirror.macv2` writes: per mode
+    ``aod_/ssa_/asy_*`` on ``(month, band, lat, lon)``,
+    ``layer_fraction_*`` on ``(month, layer, lat, lon)``, twelve calendar
+    months, and the band limits and layer bounds as coordinates. The file
+    must be on the model horizontal grid; latitude and longitude are
+    validated (:func:`_orient_to_model_grid`).
+
+    The monthly fields become ``WRAP_YEAR`` :class:`TimeSeries` shaped
+    ``(12, band | layer, lon, lat)``. ``anchors`` defaults to ``"mid_month"``:
+    the climatology's records are monthly means, and the reference blends
+    them between mid-month anchors (ICON ``mo_bc_aeropt_kinne.f90`` through
+    ``time_weights``), the reconstruction :func:`_select_time_series` applies
+    to a twelve-record table with these anchors.
+
+    Returns a mapping of those ``TimeSeries`` plus the static band limits
+    and layer bounds as float32 arrays.
+    """
+    missing = [name for name in (*NATURAL_AEROSOL_MONTHLY,
+                                 *NATURAL_AEROSOL_STATIC)
+               if name not in ds.variables]
+    if missing:
+        raise ValueError(
+            "natural-aerosol file lacks " + ", ".join(missing) + "; expected "
+            "a macv2_natural_aerosol bundle (jcm.data.mirror.macv2).")
+    months = np.asarray(ds["month"].values).reshape(-1)
+    if not np.array_equal(months, np.arange(1, 13)):
+        raise ValueError(
+            "natural-aerosol file must hold the calendar months 1..12 in "
+            f"order on 'month'; got {months.tolist()}.")
+    times = jdt.Datetime.from_datetime64(np.asarray(
+        [f"{_CLIMATOLOGY_YEAR:04d}-{int(m):02d}-01" for m in months],
+        dtype="datetime64[s]"))
+    out: dict[str, Any] = {}
+    for name in NATURAL_AEROSOL_MONTHLY:
+        da = ds[name]
+        if da.dims[0] != "month" or da.ndim != 4:
+            raise ValueError(
+                f"{name}: expected dims (month, band|layer, lat, lon), got "
+                f"{da.dims}.")
+        arr = _orient_to_model_grid(da, lat_deg, lon_deg, name=name)
+        if not np.isfinite(arr).all():
+            raise ValueError(f"{name}: non-finite values in the bundle.")
+        out[name] = make_time_series(
+            arr.astype(np.float32), times, align_mode=WRAP_YEAR,
+            anchors=anchors)
+    for name in NATURAL_AEROSOL_STATIC:
+        out[name] = jnp.asarray(np.asarray(ds[name].values, dtype=np.float32))
+    return out
 
 
 def packaged_macv2_path() -> str:
@@ -2221,6 +2919,53 @@ def _is_datetime_axis(values) -> bool:
     return values.dtype == object and values.size > 0 and hasattr(
         np.ravel(values)[0], "month")
 
+def read_land_skin_temperature(ds, lat_deg=None, lon_deg=None,
+                               source="land_skin_temperature"):
+    """Read a dated land skin-temperature archive on the model grid."""
+    name = "land_skin_temperature"
+    if name not in ds:
+        raise ValueError(f"{source}: missing variable {name!r}.")
+
+    temperature = ds[name]
+    if sorted(temperature.dims) != ["lat", "lon", "time"]:
+        raise ValueError(
+            f"{source}: {name} must have time, lat and lon dimensions."
+        )
+    if temperature.attrs.get("units") != "K":
+        raise ValueError(f"{source}: {name} must declare units='K'.")
+
+    if "time" not in ds.coords or ds["time"].dims != ("time",):
+        raise ValueError(f"{source}: a one-dimensional time coordinate is required.")
+    if ds.sizes["time"] < 2:
+        raise ValueError(f"{source}: at least two dated samples are required.")
+    if not _is_datetime_axis(ds["time"].values):
+        raise ValueError(f"{source}: time must decode to calendar dates.")
+    if bool(ds["time"].isnull().any().item()):
+        raise ValueError(f"{source}: time contains missing timestamps.")
+
+    order = np.argsort(ds["time"].values, kind="stable")
+    ordered = ds.isel(time=order)
+    timestamps = ordered["time"].values
+    if any(
+        timestamps[i + 1] <= timestamps[i]
+        for i in range(len(timestamps) - 1)
+    ):
+        raise ValueError(f"{source}: duplicate timestamps are not allowed.")
+
+    values = _orient_to_model_grid(
+        ordered[name], lat_deg, lon_deg, name=name
+    )
+    if not np.all(np.isfinite(values)) or np.any(values <= 0):
+        raise ValueError(
+            f"{source}: temperatures must be finite and positive in kelvin."
+        )
+
+    return make_time_series(
+        values,
+        _time_axis_from_ds(ordered),
+        align_mode=BY_DATE_INTERP,
+        persist="strict",
+    )
 
 def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
                                    align_mode: str = "auto",
@@ -2314,8 +3059,9 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
     order = times = None
     mode = None
     if timed and ds.sizes["time"] > 1:
-        order, times, mode = _prescribed_flux_time_axis(
-            ds, align_mode, source)
+        order, times, mode = _vector_forcing_time_axis(
+            ds, align_mode, source,
+            config_key="forcing.prescribed_surface_flux.align")
 
     out = {}
     for var, field in PRESCRIBED_FLUX_FILE_VARS.items():
@@ -2330,13 +3076,119 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
             out[field] = make_time_series(
                 np.asarray(values)[order], times, mode, persist=persist)
     if mode in (BY_DATE, BY_DATE_INTERP):
-        bounds = _prescribed_flux_time_bounds(ds, order, times, source)
+        bounds = _dated_forcing_time_bounds(ds, order, times, source)
         if bounds is not None:
             out["prescribed_flux_time_bounds"] = bounds
     return out
 
 
-def _prescribed_flux_time_bounds(ds, order, times, source):
+#: The two components an ocean-current source must define (jax-gcm#915):
+#: names, units and sign follow the surface-exchange contract's
+#: (docs/source/design/surface_exchange.md) ``wind_u``/``wind_v`` convention
+#: — eastward/northward [m/s] on the unrotated model grid. Maps each file
+#: variable to the ``ForcingData`` field it fills.
+OCEAN_CURRENT_FILE_VARS = {
+    "ocean_u": "ocean_u",
+    "ocean_v": "ocean_v",
+}
+
+
+def read_ocean_current(ds, lat_deg=None, lon_deg=None,
+                       align_mode: str = "auto",
+                       source: str = "ocean_current",
+                       persist: str = "strict"):
+    """Read an ocean-current dataset into ``ForcingData`` fields (jax-gcm#915).
+
+    The Python door behind ``forcing.ocean_current.file`` (the Hydra door
+    calls exactly this): returns a dict keyed by the ``ForcingData`` field
+    names (``ocean_u``, ``ocean_v``), so
+    ``forcing.copy(**read_ocean_current(ds, lat, lon, ...))`` attaches them.
+    A coupler that already holds the current in memory sets the fields
+    directly instead (a bare ``(lon, lat)`` map per coupling interval, or a
+    :class:`TimeSeries` built with :func:`make_time_series` and an explicit
+    ``align_mode``).
+
+    Both components must be dimensioned ``(lat, lon)`` (static -> a bare
+    ``(lon, lat)`` array) or ``(time, lat, lon)`` (-> a :class:`TimeSeries`),
+    read independently and VALIDATED on the model's own Gaussian grid by
+    :func:`_orient_to_model_grid` — the same mechanism every other gridded
+    forcing reader uses (including the other vector field this module reads,
+    :func:`read_prescribed_surface_fluxes`'s ``stress_u``/``stress_v``). This
+    is a deliberate choice for a vector field: reading each component
+    independently is only correct when both grids share the same local
+    eastward/northward basis, which is true for any two unrotated Gaussian
+    lat/lon grids away from the poles themselves (where "eastward" is
+    undefined) — exactly the grid match this function already enforces, so
+    no separate rotation step is needed. A current on a DIFFERENT grid (e.g.
+    a coupled ocean model's own mesh) must be regridded onto the model's
+    Gaussian grid by the caller first; see the design doc's *Vector
+    regridding* note for the polar caveat a true cross-grid vector regridder
+    would still need. A length-1 time axis is a static field and is
+    collapsed, as the other static readers do (:func:`_drop_degenerate_time`).
+
+    **Time alignment is declared, never inferred from the timestamps** (the
+    rule every forcing input shares, :func:`resolve_align`, #884) — see
+    :func:`read_prescribed_surface_fluxes` for the full rationale, which
+    applies here unchanged: ``"wrap_year"`` (a climatology, replayed every
+    model year), ``"by_date"`` / ``"by_date_interp"`` (aligned on absolute
+    timestamps), or ``"auto"`` (raises for a time-resolved file: no
+    data-mirror product carries a coupled ocean current).
+
+    Args:
+        ds: An open ``xarray.Dataset``.
+        lat_deg, lon_deg: The model grid (degrees) to validate against.
+        align_mode: ``"wrap_year"`` | ``"by_date"`` | ``"by_date_interp"``
+            (``"auto"`` raises for a time-resolved file) — the vocabulary of
+            ``forcing.ocean_current.align`` / :func:`resolve_align`.
+        source: Label (file path) for error messages.
+        persist: ``"strict"`` (default) | ``"hold"`` — the out-of-range
+            policy of a date-aligned archive (``forcing.ocean_current.persist``).
+
+    Returns:
+        ``dict`` mapping ``ForcingData`` field name (``ocean_u``, ``ocean_v``)
+        to array or ``TimeSeries``.
+
+    """
+    align_mode = str(align_mode)
+    if align_mode != "auto" and align_mode not in ALIGN_MODES:
+        raise ValueError(
+            f"{source}: unknown align {align_mode!r}; expected one of "
+            f"{tuple(ALIGN_MODES)}.")
+    missing = [v for v in OCEAN_CURRENT_FILE_VARS if v not in ds]
+    if missing:
+        raise ValueError(
+            f"{source} is missing the variables {missing}; both of "
+            f"{tuple(OCEAN_CURRENT_FILE_VARS)} are required (contract "
+            "units/signs: docs/source/design/surface_exchange.md).")
+    for var in OCEAN_CURRENT_FILE_VARS:
+        spatial = [d for d in ds[var].dims if d != "time"]
+        if sorted(spatial) != ["lat", "lon"]:
+            raise ValueError(
+                f"{source}: variable {var!r} must be dimensioned (lat, lon) "
+                f"with an optional leading time axis; got {ds[var].dims}.")
+
+    persist = persist_code(persist, "forcing.ocean_current.persist")
+    timed = [v for v in OCEAN_CURRENT_FILE_VARS if "time" in ds[v].dims]
+    order = times = None
+    mode = None
+    if timed and ds.sizes["time"] > 1:
+        order, times, mode = _vector_forcing_time_axis(
+            ds, align_mode, source, config_key="forcing.ocean_current.align")
+
+    out = {}
+    for var, field in OCEAN_CURRENT_FILE_VARS.items():
+        values = _orient_to_model_grid(ds[var], lat_deg, lon_deg, name=var)
+        if "time" not in ds[var].dims:
+            out[field] = jnp.asarray(values)
+        elif mode is None:
+            out[field] = jnp.asarray(values[0])
+        else:
+            out[field] = make_time_series(
+                np.asarray(values)[order], times, mode, persist=persist)
+    return out
+
+
+def _dated_forcing_time_bounds(ds, order, times, source):
     """Per-sample ``(n, 2)`` ``[start, end]`` dates a file's CF bounds declare.
 
     Looks for the variable the ``time`` coordinate's ``bounds`` attribute
@@ -2384,8 +3236,17 @@ def _prescribed_flux_time_bounds(ds, order, times, source):
     return jdt.Datetime.from_datetime64(np.stack([lo, hi], axis=1))
 
 
-def _prescribed_flux_time_axis(ds, align_mode, source):
-    """Sort, validate and align-resolve a prescribed-flux time axis.
+def _vector_forcing_time_axis(ds, align_mode, source, *, config_key):
+    """Sort, validate and align-resolve a vector-forcing input's time axis.
+
+    Shared by the two 2-component forcing readers whose variables (unlike
+    the scalar readers' manifest-resolved ones) have no data-mirror product
+    to infer an alignment from, so ``align_mode="auto"`` always raises here
+    — :func:`read_prescribed_surface_fluxes` and :func:`read_ocean_current`.
+    ``config_key`` is the caller's own Hydra key (``forcing.
+    prescribed_surface_flux.align`` / ``forcing.ocean_current.align``), named
+    in :func:`resolve_align`'s error and the WRAP_YEAR validation message
+    below so it points at the block the caller actually reads.
 
     Returns ``(order, ascending_times, align_int)``; see
     :func:`read_prescribed_surface_fluxes` for the rules.
@@ -2418,10 +3279,9 @@ def _prescribed_flux_time_axis(ds, align_mode, source):
             f"{ordered[not_increasing[0]]}); each sample must have a distinct "
             "time.")
 
-    # No data-mirror product carries prescribed fluxes, so ``auto`` has no
-    # manifest kind to resolve from and raises (the shared #884 rule).
-    mode = align_mode_code(resolve_align(
-        align_mode, config_key="forcing.prescribed_surface_flux.align"))
+    # No data-mirror product carries this input, so ``auto`` has no manifest
+    # kind to resolve from and raises (the shared #884 rule).
+    mode = align_mode_code(resolve_align(align_mode, config_key=config_key))
 
     if mode == WRAP_YEAR:
         # Calendar months straight off the decoded values (``.dt`` handles
@@ -2435,8 +3295,8 @@ def _prescribed_flux_time_axis(ds, align_mode, source):
                 "Climatology replay (WRAP_YEAR) selects the sample of the "
                 "model's calendar month, so it needs exactly twelve "
                 "samples, one per month January..December. Supply such a file, "
-                "or set forcing.prescribed_surface_flux.align=by_date to align "
-                "the samples on their absolute timestamps.")
+                f"or set {config_key}=by_date to align the samples on their "
+                "absolute timestamps.")
         return order, _wrap_year_times(ds.isel(time=order)), mode
     # Date-aligned: now (and only now) put the samples on the model's exact
     # Gregorian clock, in the sorted order.
@@ -2556,9 +3416,14 @@ _EMISSIONS_INPUT = ("emissions (forcing.emissions_file)",
 _FLUX_INPUT = ("prescribed surface fluxes (forcing.prescribed_surface_flux)",
                "forcing.prescribed_surface_flux.persist",
                "forcing.prescribed_surface_flux.align")
+_OCEAN_CURRENT_INPUT = ("ocean current (forcing.ocean_current)",
+                       "forcing.ocean_current.persist",
+                       "forcing.ocean_current.align")
 DATED_INPUT_FAMILIES = {
+    "land_skin_temperature": (
+        "land skin temperature (forcing.land_skin_temperature_file)", None, None),
     **{f: _SURFACE_INPUT for f in (
-        "sea_surface_temperature", "sice_am", "snowc_am", "soilw_am",
+        "sea_surface_temperature", "sice_am", "sea_ice_temperature", "snowc_am", "soilw_am",
         "stl_am", "soilw_rel", "co2_vmr", "ch4_vmr", "n2o_vmr")},
     "ozone_climatology": _OZONE_INPUT,
     "anthropogenic_emissions": _EMISSIONS_INPUT,
@@ -2572,6 +3437,8 @@ DATED_INPUT_FAMILIES = {
     **{f: _FLUX_INPUT for f in (
         "prescribed_sensible_heat_flux", "prescribed_evaporation",
         "prescribed_stress_u", "prescribed_stress_v")},
+    "ocean_u": _OCEAN_CURRENT_INPUT,
+    "ocean_v": _OCEAN_CURRENT_INPUT,
     "nudging_target": ("nudging target (nudging.enabled)", None, None),
 }
 
@@ -2686,6 +3553,10 @@ def check_forcing_coverage(forcing, run_window, *, fields=None,
             policies.setdefault(family[0], set()).add(
                 "hold" if hold else "strict")
             leaf_bounds = bounds if field.startswith("prescribed_") else None
+            if field == "land_skin_temperature":
+                # Instantaneous snapshots support interpolation only between
+                # recorded timestamps, unlike interval-mean monthly products.
+                leaf_bounds = _host_epoch_seconds(leaf.times).astype(float)[[0, -1]]
             what = ("fluxes" if family is _FLUX_INPUT
                     else "data" if family[1] is None
                     else "a series")

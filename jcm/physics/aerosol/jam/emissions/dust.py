@@ -3,8 +3,11 @@
 Port of the MPI-BGC dust scheme ``mo_ham_dust.f90`` (``bgc_dust_initialize``,
 ``bgc_dust_calc_emis``) as configured by HAM2 (``ndust = 4``): a size-resolved
 Marticorena-Bergametti (1995) saltation flux over a 191-class soil size grid
-and a per-cell mixture of prescribed soil textures, sandblasted into an emitted
-spectrum and integrated onto MAM4's accumulation and coarse emission windows.
+and a per-cell mixture of prescribed soil textures, sandblasted into an
+emitted spectrum and integrated onto the population's own emission windows —
+MAM4's accumulation/coarse by default, or M7's insoluble accumulation/coarse
+with HAM's own fixed-radius number conversion when ``spec.dust_emission`` is
+set (:class:`DustEmissionPolicy`, :func:`m7_dust_emission_policy`).
 
 The chain, in CGS as the Fortran is (cm, cm/s, g, g cm⁻² s⁻¹):
 
@@ -25,12 +28,17 @@ the gate *and* a linear factor), ``dust_preferential`` (paleolake area fraction,
 a texture swap), ``dust_soil_types`` (nine texture area fractions),
 ``dust_regions`` (the 1-8 tuning index) and ``dust_roughness`` (the satellite
 map, live only on the ``ndurough = 0`` sensitivity path — the Fortran reads it
-every month and then overwrites it with the constant).
+every month and then overwrites it with the constant). A sixth,
+``dust_msg`` (the MSG-SEVIRI Saharan dust-source-activation frequency), drives
+the Sahara-source override live only on ``ndust = 5`` (:attr:`DustParameters.
+use_msg_source`).
 
-Two land fields gate the flux on top of those: ``snowc_am`` (snow cover) and
-``soilw_rel``, the ECHAM-like relative soil wetness ``ws/wsmx`` the saturation
-cut-off is defined against (#787). A forcing without ``soilw_rel`` leaves that
-cut-off inert and says so.
+Two land fields gate the flux on top of those: the snow cover and the
+ECHAM-like relative soil wetness ``ws/wsmx`` the saturation cut-off is defined
+against. With the SLIM land (``land_model: slim``) they are the snow and water
+buckets (:func:`slim_dust_gates`); with the prescribed land, ``snowc_am`` and
+``soilw_rel`` (#787). A forcing without ``soilw_rel`` leaves that cut-off
+inert and says so.
 
 Documented in ``docs/source/science/aerosol.md``; the ``U10 = 10 m/s`` texture
 switch is a hard step with zero gradient (#664).
@@ -38,15 +46,17 @@ switch is a hard step with zero gradient (#664).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
-from typing import ClassVar
+from typing import Any, ClassVar, Mapping
 
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx, struct
 
 from jcm.forcing import land_snow_cover
+from jcm.physics.surface.slim.slim_term import SLIM_LAND_KEY
 from jcm.physics.aerosol.jam.emissions.distributors import distribute_surface_flux
 from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
     accumulate_emission_fluxes, emission_flux_keys)
@@ -55,7 +65,8 @@ from jcm.physics.aerosol.jam.emissions.surface_wind import (
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
-from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
+from jcm.physics.physics_term import (
+    PhysicsTendency, PhysicsTerm, with_field_overrides)
 
 logger = logging.getLogger(__name__)
 
@@ -161,44 +172,21 @@ _N_EAST_ASIA_ROWS = len(EAST_ASIA_INDEX)
 
 #: Global multiplier on HAM's ``ndust = 4`` T63 regional threshold vector —
 #: the single degree of freedom through which jcm calibrates its dust budget
-#: (#808). HAM's values were tuned inside ECHAM5; ``nduscale_reg`` scales the
-#: saltation THRESHOLD and emission lives in the far tail of the wind
-#: distribution, so this is exactly the parameter that absorbs a difference in
-#: host-model wind climate — a *smaller* value emits MORE. One scalar, because
-#: HAM's eight regional parameters cannot be identified from a global-mean and a
-#: zonal-mean dust AOD: the regional RATIOS stay HAM's and only the level moves. It applies
-#: to the ``ndust = 4`` T63 vector alone, since that is the only grid carrying
-#: native HAMMOZ source fields (#810).
-#:
-#: 0.485 is the dust value of the JAM aerosol retune's Stage 2c, the sweep of
-#: this scale and the sea-salt scale with the Sundqvist T63 cloud-fraction set
-#: (``JCM_CALIBRATED_COVER_T63``) in place and the cloud-borne aerosol held by
-#: liquid cloud only (see ``docs/source/design/jam_aerosol_retune.md``). The
-#: sweep is the control and 19 Gaussian-process expected-improvement arms,
-#: 30-day windows, January and July, from states spun up on the same tree, over
-#: this scale ([0.3, 1.0]) and the sea-salt scale ([2, 8]), with the five cover
-#: parameters held at the shipped values. The retune loss (cloud radiative
-#: effects, cloud cover, precipitation, liquid water path, and the total and
-#: dust AOD against ESA-CCI SU v4.21 and SLSTR SU v1.12) does not set this
-#: scale: the January window's dust terms are a few dust events (the replicate
-#: spread of the January dust burden is +-30 %), and the loss minimum (0.727)
-#: is a configuration with dust nearly off, a burden of 13-17 mg/m2 against the
-#: AeroCom mean of 37.6. The scale is set on that burden instead, a monitor of
-#: the sweep, as an annual mean, which is what AeroCom's number is and what the
-#: release matrix scores: the fitted two-window burden crosses 37.6 mg/m2 at
-#: 0.522 (bootstrap 16-84 % 0.518-0.527, independent of the sea-salt scale),
-#: but the 30-day windows sample the dusty seasons, so 365-day years bracket
-#: the value: 27.3 mg/m2 at 0.522 and 43.8 at 0.465 (d ln B / d scale = -8.3)
-#: put 37.6 at 0.483, and the 365-day ``echam-jam-t63-l47`` year at 0.485
-#: confirms it with a dust burden of 36.2 mg/m2 (AeroCom mean 37.6, median
-#: 40.2), a dust AOD of 0.0198 (observed 0.0213), a D < 10 um emission of 2270
-#: Tg/yr (AeroCom median 1640 at mixed size cut-offs; the parent model's budget
-#: in this window is 642, see the science page; the release band is 400-2600)
-#: and a dust lifetime of 3.0 d (AeroCom 4.1). Emission lives in the far tail
-#: of the wind distribution, so it responds steeply to this threshold (2715
-#: Tg/yr at 0.465, 1702 at 0.522), which is why the number is measured rather
-#: than inherited. The derivation is in ``docs/source/science/aerosol.md``.
-NDUSCALE_JCM_T63_SCALE = 0.485
+#: (#808). It scales the saltation THRESHOLD and emission lives in the far tail
+#: of the wind distribution, so it absorbs the host's wind climate; a *smaller*
+#: value emits MORE. One scalar, because HAM's eight regional parameters cannot
+#: be identified from global and zonal dust AOD: the regional ratios stay HAM's.
+#: It applies to the ``ndust = 4`` T63 vector alone, the only grid carrying
+#: native HAMMOZ source fields (#810). 0.85 is the JAM-MAM4 host's value on
+#: the SLIM land (``docs/source/design/jam_aerosol_retune.md``, "The
+#: structural refit"): the v3.1 joint fit's 0.720 was set against the bucket
+#: land, and on SLIM's equilibrated soil moisture and roughness it emits 2700
+#: Tg/yr with a 98 mg/m2 burden (AeroCom 1640 / 37.6); 0.80 still leaves 1910
+#: Tg/yr and 63 mg/m2 (both release years at T63 L47). The annual response is
+#: log-linear in the scale (-4.3 per unit for the emission, -5.5 for the
+#: burden). At 0.85 the release year emits 1614 Tg/yr with a 55.5 mg/m2 burden
+#: at T63 L47 and 1019 Tg/yr with 32.7 mg/m2 at T63 L95.
+NDUSCALE_JCM_T63_SCALE = 0.85
 
 #: Number of regions in ``dust_regions.nc`` (1 = everywhere else, 2 = N America,
 #: 3 = S America, 4 = N Africa, 5 = S Africa, 6 = Middle East, 7 = Asia,
@@ -209,6 +197,121 @@ N_REGIONS = 8
 def soil_diameters() -> np.ndarray:
     """Return the 191 soil-class diameters [cm], ``D_k = Dmin·exp((k−1)·Dstep)``."""
     return DMIN * np.exp(np.arange(NCLASS) * DSTEP)
+
+
+# --- M7 dust-emission policy (jax-gcm#1017) ---------------------------------
+#
+# HAM routes the SAME BGC-dust source (``bgc_dust_calc_emis``) straight into
+# M7's own insoluble accumulation/coarse classes rather than MAM4's windows
+# (``mo_ham_m7_emissions.f90::ham_m7_dust_emissions``, lines 652-780): BGC
+# "tracer" 1 -> AI (``min_ai=max_ai=1``), tracers 2-4 -> CI (``min_ci=2,
+# max_ci=4``; lines 690-693). A BGC tracer is a sum over
+# :data:`_BGC_TRACER_CLASSES` (24) consecutive classes of the same 191-class
+# soil size grid this module already uses (``mo_ham_dust.f90``: ``ntrace=8``
+# line 98, ``nbin=24`` line 99) — tracer ``t`` (1-based) covers classes
+# ``(t-1)*24+1 .. t*24`` — so AI is classes 1-24 and CI is classes 25-96;
+# classes 97-191 (BGC tracers 5-8, the "super-coarse mode") are never summed
+# into ``ibc_dust``/``ibc_dust+1`` and so never enter the aerosol here either,
+# same as MAM4's :data:`SUPERCOARSE_UM` discard but at HAM's own, higher edge.
+_BGC_TRACER_CLASSES = 24
+
+
+def _bgc_tracer_edge_um(tracer: int) -> float:
+    """Dry diameter [µm] of the FIRST class of 1-based BGC tracer ``tracer``.
+
+    This is the half-open ``[lo, hi)`` boundary between tracer ``tracer - 1``
+    and ``tracer`` on the module's own ``soil_diameters()`` grid — e.g.
+    ``_bgc_tracer_edge_um(5) == 16.635...`` µm is the edge above which HAM's
+    tracers 5-8 (and this module's windowing) discard the mass, a hair above
+    the 15.887 µm diameter of tracer 4's LAST class quoted elsewhere in this
+    module for narrative comparison with MAM4's ``SUPERCOARSE_UM``.
+    """
+    idx = (tracer - 1) * _BGC_TRACER_CLASSES
+    return float(soil_diameters()[idx] * 1.0e4)
+
+
+#: M7's insoluble accumulation (AI) and coarse (CI) emission windows [µm]:
+#: BGC tracer 1 (classes 1-24) and tracers 2-4 (classes 25-96) respectively.
+M7_AI_UM = (0.0, _bgc_tracer_edge_um(2))
+M7_CI_UM = (_bgc_tracer_edge_um(2), _bgc_tracer_edge_um(5))
+
+#: HAM's fixed source mass-median RADII for the M7 dust classes
+#: (``mo_ham_m7_emissions.f90:180-181``) — unlike MAM4's number-conserving
+#: ``_effective_diameter``, M7's number flux uses these two FIXED sizes
+#: regardless of the emitted spectrum's own shape.
+MMR_DUST_AI_M = 0.35e-6   # m
+MMR_DUST_CI_M = 1.75e-6   # m
+#: The reference σ_g M7's zm2n factors are defined at (``ref_sigma_dust_ai``
+#: = ``sigma_fine``, ``ref_sigma_dust_ci`` = ``sigma_coarse``,
+#: ``mo_ham_m7_emissions.f90:101-102``, asserted equal to the AI/CI modes'
+#: own σ at ``mo_ham_m7ctl.f90:171-172`` by the Fortran's consistency check,
+#: ``mo_ham_m7_emissions.f90:698``) — HAM constants, not population-derived.
+_REF_SIGMA_DUST_AI = 1.59
+_REF_SIGMA_DUST_CI = 2.0
+
+
+def _m7_mass_median_number_factor(mmr_m: float, sigma_g: float,
+                                  density: float) -> float:
+    """HAM's mass-flux -> number-flux factor for a mass-MEDIAN radius class.
+
+    ``mo_ham_m7_emissions.f90:261-262``: ``zm2n = 3/(4·pi·rho·mmr³) ·
+    exp(4.5·ln(sigma_g)²)``, giving ``N = M · zm2n``. The exponential term
+    MULTIPLIES here, the opposite sign from :attr:`AerosolMode.number_factor`
+    (which divides by it) — because ``mmr`` is the lognormal's MASS-median
+    radius, not its COUNT-median ``AerosolMode.dgnum``/2: for a lognormal
+    with count-median radius r_n and geometric std σ_g, the mass-median
+    radius is ``r_mmr = r_n · exp(3·ln²σ_g)`` (the standard moment shift), so
+    substituting ``r_n = r_mmr · exp(-3·ln²σ_g)`` into the usual
+    ``N = M / (rho · (4/3)·pi·r_n³ · exp(4.5·ln²σ_g))`` flips the sign of the
+    exponent on the ``r_mmr``-based form derived here — reproducing HAM's
+    formula exactly.
+    """
+    ln_sigma = math.log(sigma_g)
+    return (3.0 / (4.0 * math.pi * density * mmr_m ** 3)) * math.exp(
+        4.5 * ln_sigma ** 2)
+
+
+@dataclasses.dataclass(frozen=True)
+class DustEmissionPolicy:
+    """Population-specific dust-emission window/mode/number policy.
+
+    Pure compose-time data (never a JAX pytree leaf), like
+    :class:`~jcm.physics.aerosol.jam.population.AerosolMode`. ``None`` (every
+    MAM4-family population) keeps :class:`DustEmissions`'s existing
+    behaviour: the species' ``primary_split("du")`` modes/fractions for the
+    destination, :data:`ACCUM_UM`/:data:`COARSE_UM` for the windows, and a
+    number-conserving effective diameter (:func:`_effective_diameter`) for
+    the implied number flux. Setting ``spec.dust_emission`` to one of these
+    switches all three to the policy's own values — built for M7 by
+    :func:`m7_dust_emission_policy`.
+    """
+
+    accum_mode: str          # population mode short
+    coarse_mode: str
+    accum_um: tuple[float, float]
+    coarse_um: tuple[float, float]
+    #: Fixed number-per-mass factors [kg⁻¹] (HAM's ``zm2n``), used directly
+    #: instead of the MAM4 number-conserving-diameter path.
+    accum_number_factor: float
+    coarse_number_factor: float
+
+
+def m7_dust_emission_policy(du_density: float) -> DustEmissionPolicy:
+    """Build the M7 :class:`DustEmissionPolicy`.
+
+    ``du_density`` is the dust material density [kg/m³] from the CALLER's own
+    species table (``microphysics/m7_data.py``'s ``M7_SPECIES["du"].density``
+    = 2650, ``mo_ham_species.f90:411``), so this module carries no duplicate
+    copy of that number — only HAM's own window/mode/radius constants above.
+    """
+    return DustEmissionPolicy(
+        accum_mode="ai", coarse_mode="ci",
+        accum_um=M7_AI_UM, coarse_um=M7_CI_UM,
+        accum_number_factor=_m7_mass_median_number_factor(
+            MMR_DUST_AI_M, _REF_SIGMA_DUST_AI, du_density),
+        coarse_number_factor=_m7_mass_median_number_factor(
+            MMR_DUST_CI_M, _REF_SIGMA_DUST_CI, du_density),
+    )
 
 
 def threshold_friction_velocity(diameters, a_rnolds, b_rnolds, x_rnolds,
@@ -260,7 +363,9 @@ def soil_size_distributions(soil_table, diameters):
 _AGGREGATES = (("acc", 0), ("acc", 1), ("cor", 0), ("cor", 1), ("all", 0))
 
 
-def emission_weight_matrix(srel, srel_v, su_srel_v, diameters):
+def emission_weight_matrix(srel, srel_v, su_srel_v, diameters,
+                           accum_um: tuple[float, float] = ACCUM_UM,
+                           coarse_um: tuple[float, float] = COARSE_UM):
     """Reduce the sandblasting redistribution to one matrix per mixture row.
 
     The Fortran redistributes each saltating class ``k ≥ 2`` over classes
@@ -277,11 +382,15 @@ def emission_weight_matrix(srel, srel_v, su_srel_v, diameters):
     ``(ntype, 191, ncols)``; ``dust_test`` checks it against a direct transcription
     of the Fortran loops.
 
+    ``accum_um``/``coarse_um`` default to MAM4's windows; a population with
+    its own :class:`DustEmissionPolicy` (M7) passes its own windows instead,
+    bit-identically reusing this same reduction.
+
     Returns ``(nrow, 5, 191)`` for :data:`MIXTURE_ROWS` and :data:`_AGGREGATES`.
     """
     d_um = diameters * 1.0e4
-    windows = {"acc": (d_um >= ACCUM_UM[0]) & (d_um < ACCUM_UM[1]),
-               "cor": (d_um >= COARSE_UM[0]) & (d_um < COARSE_UM[1]),
+    windows = {"acc": (d_um >= accum_um[0]) & (d_um < accum_um[1]),
+               "cor": (d_um >= coarse_um[0]) & (d_um < coarse_um[1]),
                "all": jnp.ones_like(d_um, dtype=bool)}
     rows = []
     for flux_type, size_type in MIXTURE_ROWS:
@@ -335,12 +444,17 @@ class DustParameters:
     #: ``ndurough = 0``: use the monthly satellite roughness map instead of the
     #: constant. The constant itself (``ndurough``) stays a differentiable leaf.
     use_roughness_map: bool = struct.field(pytree_node=False, default=False)
+    #: ``ndust = 5`` only: replace the standard soil mixture in cells covered
+    #: by the MSG-SEVIRI Saharan dust-source-activation map
+    #: (``mo_ham_dust.f90:711-740``) — see :meth:`DustEmissions._soil_weights`.
+    #: False (the Fortran skips this block entirely) for every other preset.
+    use_msg_source: bool = struct.field(pytree_node=False, default=False)
 
     @classmethod
     def preset(cls, ndust: int = 4, truncation: int | None = 63,
                nudged: bool = False,
                nduscale_scale: float | None = None) -> "DustParameters":
-        """``mo_ham_dust.f90::get_dust_namelist_defaults`` for ``ndust`` 2-4.
+        """``mo_ham_dust.f90::get_dust_namelist_defaults`` for ``ndust`` 2-5.
 
         ``truncation = None`` means a non-spectral grid (the pySES CAM-SE
         backend). HAM tunes ``nduscale_reg`` only at T63 and its ``ndust = 3``
@@ -370,7 +484,13 @@ class DustParameters:
             poly = (0.86 if truncation is None else
                     -7.9365e-5 * truncation ** 2 + 0.0095238 * truncation + 0.575)
             scale[:] = 0.86 if truncation is None or truncation > 63 else poly
-        elif ndust == 4:                     # Stier (2005) + East-Asia soils (HAM2)
+        elif ndust in (4, 5):
+            # Stier (2005) + East-Asia soils (HAM2); ndust=5 additionally
+            # swaps the Sahara to the MSG-SEVIRI source-activation map.
+            # ``get_dust_namelist_defaults``'s ``CASE (4, 5)`` shares every
+            # namelist default between the two -- only ``bgc_read_annual_
+            # fields``'s post-read override (mo_ham_dust.f90:711-740) differs,
+            # which is ``use_msg_source`` below, not a namelist parameter.
             rough, lai, smst, easo = 0.001, 0.1, False, 2
             table[13, ALPHA_COL] = 1.0e-6    # r_dust_af14: loess
             thresh[0] = 0.6                  # r_dust_sf13: Taklimakan
@@ -380,15 +500,23 @@ class DustParameters:
                 scale[:] = [low, high, high, low, low, low, high, low]
                 # The one grid/preset combination that carries a jcm
                 # calibration scalar at all (#808); every other resolution and
-                # preset keeps HAM's number untouched (#810).
+                # preset keeps HAM's number untouched (#810). ndust=5 shares
+                # ndust=4's T63 regional vector bit-for-bit (same CASE (4, 5)
+                # namelist block), and the scale itself corrects a mismatch
+                # between jcm's simulated 10 m wind climate and the one HAM's
+                # nduscale_reg was tuned against -- a property of the HOST
+                # model, not of which soil-source variant is active, so it
+                # applies to ndust=5 exactly as it does to ndust=4 (reported
+                # to the #1017 lead; not a STOP, since the reasoning carries
+                # over directly from #808/#810 and nothing here is unverified).
                 calibrated = NDUSCALE_JCM_T63_SCALE
             else:
                 scale[:] = 0.86
         else:
             raise ValueError(
-                f"ndust={ndust}: only the 2 (Cheng), 3 (Stier 2005) and 4 "
-                "(Stier + East-Asia soils, HAM2) presets are ported; ndust=5 "
-                "needs the MSG-SEVIRI activation map, which is not available.")
+                f"ndust={ndust}: only 2 (Cheng), 3 (Stier 2005), 4 (Stier + "
+                "East-Asia soils, HAM2) and 5 (Stier + East-Asia soils + MSG "
+                "Saharan source-activation map, HAM2) are ported.")
         scale = scale * (calibrated if nduscale_scale is None
                          else float(nduscale_scale))
         return cls(
@@ -412,6 +540,7 @@ class DustParameters:
             fecan_moisture=smst,
             east_asia=easo,
             use_roughness_map=(rough == 0.0),
+            use_msg_source=(ndust == 5),
         )
 
     @classmethod
@@ -455,6 +584,56 @@ def _relative_soil_wetness(forcing, ncols):
     return jnp.clip(jnp.ravel(wetness), 0.0, 1.0)
 
 
+#: ``cqsncr`` (``iniphy.f90``) and the ``zepsec``/``zsigfac`` of
+#: ``mo_ham_dust.f90`` (l.1480-1481): ECHAM's snow-cover formula.
+_CQSNCR = 0.95
+_SNOW_EPS = 1.0e-12
+_SNOW_SIGFAC = 0.15
+
+
+def slim_dust_gates(slim, forcing, terrain, ncols):
+    """HAM's snow cover and relative soil wetness from the SLIM land.
+
+    ``mo_ham_dust.f90`` (l.1570-1600) forms both from ECHAM's land state:
+    on non-glacier land ``zw1r = MIN(ws/wsmx, 1)`` and
+    ``zcvs = cqsncr·tanh(sn_mm/10)·sqrt(sn_mm/(sn_mm + zepsec + zsigfac·orostd))``
+    (``sn_mm`` the snow water equivalent in mm, the ``physc.f90`` cover), and
+    on glaciers both are 1. With ``land_model: slim`` the land state is SLIM's:
+    the water bucket over its capacity is ``ws/wsmx`` and the snow bucket is
+    ``sn``. The canopy-snow branch (``snc``) has no SLIM counterpart. The
+    carried state is the previous step's, which is also what HAM reads (the
+    land updates after the emissions in ECHAM's step); an unset column is
+    seeded as the land is.
+
+    Returns ``(snow_cover, wetness)``, each ``(ncols,)``.
+    """
+    from jcm.physics.surface.slim.slim_land import SlimParameters
+    from jcm.physics.surface.slim.slim_term import column_properties, resolve_state
+    props = column_properties(forcing, ncols)
+    state = resolve_state(slim, forcing, props, ncols, SlimParameters.default())
+    glacier = props["glc_mask"] > 0.5
+    # The capacity the land used last step (with its calibration lever),
+    # carried by SlimLand; the map's own before the first step.
+    carried_cap = jnp.ravel(slim.bucket_capacity)
+    cap = jnp.where(carried_cap > 0.0, carried_cap, props["bucketdepth"])
+    wetness = jnp.clip(state.water / jnp.where(cap > 0.0, cap, 1.0), 0.0, 1.0)
+    sn_mm = jnp.maximum(state.snow, 0.0)
+    orostd = getattr(terrain, "orostd", None)
+    orostd = (jnp.zeros((ncols,)) if orostd is None or jnp.size(orostd) != ncols
+              else jnp.ravel(orostd))
+    # Snow-free land holds the bucket at exactly 0, where the square root's
+    # derivative is infinite and the tanh factor's zero would turn it into a
+    # NaN on the backward pass. The root is therefore taken of a positive
+    # stand-in there and the cover set to 0 (its value, and its one-sided
+    # derivative wherever the orography term is positive).
+    snowy = sn_mm > 0.0
+    sn_safe = jnp.where(snowy, sn_mm, 1.0)
+    sigh = jnp.sqrt(sn_safe / (sn_safe + _SNOW_EPS + _SNOW_SIGFAC * orostd))
+    cover = jnp.where(snowy, _CQSNCR * jnp.tanh(sn_safe / 10.0) * sigh, 0.0)
+    return (jnp.where(glacier, 1.0, cover).astype(wetness.dtype),
+            jnp.where(glacier, 1.0, wetness))
+
+
 def _soil_fractions(forcing, ncols):
     """Return the nine prescribed texture area fractions, zero where unsupplied."""
     types = getattr(forcing, "dust_soil_types", None) if forcing is not None else None
@@ -466,13 +645,19 @@ def _soil_fractions(forcing, ncols):
             for name in SOIL_TYPE_VARS}
 
 
-def _require_companions(forcing, ncols):
+def _require_companions(forcing, ncols, params):
     """Fail rather than emit an untuned, all-coarse flux on missing companions.
 
     Unlike a missing ``dust_source`` (which disables the term), a missing
     texture / preferential / region field still emits: the residual becomes pure
     soil type 1 and every cell takes region 1. Both assembly doors already
     refuse this, so reaching it means the forcing was hand-assembled.
+
+    ``params.use_msg_source`` (``ndust = 5``) additionally requires
+    ``forcing.dust_msg`` — without it the Sahara-source override
+    (:meth:`DustEmissions._soil_weights`) could not run and the preset would
+    silently emit ndust=4's standard-mixture flux instead of HAM's
+    MSG-SEVIRI-gated one.
     """
     missing = [name for name in
                ("dust_preferential", "dust_soil_types", "dust_regions")
@@ -486,6 +671,10 @@ def _require_companions(forcing, ncols):
         field = getattr(forcing, name, None)
         if field is not None and jnp.size(field) != ncols:
             missing.append(f"{name} (wrong shape for {ncols} columns)")
+    if params.use_msg_source:
+        msg = getattr(forcing, "dust_msg", None)
+        if msg is None or jnp.size(msg) != ncols:
+            missing.append("dust_msg (ndust=5's MSG-SEVIRI Saharan map)")
     if missing:
         raise ValueError(
             f"DustEmissions has a dust_source but {sorted(set(missing))} are "
@@ -503,6 +692,11 @@ class DustEmissions(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = (
         emission_flux_keys() + (MODEL_LEVEL_WIND_KEY, DUST_SUPERCOARSE_KEY,
                                 DUST_WETNESS_KEY, DUST_SALTATION_GATE_KEY))
+    # The SLIM land's carry (``land_model: slim``): its water and snow buckets
+    # feed the snow and soil-wetness gates (:func:`slim_dust_gates`). A
+    # cross-step read of the state the land left at the end of the previous
+    # step; absent with the prescribed land, which gates on the forcing.
+    optional_requires: ClassVar[tuple[str, ...]] = (SLIM_LAND_KEY,)
 
     def __init__(
         self,
@@ -512,22 +706,56 @@ class DustEmissions(PhysicsTerm):
         nudged: bool = False,
         nduscale_scale: float | None = None,
         spec: ModalAerosolSpec | None = None,
+        field_overrides: Mapping[str, Any] | None = None,
     ):
         """Hold the parameters, the population and the static soil size grid.
 
         ``ndust``/``nudged``/``nduscale_scale`` select the preset
         :meth:`cache_coords` rebuilds at the model's own truncation; an
         explicit ``params`` overrides all three and is never rebuilt.
+
+        ``field_overrides`` (jax-gcm#995/#1123) is a mapping of
+        :class:`DustParameters` field overrides applied on top of that
+        preset — here (at the fallback truncation, so an object exists
+        before :meth:`cache_coords` ever runs) AND AGAIN by
+        :meth:`cache_coords`, which reapplies it on the preset rebuilt for
+        the real grid. It must NOT be resolved into ``params`` once and for
+        all here: doing so (the original #995 door) made the result
+        indistinguishable from an explicit object, so ``cache_coords`` left
+        it at the fallback truncation forever — a T42 run silently kept the
+        T63 ``nduscale_reg`` values a mapping override was applied to (Codex
+        review, PR #1123). An explicit ``params`` wins over
+        ``field_overrides``, as it does over ``ndust``/``nudged``/
+        ``nduscale_scale``: the overrides are then inert, with no base left
+        to apply to.
         """
         self._preset = (None if params is not None
                         else (ndust, nudged, nduscale_scale))
-        self.params = nnx.Param(
-            params if params is not None
-            else DustParameters.preset(ndust, nudged=nudged,
-                                       nduscale_scale=nduscale_scale))
+        self._field_overrides = field_overrides
+        base = (params if params is not None
+                else DustParameters.preset(ndust, nudged=nudged,
+                                           nduscale_scale=nduscale_scale))
+        if params is None and field_overrides is not None:
+            base = with_field_overrides(base, field_overrides, scheme="dust")
+        self.params = nnx.Param(base)
         self._spec = spec or MAM4_SPEC
         self._diameters = jnp.asarray(soil_diameters())
-        (self._accum, _), (self._coarse, _) = self._spec.primary_split("du")
+        policy: DustEmissionPolicy | None = self._spec.dust_emission
+        if policy is None:
+            # MAM4 default, unchanged: destination modes from the
+            # population's primary-emission policy, MAM4's windows, and a
+            # number-conserving effective diameter for the number flux.
+            (self._accum, _), (self._coarse, _) = self._spec.primary_split("du")
+            self._accum_um = ACCUM_UM
+            self._coarse_um = COARSE_UM
+            self._fixed_number_factor = None
+        else:
+            self._accum = self._spec.mode(policy.accum_mode)
+            self._coarse = self._spec.mode(policy.coarse_mode)
+            self._accum_um = policy.accum_um
+            self._coarse_um = policy.coarse_um
+            self._fixed_number_factor = (
+                policy.accum_number_factor, policy.coarse_number_factor)
 
     def cache_coords(self, coords) -> None:
         """Rebuild the preset at the model's truncation.
@@ -536,6 +764,10 @@ class DustEmissions(PhysicsTerm):
         vector is defined only at T63 and the ``ndust = 3`` polynomial only up
         to it — so the preset cannot be fixed at construction, where the grid is
         not yet known. An explicitly supplied ``DustParameters`` is left alone.
+        Any ``field_overrides`` (jax-gcm#995/#1123) are reapplied on the
+        freshly rebuilt preset, so a mapping override tracks the real grid
+        exactly as the unoverridden preset does, rather than freezing at
+        ``__init__``'s fallback truncation.
         """
         if self._preset is None:
             return
@@ -544,9 +776,11 @@ class DustEmissions(PhysicsTerm):
         # a non-spectral grid (pySES CAM-SE) has none and takes HAM's default.
         wavenumbers = getattr(coords.horizontal, "total_wavenumbers", None)
         truncation = None if wavenumbers is None else int(wavenumbers) - 2
-        self.params = nnx.Param(
-            DustParameters.preset(ndust, truncation=truncation, nudged=nudged,
-                                  nduscale_scale=nduscale_scale))
+        base = DustParameters.preset(ndust, truncation=truncation, nudged=nudged,
+                                     nduscale_scale=nduscale_scale)
+        if self._field_overrides is not None:
+            base = with_field_overrides(base, self._field_overrides, scheme="dust")
+        self.params = nnx.Param(base)
 
     def _soil_weights(self, forcing, ncols, params):
         """Per-cell area weights of :data:`MIXTURE_ROWS`, before the wind switch.
@@ -555,6 +789,27 @@ class DustEmissions(PhysicsTerm):
         file fields are two *overlapping* partitions (global Zobler textures and
         Cheng's Chinese textures, which overlap over China), so a naive nine-way
         sum drives the type-1 residual negative.
+
+        ``params.use_msg_source`` (``ndust = 5``) applies a THIRD override on
+        top, exactly as ``bgc_read_annual_fields`` runs it after the East-Asia
+        block (mo_ham_dust.f90:711-740): wherever ``forcing.dust_msg`` (HAM's
+        ``mat_msg``, the MSG-SEVIRI Saharan dust-source-activation frequency,
+        in [0, 1]) is positive, the residual and the four global Zobler
+        textures (``mat_s1..mat_s6``) are zeroed -- the East-Asian textures
+        are NOT touched by this block, so they are left to subtract out of
+        ``residual`` unchanged (zero in practice, since the map and the
+        East-Asian textures cover disjoint regions). The preferential source
+        is then forced to 0 for ``0 < dust_msg < 0.01`` and to 1 (pure silt/
+        clay spectrum, HAM's own ``fluxdiam_pf``) for ``dust_msg >= 0.01`` --
+        reproduced as two sequential ``jnp.where``s in ``mat_msg``'s own
+        order, since the second is a strict subset of the first and overrides
+        it. (The Fortran's companion ``Z01 = Z02 = r_dust_z0s`` roughness
+        override at ``dust_msg >= 0.01`` is a no-op here: ``ndust = 5``'s own
+        ``ndurough = r_dust_z0s = 0.001 cm`` already gives every cell that
+        constant roughness via :meth:`_roughness`, and every subsequent
+        monthly ``bgc_set_constant_surf_rough`` call overwrites the annual
+        override with the same global constant anyway, so there is no
+        separate z0 behaviour to port.)
         """
         frac = _soil_fractions(forcing, ncols)
         psrc = jnp.clip(_column_field(forcing, "dust_preferential", ncols), 0.0, 1.0)
@@ -569,6 +824,13 @@ class DustEmissions(PhysicsTerm):
             base = jnp.where(replaced, east_total, base)
             global_types = [jnp.where(replaced, 0.0, f) for f in global_types]
             psrc = jnp.where(replaced, 0.0, psrc)
+        if params.use_msg_source:
+            msg = jnp.clip(_column_field(forcing, "dust_msg", ncols), 0.0, 1.0)
+            active = msg > 0.0
+            strong = msg >= 0.01
+            base = jnp.where(active, 0.0, base)
+            global_types = [jnp.where(active, 0.0, f) for f in global_types]
+            psrc = jnp.where(strong, 1.0, jnp.where(active, 0.0, psrc))
         residual = base - sum(global_types) - sum(east)
         land = 1.0 - psrc
         return [land * residual] + [land * f for f in global_types] \
@@ -665,16 +927,22 @@ class DustEmissions(PhysicsTerm):
                       and getattr(forcing, "dust_source", None) is not None)
         if not has_source:
             return self._inert(state, diagnostics, from_model_level, ncols)
-        _require_companions(forcing, ncols)
+        _require_companions(forcing, ncols, p)
         pot = jnp.clip(_column_field(forcing, "dust_source", ncols), 0.0, 1.0)
         # Snow-covered share of the land, glaciers included (the
         # ``ForcingData`` snow convention; no glacier map reads as none).
-        glacier = getattr(forcing, "glacier_fraction", None)
-        snow = land_snow_cover(
-            _column_field(forcing, "snowc_am", ncols),
-            None if glacier is None
-            else _column_field(forcing, "glacier_fraction", ncols))
-        wetness = _relative_soil_wetness(forcing, ncols)
+        slim = diagnostics.get(SLIM_LAND_KEY)
+        if slim is not None and getattr(forcing, "slim_properties", None) is not None:
+            # The SLIM land carries the soil water and snow HAM reads from
+            # ECHAM's land (``ws/wsmx`` and ``sn``), so the gates read them.
+            snow, wetness = slim_dust_gates(slim, forcing, terrain, ncols)
+        else:
+            glacier = getattr(forcing, "glacier_fraction", None)
+            snow = land_snow_cover(
+                _column_field(forcing, "snowc_am", ncols),
+                None if glacier is None
+                else _column_field(forcing, "glacier_fraction", ncols))
+            wetness = _relative_soil_wetness(forcing, ncols)
 
         z0 = self._roughness(forcing, ncols, p)
         # MB95 (17). With the default ndurough = z0s the log is zero and feff ≡ 1;
@@ -696,7 +964,8 @@ class DustEmissions(PhysicsTerm):
                 & (pot > p.r_dust_lai))
 
         srel, srel_v, su_srel_v = soil_size_distributions(p.soil_table, d)
-        weight_matrix = emission_weight_matrix(srel, srel_v, su_srel_v, d)
+        weight_matrix = emission_weight_matrix(
+            srel, srel_v, su_srel_v, d, self._accum_um, self._coarse_um)
         alpha = jnp.stack([p.soil_table[jf - 1, ALPHA_COL]
                            for jf, _ in MIXTURE_ROWS])                   # (nrow,)
 
@@ -748,18 +1017,26 @@ class DustEmissions(PhysicsTerm):
         dry_scale = jnp.where(mask, 10.0 * (1.0 - snow) * pot, 0.0)
         scale = jnp.where(wetness <= p.w0, dry_scale, 0.0)
         mass_acc = moments[0] * scale
-        num_acc = moments[1] * scale
         mass_cor = moments[2] * scale
-        num_cor = moments[3] * scale
         mass_all = moments[4] * scale
 
-        # Number-conserving emitted diameter within each window: the diameter at
-        # which one particle's mass equals mass/number, D = (ΣF / Σ(F/D³))^(1/3).
-        d_acc = _effective_diameter(mass_acc, num_acc, ACCUM_UM)
-        d_cor = _effective_diameter(mass_cor, num_cor, COARSE_UM)
-
-        fluxes = [("du", self._accum.short, mass_acc, d_acc),
-                  ("du", self._coarse.short, mass_cor, d_cor)]
+        if self._fixed_number_factor is not None:
+            # M7: number from HAM's own fixed mass-median-radius factors
+            # (``mo_ham_m7_emissions.f90:261-262``), not the emitted
+            # spectrum's own number-conserving diameter.
+            fac_acc, fac_cor = self._fixed_number_factor
+            fluxes = [("du", self._accum.short, mass_acc, None, fac_acc),
+                      ("du", self._coarse.short, mass_cor, None, fac_cor)]
+        else:
+            num_acc = moments[1] * scale
+            num_cor = moments[3] * scale
+            # Number-conserving emitted diameter within each window: the
+            # diameter at which one particle's mass equals mass/number,
+            # D = (ΣF / Σ(F/D³))^(1/3).
+            d_acc = _effective_diameter(mass_acc, num_acc, self._accum_um)
+            d_cor = _effective_diameter(mass_cor, num_cor, self._coarse_um)
+            fluxes = [("du", self._accum.short, mass_acc, d_acc),
+                      ("du", self._coarse.short, mass_cor, d_cor)]
         tracer_tends = distribute_surface_flux(self._spec, fluxes, air_density, dz)
 
         tendency = PhysicsTendency(

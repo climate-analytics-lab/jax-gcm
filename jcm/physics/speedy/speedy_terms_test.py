@@ -150,6 +150,61 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
         # Should produce valid (non-NaN) tendencies
         self.assertFalse(jnp.any(jnp.isnan(tend.temperature)))
 
+    def test_speedy_humidity_publishes_bolton_rh_without_touching_physics_input(self):
+        """SpeedyHumidity must leave ``humidity.rh`` (a physics input read by
+        speedy_vdiff/speedy_shortwave/speedy_surface_flux) exactly as the
+        reference computes it, however extreme, while publishing a
+        separate ``relative_humidity`` diagnostic computed from the SAME
+        Bolton formula ``MoistAirColumnState`` uses for every ECHAM
+        composition (#407 and its Codex review: a first version instead
+        published SPEEDY's own ice/water-switching ratio, sanity-capped,
+        under this name -- silently redefining an existing cross-package
+        output contract that ``tools/aerocom_cmor.py`` and the science docs
+        both rely on).
+        """
+        from jcm.physics.diagnostics.moist_air_state import (
+            bolton_relative_humidity,
+        )
+        from jcm.physics.speedy.speedy_terms import SpeedyHumidity
+
+        term = SpeedyHumidity()
+        term.cache_coords(self.coords)
+
+        state = self.state.copy(
+            temperature=self.state.temperature.at[0].set(126.0),
+        )
+
+        _, diagnostics = term(state, {}, self.forcing, self.terrain)
+
+        physics_rh = diagnostics["_humidity"].rh
+        reported_rh = diagnostics["relative_humidity"]
+
+        # The physics-facing field is the raw, uncapped ratio -- the same
+        # pathological value speedy_vdiff.py etc. would read unmodified --
+        # and is wildly different from the Bolton-based public field, since
+        # the two are now genuinely different formulas (not the same ratio
+        # under two names).
+        self.assertTrue(float(jnp.max(physics_rh)) > 1e4)
+        self.assertFalse(
+            jnp.allclose(reported_rh, physics_rh, rtol=1e-2).item(),
+        )
+
+        # relative_humidity matches a direct call to the shared function on
+        # SPEEDY's own pure-sigma pressure -- i.e. it is exactly the same
+        # computation an ECHAM composition's MoistAirColumnState would do
+        # given the same (T, q, p), not a rescaled version of humidity.rh.
+        import jcm.constants as c
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords
+        fsg = SpeedyCoords.from_coordinate_system(self.coords).fsg
+        pressure_full = (
+            fsg.reshape((-1,) + (1,) * state.normalized_surface_pressure.ndim)
+            * (state.normalized_surface_pressure * c.p0)[jnp.newaxis]
+        )
+        expected = bolton_relative_humidity(
+            state.temperature, state.specific_humidity, pressure_full,
+        )
+        np.testing.assert_allclose(reported_rh, expected, rtol=1e-6)
+
     def test_every_output_variable_is_documented(self):
         """Every published variable carries units and a description.
 
@@ -170,6 +225,49 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
                          "add a row to jcm/physics/speedy/units_table.csv")
         self.assertEqual(ds["specific_humidity"].attrs["units"], "kg kg-1")
 
+
+class TestSpeedyPublishedFields(unittest.TestCase):
+    """The package-independent fields a SPEEDY run publishes, read off one model day."""
+
+    @classmethod
+    def setUpClass(cls):
+        from jcm.model import Model
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        model = Model(coords=coords, terrain=TerrainData.from_coords(coords),
+                      physics=speedy_physics(checkpoint_terms=False))
+        cls.ds = model.run(save_interval=1.0, total_time=1.0).to_xarray().isel(time=-1)
+
+    def test_radiation_fields_are_speedys_own_fluxes(self):
+        ds = self.ds
+        np.testing.assert_allclose(ds["radiation.toa_lw_up"], ds["longwave_rad.ftop"], rtol=1e-6)
+        np.testing.assert_allclose(
+            ds["radiation.toa_sw_down"] - ds["radiation.toa_sw_up"], ds["shortwave_rad.ftop"],
+            rtol=1e-5, atol=1e-3)
+        # the clear-sky fields are populated (the cloud effects themselves are tested in
+        # speedy_shortwave_test; a day from isothermal rest has no cloud yet)
+        self.assertGreater(float(ds["radiation.toa_lw_up_clear"].min()), 100.0)
+        self.assertGreater(float(ds["radiation.toa_sw_up_clear"].max()), 0.0)
+        cover = ds["radiation.total_cloud_cover"]
+        self.assertTrue(bool(((cover >= ds["shortwave_rad.cloudc"] - 1e-6) & (cover <= 1.0 + 1e-6)).all()))
+
+    def test_surface_longwave_fields_are_the_fluxes_through_the_surface(self):
+        """SPEEDY's rlds / rlus are the absorbed and emitted parts; the published
+        fields are the full fluxes (CMIP rlds / rlus), with the same net.
+        """
+        ds = self.ds
+        emisfc = float(Parameters.default().mod_radcon.emisfc)
+        absorbed, emitted = ds["surface_flux.rlds"], ds["surface_flux.rlus"]
+        down, up = ds["radiation.surface_lw_down"], ds["radiation.surface_lw_up"]
+        np.testing.assert_allclose(down, absorbed / emisfc, rtol=1e-6)
+        np.testing.assert_allclose(up, emitted + (1.0 - emisfc) * down, rtol=1e-6)
+        np.testing.assert_allclose(up - down, emitted - absorbed, rtol=1e-4, atol=1e-2)
+
+    def test_layer_pressures_span_the_column(self):
+        ds = self.ds
+        ps = ds["normalized_surface_pressure"] * 1.0e5
+        # the diagnostics are from the physics call, the state's pressure from after the step
+        np.testing.assert_allclose(ds["pressure_thickness"].sum("level"), ps, rtol=2e-4)
+        self.assertTrue(bool((ds["pressure_full"] < ps).all()))
 
 if __name__ == "__main__":
     unittest.main()

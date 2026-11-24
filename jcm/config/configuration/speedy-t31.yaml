@@ -18,7 +18,9 @@
 #    composes no SSO scheme (interpolation would otherwise corrupt the
 #    sub-grid-orography statistics).
 #  - forcing from the mirror's present-day T63 bundle (interpolated to T31).
-#  - run.time_step=15 min on the default (short) run group.
+#  - run.time_step=30 min on the default (short) run group: the step the Python Model takes for
+#    this physics on this grid (SpeedySurfaceFlux.stable_time_step_minutes, capped at 30), so
+#    the CLI and the Python API integrate, and are calibrated at, the same step.
 defaults:
   - override /physics: speedy
   - override /grid: speedy_t31_l8
@@ -32,4 +34,125 @@ forcing:
   align: wrap_year
   file: hf://bundles/t63/forcing_pd.nc
 run:
-  time_step: 15
+  time_step: 30
+# SPEEDY's parameters for this configuration, calibrated for coupled use: the TOA budget and the
+# surface fluxes it hands an ocean or land (docs/source/design/speedy_retune.md, which has the
+# recipe, the result against the observations and the biases that remain). Two fits, in order:
+#  - the clear-sky longwave, fitted as one set to RRTMGP on this model's own columns
+#    (docs/source/design/speedy_longwave_fit.md) and then held;
+#  - the cloud, shortwave, convection, condensation and surface-flux values, fitted around it
+#    with JEM-Cal's Gauss-Newton driver (host speedy-t31: one-year arms at this 30-minute step
+#    against CERES, GPCP, ERA5, ESA-CCI and MERRA-2 at T31).
+# Each comment says what the value sets; SPEEDY's reference value is in brackets, and "bound"
+# marks a value the fit left on an end of its range (the ranges are in the design page). A
+# record several terms hold is set in every holder through its anchor.
+physics:
+  terms:
+    speedy_clouds:
+      sw_params: &speedy_sw
+        # Clear-sky backscatter per unit slant air mass (jcm's addition; SPEEDY's clear sky only
+        # absorbs) [0]: puts the reflection the reference tuning gets from over-bright cloud in
+        # the clear sky, where CERES has it (ocean clear-sky reflected SW within 0.1 W/m2).
+        refclr: 0.07588
+        # Cloud-top albedo of the total cover [0.43] and of the stratocumulus cover [0.50,
+        # lower bound]: with refclr, the SW CRE (3 W/m2 too strong at 0.06 too little cover).
+        albcl: 0.4469
+        albcls: 0.2
+        # RH at which the total cover starts [0.30, upper bound] and is complete [1.0], and the
+        # maximum stratocumulus cover [0.60]: how much cloud the shortwave sees. A late start
+        # and an early finish make the cover steep in RH.
+        rhcl1: 0.55
+        rhcl2: 0.8595
+        clsmax: 0.6471
+        # Window absorptivity of cloud at and below the cloud top [12] and above it [0.6, lower
+        # bound]: the LW CRE per unit cover. Both are below SPEEDY's: the fitted window band
+        # carries about a third of a warm surface's emission, against a fifth with SPEEDY's
+        # band fractions, so cloud of a given absorptivity traps more.
+        ablcl1: 5.301
+        ablcl2: 0.3
+        # Shortwave absorptivities of dry air [0.033], aerosol [0.033] and water vapour in the
+        # visible [0.022] and near-infrared [15] bands: the split of the absorbed shortwave
+        # between atmosphere and surface, so the surface insolation (within 1 W/m2 of CERES;
+        # 13 above at SPEEDY's values).
+        absdry: 0.02802
+        absaer: 0.01703
+        abswv1: 0.0588
+        abswv2: 27.89
+        # The clear-sky longwave, fitted to RRTMGP on this model's own columns (TOA and surface
+        # fluxes, layer flux convergence and the 2xCO2 response): window absorptivity of air
+        # [0.3] and its water-vapour continuum term ablwvc * q^2 * p/p0 [0], and the weak [0.7]
+        # and strong [50] water-vapour band absorptivities.
+        ablwin: 0.3397
+        ablwvc: 0.02509
+        ablwv1: 2.465
+        ablwv2: 57.83
+    speedy_shortwave_radiation:
+      sw_params: *speedy_sw
+      mod_radcon_params: &speedy_mod_radcon
+        # The rest of the same longwave fit, in the record the forcing, radiation and surface
+        # terms share: CO2-band absorptivity at the reference concentration [6.0], the "black"
+        # fraction outside the four bands [0.05], and the band fractions a + b (T - t0)^2 of the
+        # CO2 [0.148, -3.0e-6, 247], weak water-vapour [0.356, -5.2e-6, 282] and strong
+        # water-vapour [0.314, 1.0e-5, 315] bands.
+        ablco2_ref: 4.181
+        epslw: 0.04947
+        fbco2_a: 0.2863
+        fbco2_b: -5.688e-6
+        fbco2_t0: 119.2
+        fbwv1_a: 0.3080
+        fbwv1_b: -3.395e-5
+        fbwv1_t0: 247.3
+        fbwv2_a: 0.2941
+        fbwv2_b: 4.322e-5
+        fbwv2_t0: 268.9
+    speedy_forcing:
+      mod_radcon_params: *speedy_mod_radcon
+    speedy_downward_longwave:
+      mod_radcon_params: *speedy_mod_radcon
+    speedy_upward_longwave:
+      mod_radcon_params: *speedy_mod_radcon
+    speedy_convection:
+      convection_params:
+        # Where and how hard convection acts, which with the condensation values below sets
+        # the precipitation against the precipitable water and the humidity of each layer:
+        # boundary-layer RH that triggers it [0.9]; relaxation time [6 h]; RH below which the
+        # secondary mass flux moistens the intermediate layers [0.7] and that flux's ratio to
+        # the primary one [0.8]; maximum entrainment [0.5]; minimum surface pressure for
+        # convection [0.8, lower bound: convection over all but the highest terrain].
+        rhbl: 0.8577
+        trcnv: 5.641
+        rhil: 0.6849
+        smf: 1.173
+        entmax: 0.8608
+        psmin: 0.65
+    speedy_large_scale_condensation:
+      condensation_params:
+        # RH threshold of large-scale condensation at sigma = 1 [0.9], its fall towards the top
+        # [0.1], and the relaxation time [4 h]: the large-scale share of the precipitation and
+        # the humidity the cloud cover is diagnosed from.
+        rhlsc: 0.867
+        drhlsc: 0.02058
+        trlsc: 2.39
+    speedy_surface_flux:
+      mod_radcon_params: *speedy_mod_radcon
+      surface_params:
+        # Heat and moisture exchange coefficients over sea [9.0e-4] and land [1.2e-3, upper
+        # bound]: the turbulent fluxes (global sensible and latent heat within 2 W/m2 of
+        # MERRA-2; the land/ocean split is not, see the design page).
+        chs: 0.000956
+        chl: 0.002832
+        # Near-surface extrapolation weights of humidity [0, lower bound: the reference] and
+        # temperature [1]; amplitude [0.67] and saturation temperature difference [3 K, lower
+        # bound] of the stability correction; gust speed [5 m/s]. They set the air-surface
+        # contrasts the bulk formulae see, so the Bowen ratio, which one exchange coefficient
+        # per surface cannot.
+        fhum0: 0.0
+        ftemp0: 0.9152
+        fstab: 0.6362
+        dtheta: 1.5
+        vgust: 4.327
+    speedy_vertical_diffusion:
+      vdiff_params:
+        # Shallow-convection relaxation time [6 h]: how fast the boundary layer's moisture and
+        # heat are exported to the layer above.
+        trshc: 20.64

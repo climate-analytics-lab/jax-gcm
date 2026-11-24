@@ -138,6 +138,8 @@ class TestSurfacePhysicsStep:
         
         # Atmospheric forcing
         self.atmospheric_state = AtmosphericForcing(
+            reference_height=jnp.full(self.ncol, 60.0),
+            heat_2m_reduction=jnp.full((self.ncol, self.nsfc_type), 0.7),
             temperature=jnp.array([290.0, 285.0]),
             humidity=jnp.array([0.01, 0.008]),
             u_wind=jnp.array([5.0, 3.0]),
@@ -399,6 +401,8 @@ class TestSurfacePhysicsStepGradients:
         """Lowest-level atmospheric forcing for ``ncol`` columns."""
         nsfc_type = 3
         return AtmosphericForcing(
+            reference_height=jnp.full(ncol, 60.0),
+            heat_2m_reduction=jnp.full((ncol, 3), 0.7),
             temperature=jnp.linspace(290.0, 284.0, ncol),
             humidity=jnp.linspace(0.010, 0.007, ncol),
             u_wind=u_wind,
@@ -455,18 +459,22 @@ class TestSurfacePhysicsStepGradients:
         from the air temperature by a few kelvin, so no flux sits on a sign
         change.
         """
-        u_wind = jnp.linspace(6.0, 3.0, ncol)
-        v_wind = jnp.linspace(2.5, 4.5, ncol)
-        atmospheric_state = self._forcing(ncol, u_wind, v_wind)
-        surface_state = self._state(ncol)
-        args = (u_wind, v_wind, atmospheric_state.temperature,
-                atmospheric_state.humidity,
-                atmospheric_state.exchange_coeff_heat,
-                atmospheric_state.exchange_coeff_momentum,
-                atmospheric_state.exchange_coeff_moisture,
-                surface_state.ocean_temp)
-        check_gradients(self._step(ncol, atmospheric_state, surface_state),
-                        args, rtol=1e-3)
+        # Float64 resolves the finite-difference subtraction across the full
+        # mixed-unit output bundle; retain the strict AD/reference tolerance.
+        # Float32 calm/degenerate-state gradient checks remain below.
+        with jax.enable_x64(True):
+            u_wind = jnp.linspace(6.0, 3.0, ncol)
+            v_wind = jnp.linspace(2.5, 4.5, ncol)
+            atmospheric_state = self._forcing(ncol, u_wind, v_wind)
+            surface_state = self._state(ncol)
+            args = (u_wind, v_wind, atmospheric_state.temperature,
+                    atmospheric_state.humidity,
+                    atmospheric_state.exchange_coeff_heat,
+                    atmospheric_state.exchange_coeff_momentum,
+                    atmospheric_state.exchange_coeff_moisture,
+                    surface_state.ocean_temp)
+            check_gradients(self._step(ncol, atmospheric_state, surface_state),
+                            args, rtol=1e-3)
 
     def test_calm_wind_gradients_are_finite(self):
         """``u = v = 0``: every wind norm in the step is at its cone tip.
@@ -642,6 +650,270 @@ class TestEchamSurfaceTerm:
         np.testing.assert_allclose(np.asarray(surface.momentum_flux_u), 0.08)
         np.testing.assert_allclose(np.asarray(surface.momentum_flux_v), -0.02)
 
+    def test_bulk_reference_fluxes_are_published_not_discarded(self):
+        """``surface_physics_step``'s explicit bulk flux is now published
+        (jax-gcm#1118), not computed-and-thrown-away every step.
+
+        It is a SEPARATE, explicit one-shot bulk-aerodynamic estimate from
+        the vdiff-delivered flux this term republishes above, so it need not
+        equal it exactly — but with a nonzero air/surface temperature and
+        humidity difference and a nonzero exchange coefficient it must be
+        finite and nonzero, which a value that was never computed (left at
+        its ``SurfaceData.zeros()`` default) would not be.
+        """
+        from types import SimpleNamespace
+
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+
+        nlev, ncols = 6, 1
+        z_half = jnp.linspace(6000.0, 0.0, nlev + 1)[:, None]
+        z_full = 0.5 * (z_half[:-1] + z_half[1:])
+        p_half = jnp.linspace(5.0e4, 1.0e5, nlev + 1)[:, None]
+        p_full = 0.5 * (p_half[:-1] + p_half[1:])
+
+        state = PhysicsState(
+            u_wind=jnp.full((nlev, ncols), 8.0),
+            v_wind=jnp.full((nlev, ncols), 2.0),
+            temperature=jnp.full((nlev, ncols), 290.0),
+            specific_humidity=jnp.full((nlev, ncols), 0.008),
+            geopotential=9.81 * z_full,
+            normalized_surface_pressure=jnp.ones((ncols,)),
+            tracers={},
+        )
+        vdiff = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            surface_evaporation=jnp.array([3.0e-5]),
+            surface_sensible_heat=jnp.array([12.0]),
+            surface_latent_heat=jnp.array([75.0]),
+            surface_stress_u=jnp.array([0.08]),
+            surface_stress_v=jnp.array([-0.02]),
+            surface_exchange_heat=jnp.full((ncols, 3), 0.01),
+            surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
+            surface_exchange_momentum=jnp.full((ncols, 3), 0.012),
+        )
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": p_full,
+            "pressure_half": p_half,
+            "height_full": z_full,
+            "height_half": z_half,
+            # A warmer-than-air SST with a nonzero exchange coefficient gives
+            # the bulk formula a nonzero sensible/latent heat to compute.
+            "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                surface_temperature=jnp.array([300.0]),
+                roughness_length=jnp.array([1e-4]),
+            ),
+            "vertical_diffusion": vdiff,
+            "radiation": SimpleNamespace(
+                surface_sw_down=jnp.zeros(ncols),
+                surface_lw_down=jnp.full(ncols, 350.0),
+            ),
+        }
+        terrain = TerrainData.single_column(fmask=0.0)
+        forcing = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=jnp.full((1, 1), 300.0),
+        )
+
+        term = EchamSurface()
+        _, out = term(state, diagnostics, forcing, terrain)
+        surface = out["surface"]
+
+        assert jnp.all(jnp.isfinite(surface.bulk_sensible_heat_flux))
+        assert jnp.all(jnp.isfinite(surface.bulk_latent_heat_flux))
+        assert jnp.all(jnp.isfinite(surface.bulk_evaporation))
+        assert jnp.all(jnp.isfinite(surface.bulk_momentum_flux_u))
+        assert jnp.all(jnp.isfinite(surface.bulk_momentum_flux_v))
+        # A warmer ocean than the 290 K air, with a nonzero exchange
+        # coefficient: the bulk sensible heat must be a real, nonzero
+        # (positive, upward) estimate, not the zeros() default.
+        assert float(surface.bulk_sensible_heat_flux[0]) > 0.0
+
+    def test_surface_layer_diagnostics_are_published_not_discarded(self):
+        """``compute_surface_diagnostics``'s bundle is now published
+        (jax-gcm#1140), not computed-and-thrown-away every step.
+
+        Same composed-step setup as the bulk-flux test above (300 K SST,
+        290 K / 0.008 kg/kg air, nonzero exchange): every published field
+        must be finite and physically sane, and different from the
+        ``SurfaceData.zeros()`` default a step that never wired this bundle
+        through would leave them at.
+        """
+        from types import SimpleNamespace
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+
+        nlev, ncols = 6, 1
+        z_half = jnp.linspace(6000.0, 0.0, nlev + 1)[:, None]
+        z_full = 0.5 * (z_half[:-1] + z_half[1:])
+        p_half = jnp.linspace(5.0e4, 1.0e5, nlev + 1)[:, None]
+        p_full = 0.5 * (p_half[:-1] + p_half[1:])
+
+        state = PhysicsState(
+            u_wind=jnp.full((nlev, ncols), 8.0),
+            v_wind=jnp.full((nlev, ncols), 2.0),
+            temperature=jnp.full((nlev, ncols), 290.0),
+            specific_humidity=jnp.full((nlev, ncols), 0.008),
+            geopotential=9.81 * z_full,
+            normalized_surface_pressure=jnp.ones((ncols,)),
+            tracers={},
+        )
+        vdiff = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            surface_evaporation=jnp.array([3.0e-5]),
+            surface_sensible_heat=jnp.array([12.0]),
+            surface_latent_heat=jnp.array([75.0]),
+            surface_stress_u=jnp.array([0.08]),
+            surface_stress_v=jnp.array([-0.02]),
+            heat_2m_reduction=jnp.full((ncols, 3), 0.7),
+            surface_exchange_heat=jnp.full((ncols, 3), 0.01),
+            surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
+            surface_exchange_momentum=jnp.full((ncols, 3), 0.012),
+        )
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": p_full,
+            "pressure_half": p_half,
+            "height_full": z_full,
+            "height_half": z_half,
+            "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                surface_temperature=jnp.array([300.0]),
+                roughness_length=jnp.array([1e-4]),
+            ),
+            "vertical_diffusion": vdiff,
+            "radiation": SimpleNamespace(
+                surface_sw_down=jnp.zeros(ncols),
+                surface_lw_down=jnp.full(ncols, 350.0),
+            ),
+        }
+        terrain = TerrainData.single_column(fmask=0.0)
+        forcing = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=jnp.full((1, 1), 300.0),
+        )
+
+        term = EchamSurface()
+        _, out = term(state, diagnostics, forcing, terrain)
+        surface = out["surface"]
+
+        for name in ("temperature_2m", "humidity_2m", "dewpoint_2m",
+                     "richardson_number", "energy_balance_residual",
+                     "temperature_2m_tile", "humidity_2m_tile"):
+            value = getattr(surface, name)
+            assert jnp.all(jnp.isfinite(value)), name
+            # None of these is left at its zeros() default: a warm 300 K
+            # SST under 290 K air gives every one of them a real, nonzero
+            # value in this setup.
+            assert jnp.any(value != 0.0), name
+
+        # With this profile factor the 2 m temperature lies between the
+        # input temperatures; the tile-capped dew point cannot exceed it.
+        assert 290.0 < float(surface.temperature_2m[0]) < 300.0
+        assert float(surface.dewpoint_2m[0]) <= float(surface.temperature_2m[0])
+
+    def test_bulk_land_flux_tracks_the_live_skin_not_stl_am(self):
+        """The land tile's bulk flux reads the LIVE skin temperature.
+
+        jax-gcm#1118 Codex review: the published ``surface.bulk_*`` land
+        contribution used to read ``forcing.stl_am`` unconditionally, a
+        synthetic value that silently diverges from the implicit solve's
+        own (possibly prognostic) land state once the skin temperature
+        evolves. ``forcing.stl_am`` is held FIXED across both runs below;
+        only ``diagnostics["surface"].land_surface_temperature`` (what
+        ``TteTkeVerticalDiffusion`` actually published this step) differs.
+        If the fix regressed back to reading ``stl_am``, the two runs would
+        be identical.
+        """
+        from types import SimpleNamespace
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+
+        nlev, ncols = 6, 1
+        z_half = jnp.linspace(6000.0, 0.0, nlev + 1)[:, None]
+        z_full = 0.5 * (z_half[:-1] + z_half[1:])
+        p_half = jnp.linspace(5.0e4, 1.0e5, nlev + 1)[:, None]
+        p_full = 0.5 * (p_half[:-1] + p_half[1:])
+
+        state = PhysicsState(
+            u_wind=jnp.full((nlev, ncols), 5.0),
+            v_wind=jnp.zeros((nlev, ncols)),
+            temperature=jnp.full((nlev, ncols), 290.0),
+            specific_humidity=jnp.full((nlev, ncols), 0.006),
+            geopotential=9.81 * z_full,
+            normalized_surface_pressure=jnp.ones((ncols,)),
+            tracers={},
+        )
+        vdiff = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            surface_exchange_heat=jnp.full((ncols, 3), 0.01),
+            surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
+            surface_exchange_momentum=jnp.full((ncols, 3), 0.012),
+        )
+        terrain = TerrainData.single_column(fmask=1.0)  # all land
+        # stl_am is identical in both runs; only the LIVE carried skin
+        # temperature differs.
+        forcing = ForcingData.zeros((1, 1)).copy(
+            stl_am=jnp.full((1, 1), 280.0),
+            sea_surface_temperature=jnp.full((1, 1), 280.0),
+        )
+
+        def run(live_land_temp):
+            diagnostics = {
+                "_dt_seconds": 900.0,
+                "pressure_full": p_full,
+                "pressure_half": p_half,
+                "height_full": z_full,
+                "height_half": z_half,
+                "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                    surface_temperature=jnp.array([280.0]),
+                    roughness_length=jnp.array([0.01]),
+                    land_surface_temperature=jnp.array([live_land_temp]),
+                    csat=jnp.array([0.6]),
+                ),
+                "vertical_diffusion": vdiff,
+                "radiation": SimpleNamespace(
+                    surface_sw_down=jnp.zeros(ncols),
+                    surface_lw_down=jnp.full(ncols, 300.0),
+                ),
+            }
+            term = EchamSurface()
+            _, out = term(state, diagnostics, forcing, terrain)
+            return out["surface"]
+
+        # Scenario A: the carried skin happens to equal stl_am (280 K) — the
+        # old, buggy behaviour and the fixed behaviour agree here by
+        # coincidence, so this run alone would not catch a regression.
+        cold = run(280.0)
+        # Scenario B: a prognostic skin well above stl_am (320 K), as a real
+        # land-energy-balance solve would produce under strong heating.
+        warm = run(320.0)
+
+        assert jnp.all(jnp.isfinite(cold.bulk_sensible_heat_flux))
+        assert jnp.all(jnp.isfinite(warm.bulk_sensible_heat_flux))
+        # If the land contribution still read stl_am (fixed at 280 K in both
+        # runs), these would be equal. Reading the live skin instead, the
+        # 320 K run must show substantially MORE upward sensible heat than
+        # the 280 K run.
+        assert (float(warm.bulk_sensible_heat_flux[0])
+                > float(cold.bulk_sensible_heat_flux[0]) + 10.0)
+
 
 class TestLongwaveReEmission:
     """The cached surface longwave follows the skin temperature (ECHAM ``radheat``, #979)."""
@@ -686,12 +958,25 @@ class TestLongwaveReEmission:
             out2.surface_lw_up[0],
             450.0 + d_up - 4.0 * 0.95 * c.sbc * 302.0 ** 3 * 2.0, rtol=1e-6)
 
-    def test_term_publishes_the_new_skin_and_its_emission(self):
+    def test_term_publishes_the_new_skin_and_its_emission(self, monkeypatch):
         """``EchamSurface`` after the land balance: the grid surface temperature is
         the new skin, the only tendency is the lowest-level re-emission, and that
         heating advances the running thermodynamic state the later terms read.
         """
         import numpy as np
+        from jcm.physics.surface.echam import surface_physics as surface_module
+        import jcm.constants as c
+
+        captured = {}
+        original_step = surface_module.surface_physics_step
+
+        def record_profiles(atmosphere, *args, **kwargs):
+            captured["atmosphere"] = atmosphere
+            result = original_step(atmosphere, *args, **kwargs)
+            captured["diagnostics"] = result[2]
+            return result
+
+        monkeypatch.setattr(surface_module, "surface_physics_step", record_profiles)
 
         from jcm.forcing import ForcingData
         from jcm.physics.surface.echam.surface_physics import EchamSurface
@@ -715,11 +1000,13 @@ class TestLongwaveReEmission:
             "_dt_seconds": 720.0,
             "pressure_full": 0.5 * (p_half[:-1] + p_half[1:]), "pressure_half": p_half,
             "height_full": 0.5 * (z_half[:-1] + z_half[1:]),
+            "height_half": z_half,
             "surface": SurfaceData.zeros((ncols,), nlev).copy(
                 surface_temperature=jnp.array([300.0]),
                 land_surface_temperature=jnp.array([303.0]),
                 roughness_length=jnp.array([0.01])),
             "vertical_diffusion": VerticalDiffusionData.zeros((ncols,), nlev).copy(
+                heat_2m_reduction=jnp.full((ncols, 3), .61),
                 surface_exchange_heat=jnp.full((ncols, 3), 0.01),
                 surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
                 surface_exchange_momentum=jnp.full((ncols, 3), 0.012)),
@@ -731,6 +1018,22 @@ class TestLongwaveReEmission:
             sea_surface_temperature=jnp.full((1, 1), 290.0))
         tend, out = EchamSurface()(state, diagnostics, forcing,
                                    TerrainData.single_column(fmask=1.0))
+        # ECHAM hydrostatic pgeom1/g from the lowest pressure interfaces,
+        # independent of the deliberately different geometric-height fixture.
+        p_upper, p_surface = np.asarray(p_half[-2:, 0], dtype=float)
+        delta_p = p_surface - p_upper
+        alpha = 1. - p_upper / delta_p * np.log(p_surface / p_upper)
+        expected_height = c.rd * 295. * (1. + c.vtmpc1 * .008) * alpha / c.grav
+        np.testing.assert_allclose(captured["atmosphere"].reference_height,
+                                   expected_height, rtol=2e-6)
+        np.testing.assert_allclose(captured["atmosphere"].heat_2m_reduction, .61)
+        # SurfaceData.zeros supplies cair=csat=0, so the JSBACH boundary
+        # here is q_surface=q_air. Both ends share the same moist cp.
+        cp_moist = c.cpd * (1. + c.vtmpc2 * .008)
+        expected_t2 = (303. + .61 * (295. - 303. + c.grav * expected_height / cp_moist)
+                       - c.grav * 2. / cp_moist)
+        np.testing.assert_allclose(captured["diagnostics"].temperature_2m,
+                                   expected_t2, atol=3e-5)
         np.testing.assert_allclose(out["surface"].surface_temperature, 303.0)
         assert float(out["radiation"].surface_lw_up[0]) > 450.0 + 15.0
         heat = np.asarray(tend.temperature)
@@ -745,6 +1048,238 @@ class TestLongwaveReEmission:
         assert run["temperature"][-1, 0] > state.temperature[-1, 0]
         np.testing.assert_array_equal(run["temperature"][:-1], state.temperature[:-1])
         np.testing.assert_array_equal(run["specific_humidity"], state.specific_humidity)
+
+    def test_t_grid_new_mirrors_the_boundary_conditions_tile_weighting(self):
+        """``t_grid_new`` (the re-emission's "new" surface temperature, #988)
+        must use the SAME tile weighting as ``EchamBoundaryConditions``'
+        ``surface_temperature`` -- a coastal cell with sea ice, checked
+        against :func:`tile_weighted_radiative_temperature` directly.
+        """
+        import numpy as np
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.forcing.echam_boundary_conditions import (
+            tile_weighted_radiative_temperature,
+        )
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+
+        nlev, ncols = 4, 1
+        z_half = jnp.linspace(4000.0, 0.0, nlev + 1)[:, None]
+        p_half = jnp.linspace(6.0e4, 1.0e5, nlev + 1)[:, None]
+        state = PhysicsState(
+            u_wind=jnp.full((nlev, ncols), 5.0), v_wind=jnp.zeros((nlev, ncols)),
+            temperature=jnp.full((nlev, ncols), 270.0),
+            specific_humidity=jnp.full((nlev, ncols), 0.004),
+            geopotential=9.81 * 0.5 * (z_half[:-1] + z_half[1:]),
+            normalized_surface_pressure=jnp.ones((ncols,)), tracers={})
+        new_land_skin = jnp.array([250.0])
+        sst = jnp.array([[295.0]])
+        diagnostics = {
+            "_dt_seconds": 720.0,
+            "pressure_full": 0.5 * (p_half[:-1] + p_half[1:]), "pressure_half": p_half,
+            "height_full": 0.5 * (z_half[:-1] + z_half[1:]),
+            "height_half": z_half,
+            "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                surface_temperature=jnp.array([280.0]),  # last step's blend
+                land_surface_temperature=new_land_skin,
+                roughness_length=jnp.array([0.01])),
+            "vertical_diffusion": VerticalDiffusionData.zeros((ncols,), nlev).copy(
+                surface_exchange_heat=jnp.full((ncols, 3), 0.01),
+                surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
+                surface_exchange_momentum=jnp.full((ncols, 3), 0.012)),
+            "radiation": self._radiation(ncols, nlev),
+            "thermo_run": {"temperature": state.temperature,
+                           "specific_humidity": state.specific_humidity},
+        }
+        forcing = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=sst, sice_am=jnp.array([[0.2]]))
+        land_fraction, sea_ice_fraction = 0.4, 0.2
+        terrain = TerrainData.single_column(fmask=land_fraction)
+        out = EchamSurface()(state, diagnostics, forcing, terrain)[1]
+
+        ice_surface_temp = jnp.minimum(sst.reshape(1), 271.38)  # CTFREEZ
+        expect = tile_weighted_radiative_temperature(
+            jnp.array([land_fraction]), jnp.array([sea_ice_fraction]),
+            new_land_skin, ice_surface_temp, sst.reshape(1))
+        np.testing.assert_allclose(
+            np.asarray(out["surface"].surface_temperature), np.asarray(expect),
+            rtol=1e-6)
+        # Sanity: strictly between the coldest and warmest tile.
+        got = float(out["surface"].surface_temperature[0])
+        assert got > float(new_land_skin[0])
+        assert got < float(sst[0, 0])
+
+
+class TestSurfaceDiagnosticsLandInTheNetCDF:
+    """The new ``surface.<field>`` diagnostics (jax-gcm#1140) get their CF
+    attrs stamped onto the output Dataset through the SAME
+    ``_apply_term_output_attrs`` mechanism ``surface.bulk_*`` (#1118) goes
+    through — the function both trajectory paths call to merge a term's
+    ``output_attrs`` onto whatever variables of that name the generic
+    diagnostics-flattening pipeline already produced (one per
+    ``SurfaceData`` field; that flattening is exercised generically
+    elsewhere, and directly below for the tile fields specifically, since a
+    #1151 Codex review found the SCALAR fields' bare names match what the
+    flattener actually produces but the TILE fields' did not).
+    """
+
+    def test_new_diagnostics_get_their_cf_attrs_stamped(self):
+        from types import SimpleNamespace
+
+        import numpy as np
+        import xarray as xr
+
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.predictions import _apply_term_output_attrs
+
+        # ``_apply_term_output_attrs`` is always called with the
+        # CALLABLE ``ComposablePhysics.output_attrs`` (it merges every
+        # term's own, plain-dict ``output_attrs`` ClassVar); stand in for
+        # that merge with the one term under test, the way
+        # ``ComposablePhysics.output_attrs()`` would for a package that
+        # included it.
+        physics = SimpleNamespace(output_attrs=lambda: EchamSurface.output_attrs)
+
+        # The tile variables are named ``surface.<field>_tile.<index>`` —
+        # ONE variable per tile, no "tile" dimension — because that's what
+        # the generic flattener actually produces (it expands a trailing
+        # tile AXIS into separate per-index variables before this function
+        # ever sees them); a hand-built Dataset that kept the axis as a
+        # dimension (the pre-fix version of this test) exercised a shape
+        # ``_apply_term_output_attrs`` never sees for real, which is why it
+        # did not catch the #1151 Codex finding that the bare
+        # ``surface.<field>_tile`` keys matched nothing.
+        ds = xr.Dataset({
+            "surface.temperature_2m": (("time",), np.array([282.0, 283.0])),
+            "surface.humidity_2m": (("time",), np.array([5.0e-3, 5.1e-3])),
+            "surface.dewpoint_2m": (("time",), np.array([278.0, 279.0])),
+            "surface.richardson_number": (("time",), np.array([0.0, 0.1])),
+            "surface.energy_balance_residual": (("time",), np.array([0.0, 1.0])),
+            **{f"surface.temperature_2m_tile.{i}": (("time",), np.zeros(2))
+               for i in range(3)},
+            **{f"surface.humidity_2m_tile.{i}": (("time",), np.zeros(2))
+               for i in range(3)},
+            # Not EchamSurface's field: must be left untouched.
+            "unrelated.variable": (("time",), np.array([1.0, 2.0])),
+        })
+
+        _apply_term_output_attrs(ds, physics)
+
+        for name, expect_units in (
+            ("surface.temperature_2m", "K"),
+            ("surface.humidity_2m", "kg kg-1"),
+            ("surface.dewpoint_2m", "K"),
+            ("surface.richardson_number", "1"),
+            ("surface.energy_balance_residual", "W m-2"),
+        ):
+            assert ds[name].attrs["units"] == expect_units
+            assert "long_name" in ds[name].attrs
+
+        from jcm.physics.surface.echam.surface_types import DIAG_TILE_NAMES
+
+        for field, expect_units in (
+            ("temperature_2m_tile", "K"), ("humidity_2m_tile", "kg kg-1"),
+        ):
+            for index, tile_name in enumerate(DIAG_TILE_NAMES):
+                name = f"surface.{field}.{index}"
+                assert ds[name].attrs["units"] == expect_units
+                assert "long_name" in ds[name].attrs
+                assert ds[name].attrs["surface_type"] == tile_name
+                assert ds[name].attrs["tile_index"] == index
+
+        assert ds["unrelated.variable"].attrs == {}
+
+
+from typing import ClassVar as _ClassVar  # noqa: E402
+
+
+def _stub_provider_term(provides):
+    """Build a ``PhysicsTerm`` that satisfies ``_validate_ordering`` and
+    nothing else -- never called, so its missing ``__call__`` implementation
+    never matters.
+    """
+    from jcm.physics.physics_term import PhysicsTerm
+
+    class _StubProvider(PhysicsTerm):
+        name: _ClassVar[str] = "stub_provider"
+
+    _StubProvider.provides = tuple(provides)
+    return _StubProvider()
+
+
+class TestSurfaceDiagnosticsTileExpansion:
+    """Separate class: needs ``ComposablePhysics`` + a stub upstream term,
+    unlike the hand-built-Dataset tests above.
+    """
+
+    def test_tile_axis_expands_through_the_real_flattener_with_attrs(self):
+        """End-to-end, not hand-built: ``ComposablePhysics.data_struct_to_dict``
+        (the SAME code path a real run's output goes through) must actually
+        expand ``surface.temperature_2m_tile``/``humidity_2m_tile`` into the
+        ``.0``/``.1``/``.2`` names ``DIAG_OUTPUT_ATTRS`` now declares — not
+        just that the declared names happen to look right in isolation. A
+        #1151 Codex review found the previous bare-name entries matched
+        nothing the real flattener ever produced; this exercises that
+        flattener directly, then stamps the result onto an actual
+        serialized ``xr.Dataset`` and checks the expanded variables carry
+        units.
+        """
+        import numpy as np
+        import xarray as xr
+
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import (
+            DIAG_TILE_FIELDS, DIAG_TILE_NAMES, SurfaceData,
+        )
+        from jcm.predictions import _apply_term_output_attrs
+
+        nlev, nlat, nlon = 3, 2, 2
+        surface = SurfaceData.zeros((nlat, nlon), nlev).copy(
+            temperature_2m_tile=jnp.arange(nlat * nlon * 3, dtype=jnp.float32)
+            .reshape(nlat, nlon, 3),
+            humidity_2m_tile=1.0e-3 * jnp.arange(
+                nlat * nlon * 3, dtype=jnp.float32).reshape(nlat, nlon, 3),
+        )
+        # A leading length-1 axis, exactly as a real run's "time" axis adds
+        # one before ``Physics.data_struct_to_dict``'s tile-expansion step
+        # looks for a trailing channel axis beyond ``nodal_shape``.
+        diagnostics = {"surface": jax.tree_util.tree_map(
+            lambda x: x[None], surface)}
+
+        stub = _stub_provider_term(EchamSurface.requires)
+        phys = ComposablePhysics(terms=[stub, EchamSurface()])
+        flat = phys.data_struct_to_dict(
+            diagnostics, nodal_shape=(nlev, nlat, nlon))
+
+        for field in DIAG_TILE_FIELDS:
+            assert f"surface.{field}" not in flat, (
+                f"surface.{field} was not expanded by the real flattener")
+            for index in range(len(DIAG_TILE_NAMES)):
+                assert f"surface.{field}.{index}" in flat
+
+        output_attrs = phys.output_attrs()
+        ds = xr.Dataset({
+            k: (("time",), np.asarray(v).reshape(-1))
+            for k, v in flat.items() if k.startswith("surface.")
+        })
+        _apply_term_output_attrs(ds, phys)
+
+        for field, expect_units in (
+            ("temperature_2m_tile", "K"), ("humidity_2m_tile", "kg kg-1"),
+        ):
+            for index, tile_name in enumerate(DIAG_TILE_NAMES):
+                key = f"surface.{field}.{index}"
+                assert output_attrs[key]["units"] == expect_units
+                assert ds[key].attrs["units"] == expect_units
+                assert ds[key].attrs["surface_type"] == tile_name
+                assert ds[key].attrs["tile_index"] == index
 
 
 if __name__ == "__main__":
