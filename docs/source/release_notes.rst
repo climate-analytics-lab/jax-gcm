@@ -1,7 +1,7 @@
 Release Notes
 =============
 
-v3.1.0 (2026-11-02)
+v3.1.0 (2026-11-24)
 -------------------
 
 v3.1 makes the ECHAM-HAM M7 aerosol the default JAM configuration. It
@@ -11,7 +11,11 @@ sea-ice surfaces and gridpoint humidity. It adds the MACv2 natural aerosol
 background to the non-JAM ECHAM packages and volcanic SO₂ to both JAM
 presets, recalibrates SPEEDY with its slab land restored, and hosts a spun-up
 initial state for every release configuration on the data mirror. Several of
-these change the climate a configuration produces.
+these change the climate a configuration produces. All eight release-matrix
+members pass their gates on ``3.1.0rc1``: each JAM member's cold year fails
+only the six-month burden-drift line, which reads the seasonal biomass-burning
+and dust sources as drift, and its warm-started second year passes every gate
+(:doc:`design/jam_regression`).
 
 Changed behaviour
 ^^^^^^^^^^^^^^^^^
