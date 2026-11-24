@@ -61,8 +61,16 @@ after the local Bermejo–Conde correction (``dycore.local_mass_fixer``); a
 modal humidity (``nodal_humidity: false``) gets the same proportional factor
 on its coefficients (``dycore.humidity_mass_fixer``). The global water
 budget therefore closes, ``P − E = −dPW/dt``. The Eulerian core is
-flux-consistent and runs no fixer. What each fixer conserves, and the measured
-budgets, are in {doc}`../design/tracer_mass_conservation`.
+flux-consistent and runs no fixer. A tracer declared
+``TracerSpec(conserved=False)`` — one whose physics imposes a *value* (an
+age-of-air clock, a tracer relaxed to a profile) rather than a mass budget — is
+exempt from both stages: it is transported and quasi-monotone-limited like any
+other nodal tracer, but neither the Bermejo–Conde correction nor the global
+factor rescales it, since restoring its pre-transport mass would fight the
+imposed value. Humidity is not a declared tracer and is always fixed. The
+pySES backend runs no mass fixer, so the flag has no effect there. What each
+fixer conserves, and the measured budgets, are in
+{doc}`../design/tracer_mass_conservation`.
 
 **The post-physics state.** ``DynamicalCore.after_physics_state`` returns the
 gridpoint state the dynamics starts from, after the physics tendency is

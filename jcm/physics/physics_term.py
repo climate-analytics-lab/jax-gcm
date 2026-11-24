@@ -49,6 +49,20 @@ class TracerSpec:
         nondimensionalize: whether the tracer is a kg/kg mass mixing ratio
             (see above). Informational ``units`` never drives this; the flag
             does.
+        conserved: whether the dynamics may restore this tracer's global
+            ``integral q dp`` after transport. ``True`` (the default) is a
+            quantity whose mass the physics only changes through explicit
+            sources and sinks, so any other change is transport error and
+            the semi-Lagrangian mass fixers (the local Bermejo-Conde
+            correction and the global proportional factor, see
+            ``docs/source/design/tracer_mass_conservation.md``) remove it.
+            ``False`` declares a tracer whose physics imposes a *value*
+            (an age-of-air clock, a tracer relaxed to a profile): its mass
+            is not a budget, so a fixer would rescale the imposed value
+            toward the pre-transport mass. Transport and the quasi-monotone
+            limiter still apply; only the mass restoration is skipped. Two
+            terms declaring the same tracer must agree on it
+            (``ComposablePhysics.required_tracers`` raises otherwise).
 
     """
 
@@ -56,6 +70,7 @@ class TracerSpec:
     units: str = "kg/kg"
     initial_value: float = 0.0
     nondimensionalize: bool = True
+    conserved: bool = True
 
 
 class PhysicsTerm(nnx.Module):

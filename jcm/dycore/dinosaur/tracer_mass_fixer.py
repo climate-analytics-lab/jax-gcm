@@ -146,6 +146,12 @@ class BermejoCondeTracerTransport:
     """
 
     local_mass_fixer: bool = dataclasses.field(default=False, kw_only=True)
+    # Names of the nodal tracers whose mass is restored. ``None`` means every
+    # nodal tracer; a tracer declared ``TracerSpec(conserved=False)`` is left
+    # out so the correction cannot rescale a value its physics imposes. It
+    # is transported (and limited) like the rest.
+    mass_fixed_tracers: tuple | None = dataclasses.field(
+        default=None, kw_only=True)
 
     # The class it is mixed into supplies ``_tracer_interpolation_geometry(
     # departure) -> (PrimitiveDeparturePoints, VerticalNodes)``: the departure
@@ -156,7 +162,10 @@ class BermejoCondeTracerTransport:
     def semi_lagrangian_transport(self, state, departure):
         """Transport, then restore each nodal tracer's mass locally."""
         out = super().semi_lagrangian_transport(state, departure)
-        nodal = [n for n in self.nodal_tracers if n in state.tracers]
+        fixed_names = (self.nodal_tracers if self.mass_fixed_tracers is None
+                       else self.mass_fixed_tracers)
+        nodal = [n for n in self.nodal_tracers
+                 if n in fixed_names and n in state.tracers]
         if not self.local_mass_fixer or not nodal:
             return out
         grid = self.coords.horizontal

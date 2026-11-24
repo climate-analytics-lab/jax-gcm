@@ -2514,6 +2514,28 @@ class TestTracerSpec(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "qnc"):
             physics.required_tracers()
 
+    def test_conserved_defaults_true_and_disagreement_raises(self):
+        self.assertTrue(TracerSpec("age").conserved)
+
+        def term(flag, nm, cat):
+            class T(PhysicsTerm):
+                name: ClassVar[str] = nm
+                category: ClassVar[str] = cat
+                @classmethod
+                def required_tracers(cls):
+                    return (TracerSpec("age", conserved=flag),)
+                def __call__(self, state, diagnostics, forcing, terrain):
+                    return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+            return T()
+
+        agreed = ComposablePhysics(terms=[term(False, "a", "x"), term(False, "b", "y")])
+        (spec,) = agreed.required_tracers()
+        self.assertFalse(spec.conserved)
+        with self.assertRaisesRegex(ValueError, "age"):
+            ComposablePhysics(
+                terms=[term(False, "a", "x"), term(True, "b", "y")]
+            ).required_tracers()
+
     def test_nondimensionalize_flag_round_trip(self):
         """Tracers with nondimensionalize=False must round-trip unchanged through the converters."""
         from dinosaur import primitive_equations
