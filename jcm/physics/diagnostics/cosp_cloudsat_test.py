@@ -214,6 +214,47 @@ class CalipsoModisTest(unittest.TestCase):
         diag = self._run(enable_calipso=True)
         self.assertGreater(float(np.asarray(diag["cltcalipso"]).max()), 0.0)
 
+    def test_covers_respond_to_the_cloud_fraction(self):
+        """The simulated covers have a derivative in the model cloud fraction.
+
+        A cover is a count of subcolumns, so it is piecewise constant in the
+        cloud fraction SCOPS sampled them from; its derivative comes from
+        jcosp's subcolumn weight alone. The joint driver applies that weight
+        to MODIS itself. The CALIPSO path runs the column stage here, and
+        has to pass it on: without it ``cltcalipso`` keeps its value and its
+        derivative is exactly zero.
+
+        The fixture makes the derivative known. Its cloud decks are thick
+        enough for both instruments to detect every cloudy subcolumn, so
+        the expected cover is the deck's cloud fraction, and its derivative
+        in a scaling of that fraction is the cover itself.
+        """
+        from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
+        term = CloudsatCosp(ncolumns=20, seed=1, enable_calipso=True,
+                            enable_modis=True)
+        state, diagnostics, forcing, terrain = self.setup
+        clouds = diagnostics["clouds"]
+        keys = ("cltcalipso", "cllcalipso", "cltmodis")
+
+        def covers(scale):
+            scaled = clouds.copy(cloud_fraction=clouds.cloud_fraction * scale)
+            out = term(state, {**diagnostics, "clouds": scaled},
+                       forcing, terrain)[1]
+            return {k: jnp.mean(out[k]) for k in keys}
+
+        value, tangent = jax.jvp(covers, (1.0,), (1.0,))
+        for key in keys:
+            cover = float(value[key])
+            self.assertGreater(cover, 0.3, key)
+            # Sampling noise of 20 subcolumns in each of 512 cloudy columns
+            # is about 1 % of the derivative.
+            self.assertAlmostEqual(float(tangent[key]), cover,
+                                   delta=0.05 * cover, msg=key)
+            # Reverse mode is the adjoint of forward mode.
+            grad = jax.grad(lambda s, k=key: covers(s)[k])(1.0)
+            np.testing.assert_allclose(float(grad), float(tangent[key]),
+                                       rtol=1e-4, err_msg=key)
+
     def test_radii_follow_the_condensate_not_the_radiation(self):
         """The simulators form radii from the condensate they read.
 

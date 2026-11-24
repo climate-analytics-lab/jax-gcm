@@ -650,9 +650,18 @@ class CloudsatCosp(PhysicsTerm):
         gridbox means into the in-cloud subcolumn mixing ratios the lidar
         optics expect; the four hydrometeor slots the lidar reads are
         large-scale and convective liquid/ice.
+
+        Reusing the realization means reusing its sampling derivative too:
+        ``cs.subcolumn_weight`` is jcosp's per-subcolumn weight (value
+        exactly one, derivative of the log-probability of that subcolumn's
+        cloud profile under SCOPS), and it is the only route by which a
+        count of subcolumns responds to the cloud fraction. The joint
+        driver threads it through the radar, MODIS and ISCCP itself; this
+        path calls the column stage directly, so it passes the weight to
+        every statistic over subcolumns formed here. No value depends on it.
         """
         from jcosp import config as jconfig
-        from jcosp.constants import R_UNDEF
+        from jcosp import surrogate
         from jcosp.inputs import distribute_hydrometeors
         from jcosp.lidar.diagnostics import lidar_column
         from jcosp.lidar.optics import lidar_optics
@@ -665,7 +674,8 @@ class CloudsatCosp(PhysicsTerm):
             cs.frac_out, cs.prec_frac, inputs.pressure, inputs.temperature,
             inputs.mr_lsliq, inputs.mr_lsice, inputs.mr_ccliq, inputs.mr_ccice,
             inputs.fl_lsrain, inputs.fl_lssnow, inputs.fl_lsgrpl,
-            inputs.fl_ccrain, inputs.fl_ccsnow, reff_in=inputs.reff)
+            inputs.fl_ccrain, inputs.fl_ccsnow, reff_in=inputs.reff,
+            weights=cs.subcolumn_weight)
 
         optics = lidar_optics(
             q_lsliq=sub.mr_hydro[..., jconfig.I_LSCLIQ],
@@ -692,6 +702,10 @@ class CloudsatCosp(PhysicsTerm):
             optics.betatot_ice, optics.tautot_ice,
             optics.betatot_liq, optics.tautot_liq)
 
+        # The widths of the thresholds' derivatives (jcosp's defaults), named
+        # here because the count recomputed below has to use the same one
+        # ``lidar_column`` does.
+        smoothing = surrogate.DEFAULT_SMOOTHING
         col = lidar_column(
             sc.pnorm, sc.pmol, sc.pnorm_perp,
             # COSP passes the LOWER interface of each layer as the category
@@ -701,7 +715,8 @@ class CloudsatCosp(PhysicsTerm):
             # zhalf is each layer's BOTTOM interface, (nlev,) — the same
             # slice the radar inputs take from the (nlev+1) half-level
             # array, not the full interface profile.
-            diagnostics["height_full"], diagnostics["height_half"][1:])
+            diagnostics["height_full"], diagnostics["height_half"][1:],
+            weights=cs.subcolumn_weight, smoothing=smoothing)
 
         # cldlayer is (4, *batch) = low / mid / high / total, in percent,
         # each already a mean over that category's VALID subcolumns
@@ -727,7 +742,12 @@ class CloudsatCosp(PhysicsTerm):
         pplay_r = change_vertical_grid(
             diagnostics["height_full"], diagnostics["height_half"][1:],
             p_half[1:][:, None], jconfig.VGRID_ZL, jconfig.VGRID_ZU)[:, 0]
-        srok = (col.sr > jconfig.CALIPSO_S_ATT) & (col.sr != R_UNDEF)
+        # A 0/1 gate with the comparison's value and, as inside
+        # ``lidar_column``, a logistic step's derivative (R_UNDEF is far
+        # below the threshold: gate 0, no slope).
+        srok = surrogate.gt(
+            col.sr, jconfig.CALIPSO_S_ATT,
+            smoothing.scattering_ratio * jconfig.CALIPSO_S_ATT)
         high_z = (pplay_r > 0.0) & (pplay_r < jconfig.CALIPSO_HIGH_CLOUD_PMAX)
         mid_z = ((pplay_r >= jconfig.CALIPSO_HIGH_CLOUD_PMAX)
                 & (pplay_r < jconfig.CALIPSO_MID_CLOUD_PMAX))
@@ -735,9 +755,12 @@ class CloudsatCosp(PhysicsTerm):
         cats = jnp.stack([low_z, mid_z, high_z, jnp.ones_like(low_z)])
         ncolumns = col.sr.shape[1]
         # (4, *batch): per category, how many of ncolumns subcolumns had a
-        # usable signal anywhere in it (jcosp's "nsublayer").
+        # usable signal anywhere in it (jcosp's "nsublayer"). Each
+        # subcolumn is counted with its weight, so the count carries the
+        # same sampling derivative as the ``cldlayer`` it multiplies.
         nsublayer = jnp.stack([
-            jnp.sum(jnp.any(srok & cat[:, None], axis=0), axis=0)
+            jnp.sum(cs.subcolumn_weight
+                    * surrogate.any_of(srok * cat[:, None], axis=0), axis=0)
             for cat in cats
         ]).astype(col.cldlayer.dtype)
         valid_frac = nsublayer / ncolumns

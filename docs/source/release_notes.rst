@@ -1,6 +1,29 @@
 Release Notes
 =============
 
+dev (unreleased)
+----------------
+
+New capabilities
+^^^^^^^^^^^^^^^^
+
+- **The COSP satellite diagnostics have gradients.** Every simulated cloud
+  cover, histogram and occurrence frequency the COSP term publishes
+  (``cltmodis``, ``clmodis``, ``cltisccp``, ``cltcalipso``, the CloudSat
+  warm-rain frequencies, ...) is a count of subcolumns passing hard tests, so
+  its derivative in the model state was exactly zero and a gradient-based
+  calibration against a satellite cloud product had nothing to follow.
+  ``jax-cosp`` now gives each of them the reference value with a surrogate
+  derivative, including one in the model cloud fraction through the SCOPS
+  subcolumn sampler, and the CALIPSO path of the term passes the sampler's
+  weight on so the layered lidar covers and the scattering-ratio CFAD respond
+  as the MODIS, ISCCP and radar diagnostics do. No output value changes. The
+  gradient estimates the derivative of the expected diagnostic over SCOPS
+  draws, so it differs from a finite difference of one run by design and
+  carries sampling noise that averages down over gridpoints and time steps.
+  Needs a ``jax-cosp`` with ``jcosp.surrogate``. See
+  :doc:`design/surrogate_gradients`.
+
 v3.1.0 (2026-11-24)
 -------------------
 
