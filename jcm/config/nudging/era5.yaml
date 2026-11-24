@@ -8,7 +8,13 @@
 #   python -m jcm.main nudging=era5 run.start_time=2010-01-01 \
 #       run.total_time=30 grid=echam_t63_l47_hybrid physics=echam
 #
-# Memory: the run's target (~15 GB per 6-hourly year at T63L47) is held
+# Prefetch memory: the regrid (prefetch or cache miss) runs over the time
+# axis in chunks sized to a ~4 GiB working set and writes each chunk into the
+# cache file as it is produced, so a prefetch's peak is one chunk, not the
+# window. The cache file is the same for any chunk size; on a small node pass
+# --time-chunk N (samples per chunk) to the prefetch command.
+#
+# Run memory: the run's target (~15 GB per 6-hourly year at T63L47) is held
 # in host memory; a chunked run (run.chunk_days) moves only each chunk's
 # window of it to the device. A single-window run puts all of it there.
 enabled: true
