@@ -406,7 +406,29 @@ class TerrainData:
 
         sso = dict(sso_derived)
         if sso_from_file is not None:
-            sso.update(sso_from_file)
+            # SSO statistics are properties of one grid's cells: orography
+            # interpolated from a coarser file (``interpolate=True``) cannot be
+            # paired with the file's own per-cell statistics. Loading them raw
+            # would leave a TerrainData whose fields disagree in shape, which
+            # crashes only at the first Lott-Miller call and is silently
+            # tolerated (zeroed) by the dust scheme. They are ignored with a
+            # warning, as ``from_file`` does, leaving the descriptors derived
+            # from the interpolated mean orography: enough for a run that
+            # carries no SSO drag, a heuristic for one that does.
+            mismatched = [v.shape for v in sso_from_file.values()
+                          if v.shape != orog.shape]
+            if mismatched:
+                logger.warning(
+                    "terrain file %s carries SSO fields at %s, not the "
+                    "model's %s: ignoring them and deriving SSO from the "
+                    "interpolated mean orography instead. Subgrid-orography "
+                    "statistics are specific to the grid they were computed "
+                    "on, so a run with Lott-Miller drag needs a terrain file "
+                    "built natively for this grid (or explicit orostd/orosig/"
+                    "orogam/orothe/oropic/oroval).",
+                    terrain_file, mismatched[0], orog.shape)
+            else:
+                sso.update(sso_from_file)
         sso.update(sso_user_provided)
 
         return cls(orog=orog, phis0=phis0, fmask=fmask,

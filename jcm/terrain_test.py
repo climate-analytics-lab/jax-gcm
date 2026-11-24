@@ -597,6 +597,41 @@ class TestTerrainDataFromFile(unittest.TestCase):
             self.assertEqual(getattr(terrain, name).shape, expected_shape,
                              msg=name)
 
+    def test_from_coords_ignores_sso_at_another_resolution(self):
+        """File SSO at another grid is dropped with a warning, never loaded raw."""
+        import tempfile
+
+        import numpy as np
+        import xarray as xr
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        src_coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        nlon, nlat = src_coords.horizontal.nodal_shape
+        lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
+        lat = np.linspace(-85.0, 85.0, nlat)
+        field = ("lon", "lat")
+        ds = xr.Dataset(
+            {"orog": (field, np.full((nlon, nlat), 100.0)),
+             "lsm": (field, np.ones((nlon, nlat))),
+             **{n: (field, np.full((nlon, nlat), 0.25))
+                for n in ("orostd", "orosig", "orogam", "orothe",
+                          "oropic", "oroval")}},
+            coords={"lon": lon, "lat": lat})
+        with tempfile.NamedTemporaryFile(suffix=".nc") as f:
+            ds.to_netcdf(f.name)
+            with self.assertLogs("jcm.terrain", level="WARNING") as logs:
+                finer = TerrainData.from_coords(coords, terrain_file=f.name,
+                                                interpolate=True)
+            # The same file on its own grid keeps its statistics.
+            native = TerrainData.from_coords(src_coords, terrain_file=f.name,
+                                             interpolate=True)
+        self.assertIn("specific to the grid", logs.output[0])
+        # Every field of the finer-grid terrain is on the model grid, and the
+        # SSO is the mean-orography heuristic, not the file's 0.25.
+        self.assertEqual(finer.orostd.shape, finer.orog.shape)
+        self.assertFalse(np.allclose(np.asarray(finer.orostd), 0.25))
+        np.testing.assert_allclose(np.asarray(native.orostd), 0.25)
+
     def test_from_file_interpolates_to_different_resolution(self):
         """from_file should interpolate terrain when coords resolution differs."""
         from importlib import resources
