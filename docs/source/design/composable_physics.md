@@ -110,7 +110,15 @@ with a validated ordering. The factories live next to their term files:
 - `jcm/physics/held_suarez/held_suarez_physics.py::held_suarez_physics()`
 
 Held-Suarez is a single-term `ComposablePhysics` (`HeldSuarez`, built by
-`held_suarez_physics()`).
+`held_suarez_physics()`). `HeldSuarez` is broadcasting-native: the vertical
+is axis 0, sigma broadcasts against it, and latitude is cached once per
+column (`jcm.physics.coords_util.column_lat_lon`, flattened lon-major) and
+reshaped to the host's horizontal shape — read off
+`normalized_surface_pressure` — at call time. The one code path therefore
+serves `(nlev,)`, `(nlev, ncols)` and `(nlev, nlon, nlat)` states, and
+`held_suarez_physics(vectorize_columns=True)` composes it with column-only
+terms (gravity-wave drag, tracer terms). The forcing is defined on sigma
+levels, from the vertical coordinate's `centers`.
 
 ## The `diagnostics` dict
 
