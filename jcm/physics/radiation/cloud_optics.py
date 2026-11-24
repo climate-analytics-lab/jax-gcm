@@ -387,7 +387,9 @@ def effective_radius_liquid(cdnc_factor: jnp.ndarray) -> jnp.ndarray:
         Effective radius (microns).
 
     """
-    return _R_EFF_LIQUID_UM * (cdnc_factor ** (-1.0 / 3.0))
+    # Double where: the power's derivative is singular at cdnc_factor = 0.
+    ok = cdnc_factor > 0.0
+    return jnp.where(ok, _R_EFF_LIQUID_UM * jnp.where(ok, cdnc_factor, 1.0) ** (-1.0 / 3.0), jnp.inf)
 
 
 
