@@ -3,6 +3,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,6 +31,211 @@ class ProbeCodeTest(unittest.TestCase):
         code = provenance.probe_code()
         self.assertIn("jax", code)
         self.assertIn("version", code["jax"])
+
+
+def _git_repo(root: Path, *, tracked: dict[str, bytes]) -> Path:
+    """Create a real git repo at *root* with one commit of *tracked* files.
+
+    Independent of the user's global git config: identity is passed with
+    ``-c``, signing and hooks are off, and ``GIT_CONFIG_GLOBAL`` /
+    ``GIT_CONFIG_SYSTEM`` point at ``/dev/null`` for the child processes.
+    """
+    import subprocess
+
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+           "GIT_CONFIG_SYSTEM": os.devnull}
+    base = ["git", "-C", str(root), "-c", "user.name=t",
+            "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+            "-c", "core.hooksPath=" + os.devnull]
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True,
+                   env=env)
+    for name, data in tracked.items():
+        (root / name).write_bytes(data)
+    subprocess.run([*base, "add", "-A"], check=True, env=env)
+    subprocess.run([*base, "commit", "-q", "-m", "init"], check=True,
+                   env=env)
+    return root
+
+
+class _FakeModule:
+    """A stand-in for an imported library living in a temporary repo."""
+
+    def __init__(self, root: Path):
+        self.__file__ = str(root / "__init__.py")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+class GitProbeRobustnessTest(unittest.TestCase):
+    """A provenance probe must never stop a run (#1237 B1)."""
+
+    # Not valid UTF-8 anywhere: a lone 0xff/0x80 and a NUL-laden PDF-ish blob.
+    BINARY_V1 = b"%PDF-1.4\n\xff\xfe\x80\x81\x00\x01"
+    BINARY_V2 = b"%PDF-1.4\n\xff\xfe\x80\x81\x00\x02\xc3\x28"
+
+    def _probe(self, root: Path) -> dict:
+        with mock.patch.dict("sys.modules", {"jcm": _FakeModule(root)}):
+            return provenance.probe_code()["jcm"]
+
+    def test_modified_tracked_binary_file_is_dirty_not_fatal(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = _git_repo(Path(d) / "repo", tracked={
+                "__init__.py": b"", "doc.pdf": self.BINARY_V1})
+            clean = self._probe(repo)
+            self.assertIs(clean["dirty"], False)
+            self.assertNotIn("dirty_diff_sha", clean)
+
+            (repo / "doc.pdf").write_bytes(self.BINARY_V2)
+            dirty = self._probe(repo)
+            self.assertIs(dirty["dirty"], True)
+            self.assertRegex(dirty["dirty_diff_sha"], r"^[0-9a-f]{12}$")
+            # Stable: the same dirty tree fingerprints identically.
+            self.assertEqual(self._probe(repo)["dirty_diff_sha"],
+                             dirty["dirty_diff_sha"])
+
+            # And the whole record is produced and serialisable.
+            with mock.patch.dict("sys.modules",
+                                 {"jcm": _FakeModule(repo)}):
+                attrs = provenance.attrs()
+            self.assertTrue(json.loads(attrs["jcm_prov_code"])["jcm"]["dirty"])
+
+    def test_git_diff_bytes_with_invalid_utf8_are_hashed_not_decoded(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = _git_repo(Path(d) / "repo", tracked={
+                "__init__.py": b"", "latin1.txt": b"caf\xe9\n"})
+            (repo / "latin1.txt").write_bytes(b"caf\xe9 au lait\xff\n")
+            # The text wrapper survives undecodable bytes ...
+            self.assertIsInstance(
+                provenance._git(str(repo), "diff", "HEAD"), str)
+            # ... and the fingerprint is over the raw bytes.
+            raw = provenance._git_bytes(
+                str(repo), "diff", "--no-ext-diff", "--no-textconv", "HEAD")
+            self.assertEqual(
+                self._probe(repo)["dirty_diff_sha"],
+                hashlib.sha256(raw).hexdigest()[:12])
+
+    def test_two_different_dirty_trees_fingerprint_differently(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = _git_repo(Path(d) / "repo", tracked={
+                "__init__.py": b"", "doc.pdf": self.BINARY_V1})
+            (repo / "doc.pdf").write_bytes(self.BINARY_V2)
+            a = self._probe(repo)["dirty_diff_sha"]
+            (repo / "doc.pdf").write_bytes(self.BINARY_V2 + b"\x00")
+            b = self._probe(repo)["dirty_diff_sha"]
+        self.assertNotEqual(a, b)
+
+    def test_git_failure_is_unknown_not_clean(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = _git_repo(Path(d) / "repo", tracked={"__init__.py": b""})
+            real = provenance._git_bytes
+
+            def failing_status(path, *args):
+                return None if args[:1] == ("status",) else real(path, *args)
+
+            with mock.patch.object(provenance, "_git_bytes", failing_status):
+                entry = self._probe(repo)
+        self.assertEqual(entry["dirty"], "unknown")
+
+    def test_failed_diff_is_recorded_in_the_fingerprint(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = _git_repo(Path(d) / "repo", tracked={
+                "__init__.py": b"", "a.txt": b"1\n"})
+            (repo / "a.txt").write_bytes(b"2\n")
+            real = provenance._git_bytes
+
+            def failing_diff(path, *args):
+                return None if args[:1] == ("diff",) else real(path, *args)
+
+            with mock.patch.object(provenance, "_git_bytes", failing_diff):
+                entry = self._probe(repo)
+        self.assertIs(entry["dirty"], True)
+        self.assertEqual(entry["dirty_diff_sha"], "<probe failed: git diff>")
+
+    def test_git_subprocess_errors_return_none(self):
+        import subprocess
+
+        for exc in (OSError("no git"), subprocess.TimeoutExpired("git", 10),
+                    ValueError("embedded null byte")):
+            with mock.patch.object(subprocess, "run", side_effect=exc):
+                self.assertIsNone(provenance._git(".", "status"))
+
+    def test_repo_without_commits_does_not_break_summary(self):
+        # ``rev-parse HEAD`` fails in a freshly initialised repo, so the
+        # entry carries ``sha: None``; the log line must still format.
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d) / "repo"
+            repo.mkdir()
+            (repo / "__init__.py").write_text("")
+            subprocess.run(["git", "-C", str(repo), "init", "-q"],
+                           check=True)
+            with mock.patch.dict("sys.modules", {"jcm": _FakeModule(repo)}):
+                self.assertIsInstance(provenance.summary(), str)
+
+    def test_a_failing_library_probe_leaves_a_marker(self):
+        with mock.patch.object(provenance, "_probe_library",
+                               side_effect=OSError("boom")):
+            code = provenance.probe_code()
+        self.assertEqual(code["jcm"],
+                         {"probe_error": "<probe failed: OSError>"})
+
+    def test_broken_distribution_metadata_leaves_a_marker(self):
+        from importlib import metadata
+
+        with mock.patch.object(metadata, "version",
+                               side_effect=UnicodeDecodeError(
+                                   "utf-8", b"\xff", 0, 1, "bad")):
+            code = provenance.probe_code()
+        self.assertEqual(code["jax"]["version"],
+                         "<probe failed: UnicodeDecodeError>")
+
+    def test_programmer_errors_are_not_swallowed(self):
+        with mock.patch.object(provenance, "_probe_library",
+                               side_effect=TypeError("bug")):
+            with self.assertRaises(TypeError):
+                provenance.probe_code()
+
+
+class ProbeEnvironmentFailureTest(unittest.TestCase):
+    def test_getuser_failure_is_a_marker_not_an_exception(self):
+        # A container whose uid has no passwd entry.
+        with mock.patch.object(provenance.getpass, "getuser",
+                               side_effect=KeyError("uid not found")):
+            env = provenance.probe_environment()
+        self.assertEqual(env["user"], "<probe failed: KeyError>")
+        self.assertIn(env["jax_enable_x64"], (True, False))
+
+    def test_device_enumeration_failure_is_a_marker(self):
+        import jax
+
+        with mock.patch.object(jax, "devices",
+                               side_effect=RuntimeError("no backend")):
+            env = provenance.probe_environment()
+        self.assertEqual(env["platform"], "<probe failed: RuntimeError>")
+        self.assertIsNone(env["device_count"])
+
+
+class DescribeInputFailureTest(unittest.TestCase):
+    def test_unreadable_content_keeps_the_stat_descriptor(self):
+        with tempfile.NamedTemporaryFile(suffix=".nc") as f:
+            f.write(b"x")
+            f.flush()
+            with mock.patch("builtins.open", side_effect=PermissionError):
+                d = provenance.describe_input(f.name, force_hash=True)
+        self.assertEqual(d["size"], 1)
+        self.assertNotIn("sha256", d)
+        self.assertEqual(d["sha256_error"], "<probe failed: PermissionError>")
+
+    def test_path_with_embedded_nul_is_missing(self):
+        self.assertTrue(provenance.describe_input("a\0b")["missing"])
+
+    def test_unrepresentable_leaf_is_described(self):
+        class Bad:
+            def __repr__(self):
+                raise RuntimeError("no repr")
+
+        self.assertIn("unrepresentable", provenance._stable_repr(Bad()))
 
 
 class ProbeEnvironmentTest(unittest.TestCase):

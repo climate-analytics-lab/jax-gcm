@@ -92,71 +92,159 @@ _PARAM_ARRAY_MAX_ELEMS = 64
 #: deepest shipped parameter struct nests two levels).
 _PARAM_MAX_DEPTH = 6
 
+#: What an environment-dependent probe can raise: a missing or unreadable
+#: file, a process that will not start or finish, undecodable bytes, a
+#: broken install's metadata, an absent backend. These are the failures a
+#: probe records and survives. ``TypeError`` / ``AttributeError`` /
+#: ``NameError`` are deliberately absent: those are bugs in this module and
+#: must stay loud.
+_PROBE_ERRORS = (OSError, ValueError, RuntimeError, KeyError,
+                 subprocess.SubprocessError)
+
 _state: dict = {"base": None, "inputs": {}, "facts": {}}
 
 
-def _git(path: str, *args: str) -> str | None:
+def _probe_failed(exc: BaseException) -> str:
+    """Return the sentinel stored where a probe could not produce its value.
+
+    Provenance is best-effort: no probe may stop an integration. A probe
+    that fails leaves this marker in the record, so the gap shows in the
+    netCDF attributes and the sidecar, instead of raising or silently
+    dropping the entry.
+    """
+    logger.warning("provenance probe failed: %s: %s", type(exc).__name__, exc)
+    return f"<probe failed: {type(exc).__name__}>"
+
+
+def _git_bytes(path: str, *args: str) -> bytes | None:
+    """Return a git subcommand's stdout as bytes, or ``None`` on any failure.
+
+    Bytes, not text: ``git diff`` of a modified tracked binary file (or of
+    a text file in a non-UTF-8 encoding) is not decodable, and a decoding
+    error here would escape into the run.
+    """
     try:
         out = subprocess.run(["git", "-C", path, *args],
-                             capture_output=True, text=True, timeout=10)
-        return out.stdout.strip() if out.returncode == 0 else None
-    except (OSError, subprocess.TimeoutExpired):
+                             capture_output=True, timeout=10)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # OSError: no git binary / unreadable cwd; ValueError: an embedded
+        # NUL in *path*; SubprocessError includes TimeoutExpired.
         return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def _git(path: str, *args: str) -> str | None:
+    """Return a git subcommand's stripped stdout as text, or ``None``.
+
+    Undecodable bytes (a non-UTF-8 branch or path name) become U+FFFD
+    rather than raising. A caller that only fingerprints the output hashes
+    the bytes from :func:`_git_bytes` instead.
+    """
+    out = _git_bytes(path, *args)
+    return None if out is None else out.decode("utf-8", "replace").strip()
+
+
+def _dist_version(dist: str) -> str | None:
+    """Return the installed version of *dist*, or ``None`` if not installed.
+
+    A present-but-broken distribution (unreadable or malformed metadata)
+    yields the probe-failed marker rather than an exception.
+    """
+    from importlib import metadata
+
+    try:
+        return metadata.version(dist)
+    except metadata.PackageNotFoundError:
+        return None
+    except _PROBE_ERRORS as exc:  # UnicodeDecodeError is a ValueError
+        return _probe_failed(exc)
+
+
+def _probe_library(name: str, mod) -> dict:
+    """Path + version + git SHA/branch/dirty for one imported library."""
+    path = str(Path(mod.__file__).resolve().parent)
+    entry: dict = {"path": path}
+    # Module and distribution names differ (rrtmgp -> jax-rrtmgp).
+    for dist in (_DIST_NAMES.get(name, name), name.replace("_", "-")):
+        version = _dist_version(dist)
+        if version is not None:
+            entry["version"] = version
+            break
+    top = _git(path, "rev-parse", "--show-toplevel")
+    if top:
+        entry["sha"] = _git(top, "rev-parse", "HEAD")
+        entry["branch"] = _git(top, "rev-parse", "--abbrev-ref", "HEAD")
+        status = _git(top, "status", "--porcelain")
+        # ``None`` is "git could not say", not "clean": a failed status
+        # must not read as a pristine tree.
+        entry["dirty"] = "unknown" if status is None else bool(status)
+        if status:
+            # Distinguish two dirty trees without shipping the diff. Hashed
+            # as bytes: the diff can contain a binary file's raw content, and
+            # the fingerprint must not depend on a text codec. The
+            # external-diff and textconv hooks are off so the bytes are
+            # git's own and do not vary with the user's git config.
+            diff = _git_bytes(top, "diff", "--no-ext-diff", "--no-textconv",
+                              "HEAD")
+            entry["dirty_diff_sha"] = (
+                "<probe failed: git diff>" if diff is None
+                else hashlib.sha256(diff).hexdigest()[:12])
+    return entry
 
 
 def probe_code() -> dict:
-    """Path + version + git SHA/branch/dirty for every imported key library."""
-    from importlib import metadata
+    """Path + version + git SHA/branch/dirty for every imported key library.
 
+    Never raises for an environmental failure: a library whose probe fails
+    is recorded as ``{"probe_error": "<probe failed: ...>"}``.
+    """
     code: dict = {}
     for name in _EDITABLE_LIBS:
         mod = sys.modules.get(name)
         if mod is None or not getattr(mod, "__file__", None):
             continue
-        path = str(Path(mod.__file__).resolve().parent)
-        entry: dict = {"path": path}
-        # Module and distribution names differ (rrtmgp -> jax-rrtmgp).
-        for dist in (_DIST_NAMES.get(name, name), name.replace("_", "-")):
-            try:
-                entry["version"] = metadata.version(dist)
-                break
-            except metadata.PackageNotFoundError:
-                pass
-        top = _git(path, "rev-parse", "--show-toplevel")
-        if top:
-            entry["sha"] = _git(top, "rev-parse", "HEAD")
-            entry["branch"] = _git(top, "rev-parse", "--abbrev-ref", "HEAD")
-            status = _git(top, "status", "--porcelain")
-            entry["dirty"] = bool(status)
-            if status:
-                # Distinguish two dirty trees without shipping the diff.
-                diff = _git(top, "diff", "HEAD") or ""
-                entry["dirty_diff_sha"] = hashlib.sha256(
-                    diff.encode()).hexdigest()[:12]
-        code[name] = entry
-    for name in _VERSION_LIBS:
         try:
-            code[name] = {"version": metadata.version(name)}
-        except metadata.PackageNotFoundError:
-            pass
+            code[name] = _probe_library(name, mod)
+        except _PROBE_ERRORS as exc:
+            code[name] = {"probe_error": _probe_failed(exc)}
+    for name in _VERSION_LIBS:
+        version = _dist_version(name)
+        if version is not None:
+            code[name] = {"version": version}
     return code
 
 
+def _probed(fn):
+    """Call *fn*; on an environmental failure return the probe-failed marker."""
+    try:
+        return fn()
+    except _PROBE_ERRORS as exc:
+        return _probe_failed(exc)
+
+
 def probe_environment() -> dict:
-    """Precision flags, devices, host — the silent run-shapers."""
+    """Precision flags, devices, host — the silent run-shapers.
+
+    Each fact is probed on its own: a container with no passwd entry for
+    the uid (``getpass.getuser``) or a backend that will not enumerate
+    devices leaves a probe-failed marker for that field only.
+    """
     import jax
 
-    devices = jax.devices()
     env = {
         "python": platform.python_version(),
-        "hostname": socket.gethostname(),
-        "user": getpass.getuser(),
+        "hostname": _probed(socket.gethostname),
+        "user": _probed(getpass.getuser),
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "env": {k: os.environ[k] for k in _ENV_FLAGS if k in os.environ},
-        "platform": devices[0].platform,
-        "device_kind": devices[0].device_kind,
-        "device_count": len(devices),
     }
+    devices = _probed(jax.devices)
+    if isinstance(devices, str):
+        env.update(platform=devices, device_kind=devices, device_count=None)
+    else:
+        env.update(platform=devices[0].platform,
+                   device_kind=devices[0].device_kind,
+                   device_count=len(devices))
     try:
         # On GPU this carries the CUDA runtime/driver versions.
         env["platform_version"] = (
@@ -183,14 +271,21 @@ def describe_input(path: str, *, force_hash: bool = False) -> dict:
         d["size"] = st.st_size
         d["mtime"] = datetime.fromtimestamp(
             st.st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
-    except OSError:
+    except (OSError, ValueError):  # ValueError: embedded NUL in the path
         d["missing"] = True
         return d
     if force_hash or os.environ.get("JCM_HASH_INPUTS") == "1":
         h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for block in iter(lambda: f.read(1 << 22), b""):
-                h.update(block)
+        try:
+            with open(path, "rb") as f:
+                for block in iter(lambda: f.read(1 << 22), b""):
+                    h.update(block)
+        except OSError as exc:
+            # Stat succeeded but the content cannot be read (permissions, a
+            # file that vanished, an I/O error mid-read): keep the
+            # size + mtime descriptor and mark the digest unavailable.
+            d["sha256_error"] = _probe_failed(exc)
+            return d
         d["sha256"] = h.hexdigest()
     return d
 
@@ -241,7 +336,11 @@ def _stable_repr(value) -> str:
     between two runs of the identical configuration. Left in, it would
     make ``params_sha`` (and through it ``run_hash``) non-reproducible.
     """
-    return _ADDRESS_RE.sub("", repr(value))[:200]
+    try:
+        text = repr(value)
+    except Exception as exc:  # noqa: BLE001 — a user object's __repr__ may raise anything
+        return f"<unrepresentable {type(value).__name__}: {type(exc).__name__}>"
+    return _ADDRESS_RE.sub("", text)[:200]
 
 
 def _is_scalar(value) -> bool:
@@ -532,7 +631,7 @@ def summary() -> str:
     env = probe_environment()
     shas = ", ".join(
         f"{k}={v['sha'][:8]}{'+dirty' if v.get('dirty') else ''}"
-        for k, v in code.items() if "sha" in v)
+        for k, v in code.items() if v.get("sha"))
     ozone = _state["facts"].get("ozone_source", "?")
     return (f"{shas or 'no git trees'}; "
             f"x64={env.get('jax_enable_x64')}; "
@@ -556,10 +655,12 @@ def attrs(params: dict | None = None) -> dict:
         "jcm_prov_written": datetime.now(
             timezone.utc).isoformat(timespec="seconds"),
         "jcm_prov_run_hash": prov["run_hash"],
-        "jcm_prov_code": json.dumps(prov["code"], sort_keys=True),
+        "jcm_prov_code": json.dumps(prov["code"], sort_keys=True,
+                                    default=str),
         "jcm_prov_environment": json.dumps(prov["environment"],
-                                           sort_keys=True),
-        "jcm_prov_inputs": json.dumps(prov["inputs"], sort_keys=True),
+                                           sort_keys=True, default=str),
+        "jcm_prov_inputs": json.dumps(prov["inputs"], sort_keys=True,
+                                      default=str),
     }
     out.update(params_attrs(params))
     for key, value in prov["facts"].items():
