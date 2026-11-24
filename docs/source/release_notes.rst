@@ -11,6 +11,21 @@ Bug fixes
   rank draws are float32 in every precision mode. They were the session's
   default float, so a run with x64 enabled (importing ``mam4_jax`` enables it)
   sampled a different cloud stream from the same run without.
+  
+- **The global mean reduces only the horizontal axes** (#1233).
+  ``jcm.analysis.global_mean`` used to reduce every dimension not on a list
+  of known non-horizontal ones. That list missed the SLIM ``soil_layer`` and
+  the per-band optics' ``sw_band``/``lw_band``, so a global mean of
+  ``slim_land.soil_temperature`` averaged the ten soil layers into one
+  number, and a ``*_sw_per_band`` field lost its spectrum. It now reduces by
+  whitelist: a dimension whose coordinate carries CF ``axis`` ``X`` or ``Y``,
+  which every backend's output has on ``lon`` and ``lat``, or, with no
+  ``axis`` attribute, one named ``lon`` or ``lat``. Every other dimension is
+  kept. A field on another horizontal layout names its dimensions with the
+  new ``dims=`` argument (``global_mean(da, dims=("x", "y"))``), and a field
+  with no horizontal dimension raises instead of being averaged over
+  whatever it has. The release gates and regression bands average only
+  ``lat``/``lon`` fields and are unchanged.
 
 Performance
 ^^^^^^^^^^^
@@ -40,6 +55,7 @@ Dependencies
   ``RRTMGP.compute_heating_rate_zc``, which 0.8.0 (already the floor since
   3.1.0) provides, and refuses to start on an older checkout with a message
   that names the release.
+
 
 v3.1.0 (2026-11-24)
 -------------------
