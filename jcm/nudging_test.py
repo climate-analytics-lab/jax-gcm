@@ -6,6 +6,7 @@ The previous spectral-space implementation has been promoted to a
 plumbing.
 """
 
+import types
 import unittest
 
 import jax
@@ -16,7 +17,7 @@ import xarray as xr
 from jcm.forcing import ForcingData
 from jcm.model import Model
 from jcm.nudging import (
-    NudgingConfig, NudgingTarget,
+    LatTop, NudgingConfig, NudgingTarget, NudgingTerm, reference_pressure_pa,
     inv_tau_profile, nudging_tendency, with_nudging,
 )
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
@@ -497,3 +498,224 @@ class WindowTargetTest(unittest.TestCase):
                                temperature=jnp.ones((2, 3)))
         self.assertIsNone(samples_per_span(static, 86400))
         self.assertIs(window_target(static, 0, 4).u_wind, static.u_wind)
+
+
+class TestLatTop(unittest.TestCase):
+    """``LatTop``: the latitude-dependent, tapered top of the nudged region."""
+
+    LT = dict(p_tropical_hpa=150.0, p_polar_hpa=400.0,
+              lat_tropical_deg=20.0, lat_polar_deg=35.0, taper_decades=0.1)
+
+    def _hand_top(self, lat):
+        a = abs(lat)
+        if a <= 20.0:
+            w = 1.0
+        elif a >= 35.0:
+            w = 0.0
+        else:
+            w = np.cos(0.5 * np.pi * (a - 20.0) / 15.0) ** 2
+        return np.exp(w * np.log(150.0) + (1.0 - w) * np.log(400.0))
+
+    def test_weight_matches_hand_computed_profile(self):
+        lt = LatTop.from_mapping(self.LT)
+        p = np.array([50.0, 100.0, 150.0, 170.0, 188.0, 300.0, 400.0, 500.0, 1000.0])
+        lats = np.array([0.0, 10.0, 20.0, 27.5, 35.0, 60.0, -27.5, -90.0])
+        w = np.asarray(lt.weight(p, lats))
+        self.assertEqual(w.shape, (p.size, lats.size))
+        for j, lat in enumerate(lats):
+            top = self._hand_top(lat)
+            expect = np.clip(np.log10(p / top) / 0.1, 0.0, 1.0)
+            np.testing.assert_allclose(w[:, j], expect, atol=1e-5)
+
+    def test_regimes(self):
+        lt = LatTop.from_mapping(self.LT)
+        np.testing.assert_allclose(lt.top_hpa(jnp.array([0.0, 20.0, -15.0])), 150.0, rtol=1e-5)
+        np.testing.assert_allclose(lt.top_hpa(jnp.array([35.0, 80.0, -60.0])), 400.0, rtol=1e-5)
+        # North/south symmetric, and the blend is bracketed by the two tops.
+        mid = lt.top_hpa(jnp.array([27.5, -27.5]))
+        self.assertAlmostEqual(float(mid[0]), float(mid[1]), places=4)
+        self.assertTrue(150.0 < float(mid[0]) < 400.0)
+        # Un-nudged above the top, fully nudged a taper below it.
+        w = np.asarray(lt.weight(np.array([100.0, 150.0, 150.0 * 10 ** 0.1, 800.0]), 0.0))
+        np.testing.assert_allclose(w, [0.0, 0.0, 1.0, 1.0], atol=1e-5)
+
+    def test_zero_width_is_a_hard_step(self):
+        lt = LatTop.from_mapping({**self.LT, "taper_decades": 0.0})
+        w = np.asarray(lt.weight(np.array([149.0, 151.0]), 0.0))
+        np.testing.assert_allclose(w, [0.0, 1.0])
+
+    def test_invalid_configs_raise(self):
+        bad = [
+            {**self.LT, "lat_tropical_deg": 40.0},          # ordering
+            {**self.LT, "lat_tropical_deg": 35.0},          # equal
+            {**self.LT, "lat_polar_deg": 95.0},
+            {**self.LT, "lat_tropical_deg": -5.0},
+            {**self.LT, "p_tropical_hpa": 0.0},
+            {**self.LT, "p_polar_hpa": -1.0},
+            {**self.LT, "taper_decades": -0.1},
+            {**self.LT, "taper_decde": 0.1},                # misspelt key
+        ]
+        for mapping in bad:
+            with self.subTest(mapping=mapping), self.assertRaises(ValueError):
+                LatTop.from_mapping(mapping)
+        # The hard floor may not sit below a top (it would silently bind).
+        with self.assertRaises(ValueError):
+            LatTop.from_mapping(self.LT, min_pressure_hpa=200.0)
+        LatTop.from_mapping(self.LT, min_pressure_hpa=150.0)
+        with self.assertRaises(ValueError):
+            NudgingTerm(NudgingConfig.winds_only(4),
+                        lat_top=LatTop(taper_decades=-1.0))
+
+    def test_weight_gradient(self):
+        from jcm.testing import check_gradients
+        p = jnp.array([120.0, 175.0, 230.0, 350.0, 600.0])
+        lat = jnp.array([5.0, 24.0, 29.0, 33.0, 50.0])
+
+        def f(lt):
+            return lt.weight(p, lat)
+
+        lt = LatTop(p_tropical_hpa=150.0, p_polar_hpa=400.0,
+                    lat_tropical_deg=20.0, lat_polar_deg=35.0, taper_decades=0.3)
+        check_gradients(f, (lt,), rtol=1e-2)
+
+
+class TestLatTopTerm(unittest.TestCase):
+    """``NudgingTerm(lat_top=...)`` on the whole-grid and column layouts."""
+
+    def setUp(self):
+        self.coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        self.nlev = self.coords.vertical.layers
+        self.nlon, self.nlat = self.coords.horizontal.nodal_shape
+        self.lat_top = LatTop(p_tropical_hpa=300.0, p_polar_hpa=700.0,
+                              lat_tropical_deg=20.0, lat_polar_deg=45.0,
+                              taper_decades=0.2)
+        rng = np.random.default_rng(3)
+        shape = (self.nlev, self.nlon, self.nlat)
+        self.state = PhysicsState.zeros(
+            shape, u_wind=jnp.asarray(rng.normal(size=shape)),
+            v_wind=jnp.asarray(rng.normal(size=shape)),
+            temperature=jnp.asarray(rng.normal(size=shape) + 250.0),
+            specific_humidity=jnp.asarray(rng.uniform(size=shape)))
+        self.target = NudgingTarget(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=jnp.full(shape, 250.0),
+            specific_humidity=jnp.zeros(shape))
+        self.forcing = types.SimpleNamespace(nudging_target=self.target)
+        self.config = NudgingConfig(
+            inv_tau_wind=jnp.full(self.nlev, 1.0 / 21600.0),
+            inv_tau_temperature=jnp.full(self.nlev, 1.0 / 43200.0),
+            inv_tau_humidity=jnp.full(self.nlev, 1.0 / 86400.0))
+
+    def _term(self, lat_top, config=None):
+        term = NudgingTerm(config or self.config, lat_top=lat_top)
+        term.cache_coords(self.coords)
+        return term
+
+    def test_default_is_bit_identical_to_plain_relaxation(self):
+        term = self._term(None)
+        tend, _ = term(self.state, {}, self.forcing, None)
+        ref = nudging_tendency(self.state, self.target, self.config,
+                               nodal_shape=(self.nlon, self.nlat))
+        for name in ("u_wind", "v_wind", "temperature", "specific_humidity"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(tend, name)), np.asarray(getattr(ref, name)))
+
+    def test_tendency_is_weight_times_plain_relaxation(self):
+        term = self._term(self.lat_top)
+        tend, _ = term(self.state, {}, self.forcing, None)
+        plain = nudging_tendency(self.state, self.target, self.config,
+                                 nodal_shape=(self.nlon, self.nlat))
+        lat_deg = np.rad2deg(np.asarray(self.coords.horizontal.latitudes))
+        p_hpa = reference_pressure_pa(self.coords.vertical) / 100.0
+        w = np.asarray(self.lat_top.weight(p_hpa, lat_deg))   # (nlev, nlat)
+        w = w[:, None, :]
+        for name in ("u_wind", "v_wind", "temperature", "specific_humidity"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(tend, name)),
+                w * np.asarray(getattr(plain, name)), rtol=1e-5, atol=1e-12)
+        # The profile is genuinely latitude dependent here.
+        self.assertGreater(float(np.ptp(w[:, 0, :])), 0.5)
+
+    def test_column_layout_matches_grid_layout(self):
+        term = self._term(self.lat_top)
+        grid, _ = term(self.state, {}, self.forcing, None)
+        ncols = self.nlon * self.nlat
+        flat = lambda a: a.reshape(self.nlev, ncols)  # noqa: E731
+        state_col = PhysicsState.zeros(
+            (self.nlev, ncols), u_wind=flat(self.state.u_wind),
+            v_wind=flat(self.state.v_wind),
+            temperature=flat(self.state.temperature),
+            specific_humidity=flat(self.state.specific_humidity))
+        col, _ = term(state_col, {}, self.forcing, None)
+        for name in ("u_wind", "v_wind", "temperature", "specific_humidity"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(grid, name)).reshape(self.nlev, ncols),
+                np.asarray(getattr(col, name)), rtol=1e-6, atol=1e-12)
+
+    def test_composes_with_pbl_and_floor_masks(self):
+        inv = inv_tau_profile(self.coords.vertical, tau_hours=6.0,
+                              min_pressure_hpa=100.0, pbl_levels=2)
+        config = NudgingConfig(inv_tau_wind=jnp.asarray(inv),
+                               inv_tau_temperature=jnp.zeros(self.nlev))
+        term = self._term(self.lat_top, config)
+        tend, _ = term(self.state, {}, self.forcing, None)
+        # Bottom PBL levels stay free; temperature is not nudged.
+        self.assertTrue(np.all(np.asarray(tend.u_wind)[-2:] == 0.0))
+        self.assertTrue(np.all(np.asarray(tend.temperature) == 0.0))
+
+    def test_gradient_through_tendency(self):
+        from jcm.testing import check_gradients
+        term = self._term(self.lat_top)
+
+        def f(temperature, u_wind):
+            state = self.state.copy(temperature=temperature, u_wind=u_wind)
+            tend, _ = term(state, {}, self.forcing, None)
+            return tend.temperature, tend.u_wind
+
+        check_gradients(f, (self.state.temperature, self.state.u_wind), rtol=1e-3)
+
+    def test_profile_parameters_are_differentiable_through_the_term(self):
+        """A gradient w.r.t. a ``LatTop`` leaf reaches the term's tendency."""
+        import jax
+
+        def f(p_tropical_hpa):
+            lat_top = self.lat_top.replace(p_tropical_hpa=p_tropical_hpa)
+            tend, _ = self._term(lat_top)(self.state, {}, self.forcing, None)
+            return jnp.sum(tend.u_wind ** 2)
+
+        grad = jax.grad(f)(jnp.asarray(300.0))
+        self.assertTrue(np.isfinite(float(grad)))
+        self.assertNotEqual(float(grad), 0.0)
+
+
+class TestLatTopInModel(unittest.TestCase):
+    """The latitude-dependent top survives composition and runs in a Model."""
+
+    def test_model_run_nudges_only_below_the_top(self):
+        coords = get_speedy_coords()
+        terrain = TerrainData.aquaplanet(coords)
+        nlev = coords.vertical.layers
+        nlon, nlat = coords.horizontal.nodal_shape
+        target = NudgingTarget.from_dataset(
+            _zero_winds_target_dataset(nlev, nlon, nlat), time_var=None)
+        forcing = ForcingData.zeros(coords.horizontal.nodal_shape).replace(
+            nudging_target=target)
+        config = NudgingConfig.winds_only(nlev=nlev, tau_seconds=3600.0)
+
+        def run(lat_top):
+            physics = with_nudging(speedy_physics(), config, lat_top=lat_top)
+            return Model(coords=coords, terrain=terrain, physics=physics).run(
+                forcing=forcing, save_interval=1, total_time=2)
+
+        free = run(LatTop(p_tropical_hpa=1.0e4, p_polar_hpa=1.0e4,
+                          lat_polar_deg=45.0))  # top below every level: no nudging
+        none = Model(coords=coords, terrain=terrain, physics=speedy_physics()).run(
+            forcing=forcing, save_interval=1, total_time=2)
+        np.testing.assert_allclose(
+            np.asarray(free.dynamics.u_wind), np.asarray(none.dynamics.u_wind),
+            atol=1e-5)
+        deep = run(LatTop(p_tropical_hpa=1.0, p_polar_hpa=1.0, lat_polar_deg=45.0))
+        plain = run(None)
+        np.testing.assert_allclose(
+            np.asarray(deep.dynamics.u_wind), np.asarray(plain.dynamics.u_wind),
+            rtol=1e-4, atol=1e-5)

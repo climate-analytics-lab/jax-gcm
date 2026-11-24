@@ -37,3 +37,25 @@ min_pressure_hpa: 60.0
 
 # Target sampling: 6h (native), 12h, or 1d.
 freq: 6h
+
+# Optional latitude-dependent top of the nudged region (docs: design/era5_nudging).
+# null (default) = the single global step at min_pressure_hpa above. When a
+# mapping, the top of the nudged region follows it instead: one global
+# pressure cannot both leave the extratropical lowermost stratosphere free
+# and keep nudging the tropical upper troposphere, because the tropopause
+# sits near 100 hPa in the tropics and near 300 hPa at the poles. The top is p_tropical_hpa equatorward of
+# lat_tropical_deg, p_polar_hpa poleward of lat_polar_deg and a log-p blend
+# (cos^2 in latitude) between, symmetric about the equator; the weight ramps
+# 0 -> 1 over taper_decades of log10 p below the top instead of a step. It is
+# a function of each level's reference pressure and the column latitude, not of
+# the instantaneous tropopause. min_pressure_hpa stays a hard floor on top of
+# it (levels above it are never nudged) and must be <= min(p_tropical_hpa,
+# p_polar_hpa), else it would silently override the profile and is rejected.
+# Example (the tropopause-following profile):
+#   lat_top:
+#     p_tropical_hpa: 150.0
+#     p_polar_hpa: 400.0
+#     lat_tropical_deg: 20.0
+#     lat_polar_deg: 35.0
+#     taper_decades: 0.1
+lat_top: null

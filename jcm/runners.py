@@ -571,15 +571,23 @@ def maybe_add_nudging(physics, cfg: DictConfig, coords):
         return physics
     import jax.numpy as jnp
 
-    from jcm.nudging import NudgingConfig, with_nudging
+    from omegaconf import OmegaConf
+
+    from jcm.nudging import LatTop, NudgingConfig, with_nudging
     inv_tau, nlev = _nudging_inv_tau(nudging_cfg, coords.vertical)
+    lat_top_cfg = nudging_cfg.get("lat_top", None)
+    if lat_top_cfg is not None and OmegaConf.is_config(lat_top_cfg):
+        lat_top_cfg = OmegaConf.to_container(lat_top_cfg, resolve=True)
+    lat_top = (None if lat_top_cfg is None else LatTop.from_mapping(
+        lat_top_cfg,
+        min_pressure_hpa=float(nudging_cfg.get("min_pressure_hpa", 60.0))))
     config = NudgingConfig(
         inv_tau_wind=jnp.asarray(inv_tau),
         inv_tau_temperature=(jnp.asarray(inv_tau)
                              if nudging_cfg.get("nudge_temperature", False)
                              else jnp.zeros(nlev)),
     )
-    return with_nudging(physics, config)
+    return with_nudging(physics, config, lat_top=lat_top)
 
 
 def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):

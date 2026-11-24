@@ -29,14 +29,17 @@ from __future__ import annotations
 
 from typing import ClassVar, Optional
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 import tree_math
-from flax import nnx
+from flax import nnx, struct
 
 from jcm.forcing import (
     ForcingData, BY_DATE, WRAP_YEAR, TimeSeries, _host_epoch_seconds,
     make_time_series)
 from jcm.physics.composable_physics import ComposablePhysics
+from jcm.physics.coords_util import column_lat_lon
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
@@ -275,6 +278,21 @@ class NudgingConfig:
         )
 
 
+def reference_pressure_pa(vertical):
+    """Return the reference mid-level pressure (Pa), ``(nlev,)``, TOA first.
+
+    Hybrid coordinates (``a_centers``/``b_centers``) and sigma coordinates
+    (``centers``) are both evaluated at a standard surface pressure of
+    101325 Pa. This is the one definition of "the level's pressure" shared by
+    the per-level ``min_pressure_hpa`` mask and the latitude-dependent top
+    (:class:`LatTop`), so the two can never disagree about which level is which.
+    """
+    if hasattr(vertical, "a_centers"):
+        return (np.asarray(vertical.a_centers)
+                + np.asarray(vertical.b_centers) * 101325.0)
+    return np.asarray(vertical.centers) * 101325.0
+
+
 def inv_tau_profile(vertical, *, tau_hours: float = 6.0,
                     min_pressure_hpa: float = 60.0,
                     pbl_levels: int = 0):
@@ -292,12 +310,7 @@ def inv_tau_profile(vertical, *, tau_hours: float = 6.0,
 
     Returns the ``(nlev,)`` inverse-timescale array (per second).
     """
-    import numpy as np
-    if hasattr(vertical, "a_centers"):
-        p_ref = (np.asarray(vertical.a_centers)
-                 + np.asarray(vertical.b_centers) * 101325.0)
-    else:
-        p_ref = np.asarray(vertical.centers) * 101325.0
+    p_ref = reference_pressure_pa(vertical)
     nlev = p_ref.size
     mask = np.ones(nlev)
     mask[p_ref < float(min_pressure_hpa) * 100.0] = 0.0
@@ -308,13 +321,152 @@ def inv_tau_profile(vertical, *, tau_hours: float = 6.0,
 
 
 # ---------------------------------------------------------------------------
+# Latitude-dependent top of the nudged region
+# ---------------------------------------------------------------------------
+
+
+@struct.dataclass
+class LatTop:
+    """Top of the nudged region as a function of latitude, with a taper.
+
+    One global pressure cannot serve both the tropics and the extratropics:
+    the tropopause sits near 100 hPa at the equator and near 300 hPa at the
+    poles, so a step at 150 hPa nudges the extratropical lowermost
+    stratosphere, while a step at 400 hPa stops nudging the tropical upper
+    troposphere. The top pressure is therefore
+
+    * ``p_tropical_hpa`` for ``|lat| <= lat_tropical_deg``,
+    * ``p_polar_hpa`` for ``|lat| >= lat_polar_deg``,
+    * between, a blend in ``log p`` with a ``cos^2`` weight in latitude
+      (``w_trop = cos^2(pi/2 (|lat| - lat_tropical_deg)
+      / (lat_polar_deg - lat_tropical_deg))``,
+      ``ln p_top = w_trop ln p_tropical + (1 - w_trop) ln p_polar``),
+
+    symmetric about the equator. The nudging weight of a level of reference
+    pressure ``p`` in a column at latitude ``lat`` is
+
+    ``w = clip(log10(p / p_top(lat)) / taper_decades, 0, 1)``
+
+    so it is 0 above the top and rises linearly in ``log10 p`` to 1 a distance
+    ``taper_decades`` below it, instead of a step (``taper_decades = 0`` is the
+    step). ``w`` multiplies every nudged variable's inverse timescale.
+
+    The weight is a function of the level's *reference* pressure
+    (:func:`reference_pressure_pa`, as ``min_pressure_hpa`` uses) and the
+    column's latitude. It is a fixed climatological proxy and does **not**
+    follow the instantaneous tropopause of the simulated column.
+
+    ``min_pressure_hpa`` remains a hard floor above which nothing is nudged
+    (the WeatherBench2 13-level stores clamp above 50 hPa), applied on top of
+    this weight; :meth:`validate` rejects a floor that would sit below either
+    top and silently become the binding cut.
+
+    Attributes:
+        p_tropical_hpa: Top pressure (hPa) equatorward of ``lat_tropical_deg``.
+        p_polar_hpa: Top pressure (hPa) poleward of ``lat_polar_deg``.
+        lat_tropical_deg: Latitude (degrees, >= 0) equatorward of which the
+            top is ``p_tropical_hpa``.
+        lat_polar_deg: Latitude (degrees) poleward of which the top is
+            ``p_polar_hpa``; must exceed ``lat_tropical_deg``.
+        taper_decades: Vertical taper width in decades of ``log10 p``
+            (0 is a hard step).
+
+    """
+
+    p_tropical_hpa: jnp.ndarray = 150.0
+    p_polar_hpa: jnp.ndarray = 400.0
+    lat_tropical_deg: jnp.ndarray = 20.0
+    lat_polar_deg: jnp.ndarray = 35.0
+    taper_decades: jnp.ndarray = 0.1
+
+    @classmethod
+    def from_mapping(cls, mapping, *, min_pressure_hpa=None) -> "LatTop":
+        """Build and validate from a ``nudging.lat_top`` mapping.
+
+        Unknown keys raise, so a misspelt key cannot silently fall back to a
+        default profile.
+        """
+        known = set(cls.__dataclass_fields__)
+        unknown = sorted(set(mapping) - known)
+        if unknown:
+            raise ValueError(
+                f"nudging.lat_top: unknown key(s) {unknown}; known keys are "
+                f"{sorted(known)}")
+        lat_top = cls(**{k: float(mapping[k]) for k in known if k in mapping})
+        lat_top.validate(min_pressure_hpa=min_pressure_hpa)
+        return lat_top
+
+    def validate(self, *, min_pressure_hpa=None) -> None:
+        """Raise ``ValueError`` for an unusable profile.
+
+        Checks concrete values only: a profile whose leaves are being traced
+        (a term rebuilt inside ``jax.grad`` with respect to one of them) has
+        no values to compare and is returned unchecked.
+        """
+        leaves = (self.p_tropical_hpa, self.p_polar_hpa, self.lat_tropical_deg,
+                  self.lat_polar_deg, self.taper_decades)
+        if any(isinstance(leaf, jax.core.Tracer) for leaf in leaves):
+            return
+        p_t, p_p = float(self.p_tropical_hpa), float(self.p_polar_hpa)
+        l_t, l_p = float(self.lat_tropical_deg), float(self.lat_polar_deg)
+        width = float(self.taper_decades)
+        if not (p_t > 0.0 and p_p > 0.0):
+            raise ValueError(
+                f"nudging.lat_top: p_tropical_hpa ({p_t}) and p_polar_hpa "
+                f"({p_p}) must be positive")
+        if width < 0.0:
+            raise ValueError(
+                f"nudging.lat_top.taper_decades ({width}) must be >= 0")
+        if not (0.0 <= l_t < l_p <= 90.0):
+            raise ValueError(
+                "nudging.lat_top requires 0 <= lat_tropical_deg < "
+                f"lat_polar_deg <= 90, got {l_t} and {l_p}")
+        if min_pressure_hpa is not None and float(min_pressure_hpa) > min(p_t, p_p):
+            raise ValueError(
+                f"nudging.min_pressure_hpa ({float(min_pressure_hpa)}) is a hard "
+                "floor and lies below the lat_top top "
+                f"(min of {p_t} and {p_p} hPa), so it would override the "
+                "latitude profile; set it to or above the smallest lat_top "
+                "pressure (the floor is only meant to guard the clamped "
+                "levels above the reanalysis store)")
+
+    def top_hpa(self, lat_deg):
+        """Top-of-nudging pressure (hPa) at latitude ``lat_deg`` (degrees)."""
+        a = jnp.abs(lat_deg)
+        span = self.lat_polar_deg - self.lat_tropical_deg
+        w_trop = jnp.where(
+            a <= self.lat_tropical_deg, 1.0,
+            jnp.where(a >= self.lat_polar_deg, 0.0,
+                      jnp.cos(0.5 * jnp.pi * (a - self.lat_tropical_deg) / span) ** 2))
+        return jnp.exp(w_trop * jnp.log(self.p_tropical_hpa)
+                       + (1.0 - w_trop) * jnp.log(self.p_polar_hpa))
+
+    def weight(self, p_ref_hpa, lat_deg):
+        """Nudging weight in ``[0, 1]``, shape ``(nlev,) + lat_deg.shape``.
+
+        Args:
+            p_ref_hpa: ``(nlev,)`` reference pressures (hPa), level on axis 0.
+            lat_deg: Column latitudes (degrees), any shape.
+
+        """
+        lat_deg = jnp.asarray(lat_deg)
+        p = jnp.asarray(p_ref_hpa).reshape((-1,) + (1,) * lat_deg.ndim)
+        d = jnp.log10(p) - jnp.log10(self.top_hpa(lat_deg))[None]
+        # A zero-width taper is the hard step: floor the width so ``d / width``
+        # saturates to 0 or 1 instead of dividing 0 by 0.
+        width = jnp.maximum(self.taper_decades, 1e-12)
+        return jnp.clip(d / width, 0.0, 1.0)
+
+
+# ---------------------------------------------------------------------------
 # Tendency helper (split out so unit tests can call it without a Model)
 # ---------------------------------------------------------------------------
 
 
 def nudging_tendency(state: PhysicsState, target: NudgingTarget,
                      config: NudgingConfig,
-                     nodal_shape: tuple | None = None) -> PhysicsTendency:
+                     nodal_shape: tuple | None = None,
+                     weight=None) -> PhysicsTendency:
     """Newtonian relaxation tendency in gridpoint space.
 
     ``dX/dt = inv_tau * (X_ref - X)`` per relaxed variable. Variables with
@@ -329,6 +481,11 @@ def nudging_tendency(state: PhysicsState, target: NudgingTarget,
         target: Reference fields. Call ``target.select(date)`` *before*
             this for time-varying references.
         config: Per-variable inverse-tau profiles.
+        nodal_shape: The model's nodal ``(nlon, nlat)``, needed only to
+            flatten a nodal target onto a column-vectorised state.
+        weight: Optional per-column weight multiplying every inverse
+            timescale, ``(nlev, ncols)`` (reshaped row-major to the state's
+            layout; the :class:`LatTop` profile). ``None`` is plain relaxation.
 
     Returns:
         A :class:`PhysicsTendency` with the relaxation tendencies. Caller
@@ -348,6 +505,11 @@ def nudging_tendency(state: PhysicsState, target: NudgingTarget,
     inv_tau_temp = _profile(config.inv_tau_temperature)
     inv_tau_q = (None if config.inv_tau_humidity is None
                  else _profile(config.inv_tau_humidity))
+    if weight is not None:
+        weight = weight.reshape(state.temperature.shape)
+        inv_tau_wind = inv_tau_wind * weight
+        inv_tau_temp = inv_tau_temp * weight
+        inv_tau_q = None if inv_tau_q is None else inv_tau_q * weight
 
     # The target is assembled on the dycore's nodal (nlev, nlon, nlat) grid,
     # but under column vectorisation the state arriving here has already been
@@ -447,6 +609,7 @@ class NudgingTerm(PhysicsTerm):
     # ``config`` is a tree_math struct of JAX arrays — annotate with
     # ``nnx.data`` so flax's pytree machinery traverses it.
     config: NudgingConfig = nnx.data(None)
+    lat_top: Optional[LatTop] = nnx.data(None)
 
     def cache_coords(self, coords) -> None:
         """Remember the model's nodal (nlon, nlat).
@@ -455,10 +618,31 @@ class NudgingTerm(PhysicsTerm):
         flattening onto a column-vectorised state — see ``nudging_tendency``.
         """
         self._nodal_shape = tuple(coords.horizontal.nodal_shape)
+        if self.lat_top is not None:
+            # The geometry the weight is a function of, in the
+            # layout-agnostic per-column form every horizontally-aware term
+            # caches. The weight itself is evaluated from ``lat_top`` at each
+            # call, not stored here: ``lat_top`` is a pytree of leaves, and a
+            # weight frozen at build time would give those leaves a silently
+            # zero gradient.
+            lat_rad, _ = column_lat_lon(coords.horizontal)
+            self._lat_deg = nnx.Variable(jnp.rad2deg(lat_rad))
+            self._p_ref_hpa = nnx.Variable(
+                jnp.asarray(reference_pressure_pa(coords.vertical)) / 100.0)
 
-    def __init__(self, config: NudgingConfig):
-        """Initialise the term with the relaxation timescales."""
+    def __init__(self, config: NudgingConfig, lat_top: Optional[LatTop] = None):
+        """Initialise the term with the relaxation timescales.
+
+        Args:
+            config: Per-variable, per-level inverse timescales.
+            lat_top: Optional :class:`LatTop`; ``None`` leaves the per-level
+                profile in ``config`` as the only vertical structure.
+
+        """
         self.config = config
+        if lat_top is not None:
+            lat_top.validate()
+        self.lat_top = lat_top
 
     def __call__(self, state: PhysicsState, diagnostics: dict,
                  forcing: ForcingData, terrain: TerrainData):
@@ -477,9 +661,15 @@ class NudgingTerm(PhysicsTerm):
                 tracers={name: jnp.zeros_like(t) for name, t in state.tracers.items()},
             )
             return tend, diagnostics
+        # (nlev, ncols); ``nudging_tendency`` reshapes it row-major to the
+        # state's layout, which serves the whole-grid and column-vectorised
+        # hosts alike.
+        weight = (None if self.lat_top is None else self.lat_top.weight(
+            self._p_ref_hpa.get_value(), self._lat_deg.get_value()))
         return nudging_tendency(
             state, target, self.config,
             nodal_shape=getattr(self, "_nodal_shape", None),
+            weight=weight,
         ), diagnostics
 
 
@@ -488,17 +678,18 @@ class NudgingTerm(PhysicsTerm):
 # ---------------------------------------------------------------------------
 
 
-def with_nudging(physics, config: NudgingConfig):
+def with_nudging(physics, config: NudgingConfig,
+                 lat_top: Optional[LatTop] = None):
     """Return ``physics`` extended with a :class:`NudgingTerm`.
 
     Equivalent to ``physics + NudgingTerm(config)`` for any
     :class:`ComposablePhysics`. Discoverable as a paired helper with the
     forcing-side ``forcing.copy(nudging_target=target)`` — the canonical
     way to wire nudging is "add the term to physics; attach the target
-    to forcing".
+    to forcing". ``lat_top`` is forwarded to :class:`NudgingTerm`.
     """
     if not isinstance(physics, ComposablePhysics):
         raise TypeError(
             f"with_nudging expects a ComposablePhysics, got {type(physics).__name__}"
         )
-    return physics + NudgingTerm(config)
+    return physics + NudgingTerm(config, lat_top=lat_top)

@@ -7644,3 +7644,35 @@ class TestDustVectorFollowsNudging(unittest.TestCase):
                 physics = _resolve_nudging_dependent_physics(cfg, cfg.physics)
                 self.assertIs(physics.jam_dust_nudged, expected,
                               msg=f"{preset} nudging={nudging}")
+
+
+class TestMaybeAddNudgingLatTop(unittest.TestCase):
+    """``nudging.lat_top`` reaches the term; null keeps the global step."""
+
+    def _term(self, nudging):
+        from omegaconf import OmegaConf
+        from jcm import runners
+        from jcm.nudging import NudgingTerm
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        cfg = OmegaConf.create({"nudging": {"enabled": True, **nudging}})
+        physics = runners.maybe_add_nudging(speedy_physics(), cfg, coords)
+        return [t for t in physics.terms if isinstance(t, NudgingTerm)][0]
+
+    def test_default_has_no_lat_top(self):
+        self.assertIsNone(self._term({"lat_top": None}).lat_top)
+        self.assertIsNone(self._term({}).lat_top)
+
+    def test_lat_top_is_read(self):
+        term = self._term({"min_pressure_hpa": 60.0, "lat_top": {
+            "p_tropical_hpa": 150.0, "p_polar_hpa": 400.0,
+            "lat_tropical_deg": 20.0, "lat_polar_deg": 35.0,
+            "taper_decades": 0.1}})
+        self.assertEqual(float(term.lat_top.p_polar_hpa), 400.0)
+        self.assertEqual(float(term.lat_top.taper_decades), 0.1)
+
+    def test_floor_below_the_top_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._term({"min_pressure_hpa": 200.0, "lat_top": {
+                "p_tropical_hpa": 150.0, "p_polar_hpa": 400.0}})
