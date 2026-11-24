@@ -143,9 +143,15 @@ bail_on_unhealthy: true
 # configurations and release-matrix bands are all cooler/calmer) but below
 # that drift. Set either to ``null`` to disable it for a deliberately
 # hot/windy experiment.
+# ``max_q_gkg`` (g/kg) is the humidity counterpart: in a dry configuration
+# (no moisture physics) q is a near-passive tracer advected by the core, so a
+# single spike above 100 g/kg is not a blow-up signature there. Raise it, or
+# set ``null`` to disable it; the q maximum is still reported in every
+# chunk's health line.
 health:
   max_wind_speed: 250.0   # m/s
   max_temperature: 400.0  # K
+  max_q_gkg: 100.0        # g/kg
 
 # Runtime mode:
 #   full        — standard dynamical-core integration (Model.run)

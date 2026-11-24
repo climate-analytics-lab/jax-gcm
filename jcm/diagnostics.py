@@ -84,6 +84,7 @@ def check_health(ds, chunk_idx: int, elapsed_days: float, *,
                  is_bootstrap_chunk: bool | None = None,
                  max_wind_speed: float | None = 250.0,
                  max_temperature: float | None = 400.0,
+                 max_q_gkg: float | None = 100.0,
                  boundary_state=None) -> tuple[bool, dict]:
     """Inspect ``ds`` for atmosphere-blowup signatures.
 
@@ -132,8 +133,8 @@ def check_health(ds, chunk_idx: int, elapsed_days: float, *,
     0``, i.e. the pre-#903 meaning, for a caller using ``chunk_idx`` as a
     plain ordinal with no better signal to give.
 
-    ``max_wind_speed`` (m/s) and ``max_temperature`` (K) are the two
-    configurable ceilings from #1145: an unforced dry core (no physics, or
+    ``max_wind_speed`` (m/s), ``max_temperature`` (K) and ``max_q_gkg``
+    (g/kg) are the configurable ceilings (#1145 and its humidity sibling): an unforced dry core (no physics, or
     physics that only ever removes energy/momentum such as SSO drag) has no
     equilibrium to relax to and can drift to an arbitrarily extreme state
     without ever producing a NaN or crossing the much larger absolute-blowup
@@ -145,8 +146,12 @@ def check_health(ds, chunk_idx: int, elapsed_days: float, *,
     the T21 smoke configurations and the release-matrix bands are all far
     cooler/calmer) but below that drift, so a healthy run never trips them.
     Either may be set to ``None`` to disable it for a deliberately hot/windy
-    experiment. Configured via ``run.health.max_wind_speed`` /
-    ``run.health.max_temperature`` (see ``jcm/config/run/default.yaml``).
+    experiment. ``max_q_gkg`` (default 100) exists because in a dry
+    configuration humidity is a near-passive tracer, so a single spike is
+    not a blow-up signature; the maximum is still reported (and printed by
+    ``print_report``) when the criterion is raised or disabled. Configured
+    via ``run.health.max_wind_speed`` / ``run.health.max_temperature`` /
+    ``run.health.max_q_gkg`` (see ``jcm/config/run/default.yaml``).
 
     Returns
     -------
@@ -249,9 +254,11 @@ def check_health(ds, chunk_idx: int, elapsed_days: float, *,
     if report.get("T_max", 300) > 500:
         ok = False
         reasons.append(f"T_max={report['T_max']:.0f}K (> 500K)")
-    if report.get("q_max_gkg", 0) > 100:
+    if (max_q_gkg is not None
+            and report.get("q_max_gkg", 0) > max_q_gkg):
         ok = False
-        reasons.append(f"q_max={report['q_max_gkg']:.1f} g/kg (> 100)")
+        reasons.append(
+            f"q_max={report['q_max_gkg']:.1f} g/kg (> {max_q_gkg:g})")
 
     # #1145: configurable ceilings that catch an unforced/underdamped core
     # drifting far outside any physical regime well before it reaches the

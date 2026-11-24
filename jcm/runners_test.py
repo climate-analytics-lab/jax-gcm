@@ -403,10 +403,13 @@ class TestConfigComposition(unittest.TestCase):
         cfg = _compose(["run=default"])
         self.assertEqual(cfg.run.health.max_wind_speed, 250.0)
         self.assertEqual(cfg.run.health.max_temperature, 400.0)
+        self.assertEqual(cfg.run.health.max_q_gkg, 100.0)
         cfg = _compose([
             "run.health.max_wind_speed=300.0",
             "run.health.max_temperature=null",
+            "run.health.max_q_gkg=null",
         ])
+        self.assertIsNone(cfg.run.health.max_q_gkg)
         self.assertEqual(cfg.run.health.max_wind_speed, 300.0)
         self.assertIsNone(cfg.run.health.max_temperature)
 
@@ -1882,6 +1885,7 @@ class TestModeDispatch(unittest.TestCase):
             "run.total_time=1", "run.save_interval=1",
             "run.health.max_wind_speed=99.0",
             "run.health.max_temperature=null",
+            "run.health.max_q_gkg=250.0",
         ])
         with tempfile.TemporaryDirectory() as tmpdir, \
                 mock.patch("jcm.diagnostics.check_health",
@@ -1895,6 +1899,7 @@ class TestModeDispatch(unittest.TestCase):
                         model=model, forcing=object())
         self.assertEqual(health.call_args.kwargs["max_wind_speed"], 99.0)
         self.assertIsNone(health.call_args.kwargs["max_temperature"])
+        self.assertEqual(health.call_args.kwargs["max_q_gkg"], 250.0)
 
     def test_chunked_schedule_is_exact_seconds_to_a_sub_day_endpoint(self):
         """365 d + 1 h in 30-day chunks lands exactly on the end_time.

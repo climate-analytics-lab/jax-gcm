@@ -2856,6 +2856,7 @@ def run_chunked(
     health_cfg = cfg.run.get("health", {})
     max_wind_speed = health_cfg.get("max_wind_speed", 250.0)
     max_temperature = health_cfg.get("max_temperature", 400.0)
+    max_q_gkg = health_cfg.get("max_q_gkg", 100.0)
 
     # Constant pressure-surface output (#258): applied to each dataset right
     # before it is written (chunk/monthly/snapshot files below), never to
@@ -3010,6 +3011,7 @@ def run_chunked(
                                   is_bootstrap_chunk=is_bootstrap_chunk,
                                   max_wind_speed=max_wind_speed,
                                   max_temperature=max_temperature,
+                                  max_q_gkg=max_q_gkg,
                                   boundary_state=boundary_state)
         report["wall_seconds"] = job.chunk_wall
         reports.append(report)
