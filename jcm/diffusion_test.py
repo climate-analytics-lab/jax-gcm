@@ -419,5 +419,91 @@ class ZonalMeanExemptionDycoreTest(unittest.TestCase):
         self.assertGreater(changed, 0.0)
 
 
+class UserLevelTableProfileTest(unittest.TestCase):
+    """``lmidatm`` orders for a user hybrid table are mapped by pressure."""
+
+    @staticmethod
+    def _table(indices):
+        """Build a table of the given L95 interfaces (so every level IS L95's)."""
+        from jcm.physics.echam.echam_levels import (get_echam_levels,
+                                                    hybrid_levels_from_table)
+        full = get_echam_levels(95)
+        idx = list(indices)
+        return hybrid_levels_from_table(
+            np.asarray(full.a_boundaries, np.float64)[idx],
+            np.asarray(full.b_boundaries, np.float64)[idx])
+
+    def test_builtin_table_given_as_levels_is_the_index_table_exactly(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        for truncation, layers in ((63, 47), (63, 95), (127, 95), (31, 47)):
+            with self.subTest(truncation=truncation, layers=layers):
+                levels = get_echam_levels(layers)
+                np.testing.assert_array_equal(
+                    echam_lmidatm_orders(truncation, layers, levels),
+                    echam_lmidatm_orders(truncation, layers))
+
+    def test_l47_values_as_a_user_table_reproduce_the_l47_filter(self):
+        from jcm.physics.echam.echam_levels import (get_echam_levels,
+                                                    hybrid_levels_from_table)
+        built_in = get_echam_levels(47)
+        user = hybrid_levels_from_table(
+            np.asarray(built_in.a_boundaries, np.float64),
+            np.asarray(built_in.b_boundaries, np.float64))
+        a = DiffusionFilter.echam_lmidatm(63, 47)
+        b = DiffusionFilter.auto(63, 47, "hybrid", user)
+        np.testing.assert_array_equal(a.level_orders_temp, b.level_orders_temp)
+        self.assertEqual(float(a.temp_timescale), float(b.temp_timescale))
+        self.assertFalse(b.diffuses_zonal_mean)
+
+    def test_l95_subset_gets_the_order_of_the_l95_level_nearest_in_pressure(self):
+        import jcm.diffusion as jd
+        from jcm.physics.echam.echam_levels import (REFERENCE_SURFACE_PRESSURE_PA,
+                                                    get_echam_levels)
+
+        def mid(h):
+            return (np.asarray(h.a_centers, np.float64)
+                    + np.asarray(h.b_centers, np.float64)
+                    * REFERENCE_SURFACE_PRESSURE_PA)
+
+        l95 = get_echam_levels(95)
+        l95_orders = np.asarray(echam_lmidatm_orders(63, 95))
+        user = self._table((0, 10, 20, 30, 40, 55, 70, 80, 90, 95))
+        got = np.asarray(echam_lmidatm_orders(63, user.layers, user))
+        self.assertEqual(got.shape, (9,))
+        for k, p in enumerate(mid(user)):
+            nearest = int(np.argmin(np.abs(np.log(mid(l95)) - np.log(p))))
+            with self.subTest(level=k):
+                self.assertEqual(got[k], l95_orders[nearest])
+        # The thinned table spans the whole order range of the reference
+        # profile, del2 at the top to del8 in the troposphere.
+        self.assertEqual((got.min(), got.max()), (1, 4))
+        self.assertTrue(np.all(np.diff(got) >= 0))
+        # no ``_ECHAM_LMIDATM_ORDERS`` entry was needed or added
+        self.assertNotIn((63, 9), jd._ECHAM_LMIDATM_ORDERS)
+
+    def test_truncation_picks_the_nearest_tabulated_profile(self):
+        user = self._table((0, 10, 20, 30, 40, 55, 70, 80, 90, 95))
+        # T127 L95 stops at del6 (``mo_hdiff.f90``); T63 goes to del8.
+        self.assertEqual(int(echam_lmidatm_orders(106, 9, user).max()), 3)
+        self.assertEqual(int(echam_lmidatm_orders(85, 9, user).max()), 4)
+
+    def test_layers_must_match_the_table(self):
+        user = self._table((0, 10, 20, 95))
+        with self.assertRaisesRegex(ValueError, "layers=47 but the hybrid levels"):
+            echam_lmidatm_orders(63, 47, user)
+
+    def test_auto_maps_a_user_table_without_the_fallback_warning(self):
+        import logging
+        user = self._table((0, 10, 20, 30, 40, 55, 70, 80, 90, 95))
+        with self.assertNoLogs("jcm.diffusion", level=logging.WARNING):
+            d = DiffusionFilter.auto(63, user.layers, "hybrid", user)
+        self.assertEqual(len(d.level_orders_temp), 9)
+        d.validate_layers(9)
+        # without a table the unknown count still takes the warned fallback
+        with self.assertLogs("jcm.diffusion", level="WARNING"):
+            fallback = DiffusionFilter.auto(63, 9, "hybrid")
+        self.assertIsNone(fallback.level_orders_temp)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,7 @@ to ``units.pascal`` when constructed with these ``HybridCoordinates``.
 """
 
 import jax.numpy as jnp
+import numpy as np
 from dinosaur.hybrid_coordinates import HybridCoordinates
 
 
@@ -163,4 +164,201 @@ def get_echam_levels(nlevels: int) -> 'HybridCoordinates':
 
     else:
         raise ValueError(f"No built-in level definition for {nlevels} levels. "
-                        f"Available: 47, 95")
+                         "Available: 47, 95. For any other table supply the "
+                         "half-level coefficients through grid.level_table "
+                         "(hybrid_levels_from_table / read_vct_file).")
+
+
+# ---------------------------------------------------------------------------
+# User-supplied tables
+# ---------------------------------------------------------------------------
+
+#: Built-in level counts (the ``nlevels`` values :func:`get_echam_levels` serves).
+BUILTIN_LEVEL_COUNTS = (47, 95)
+
+#: Reference surface pressure [Pa] at which a table's half-level pressures are
+#: evaluated for validation and for mapping per-level quantities by pressure
+#: (the same 1013.25 hPa the level-resolved boundary files are built at,
+#: ``jcm.data.bc.interpolate_ozone.REFERENCE_SURFACE_PRESSURE_PA``).
+REFERENCE_SURFACE_PRESSURE_PA = 101325.0
+
+# Surface pressures [Pa] a table's layers must stay positive-mass across: the
+# half-level pressure ``a + b*ps`` is linear in ``ps``, so checking the two
+# ends of the range that real columns span (the Tibetan Plateau to a deep low)
+# covers every value between.
+_SURFACE_PRESSURE_RANGE_PA = (50000.0, 110000.0)
+
+
+def hybrid_levels_from_table(a_boundaries, b_boundaries) -> 'HybridCoordinates':
+    """Build ``HybridCoordinates`` from a user-supplied vct table.
+
+    The table has the convention and units of the built-in ones (and of ECHAM's
+    ``vct_a``/``vct_b``): half-level (interface) coefficients, ``nlev + 1``
+    entries, **top of atmosphere first**, ``a`` in Pa and ``b`` dimensionless,
+    so that the interface pressure is ``p = a + b * ps``. The result is built
+    through the same top-pressure guard as the built-in tables
+    (``_checked_hybrid``), after the checks a hand-made table needs that a
+    transcribed one does not. Each failure names the offending property, because
+    a table that is silently reinterpreted (a surface-first one flipped, a
+    normalised ``a`` read as Pa) integrates a different atmosphere without any
+    error:
+
+    * ``a`` and ``b`` are finite, 1-D, of equal length ``>= 3``;
+    * ``a[-1] == 0`` and ``b[-1] == 1`` (the lowest interface is the surface,
+      ``p = ps``), and ``a >= 0``, ``0 <= b <= 1``, ``b`` non-decreasing;
+    * interface pressure increases strictly with index at the reference surface
+      pressure and across 50-110 kPa (positive layer mass over mountains and
+      deep lows). A table that *decreases* (``b[0] == 1``, ``b[-1] == 0``) is
+      surface-first and is rejected rather than flipped: which end is the
+      surface is the one fact a caller must state, not one the model guesses.
+
+    Args:
+        a_boundaries: ``(nlev + 1,)`` pressure coefficients [Pa], TOA first.
+        b_boundaries: ``(nlev + 1,)`` sigma coefficients [1], TOA first.
+
+    Returns:
+        ``HybridCoordinates`` with ``a_boundaries`` in Pa, as
+        :func:`get_echam_levels` returns.
+
+    Raises:
+        ValueError: if the table violates any of the above.
+
+    """
+    a = np.asarray(a_boundaries, dtype=np.float64)
+    b = np.asarray(b_boundaries, dtype=np.float64)
+    if a.ndim != 1 or b.ndim != 1:
+        raise ValueError(
+            f"hybrid level table: a and b must be 1-D, got shapes {a.shape} "
+            f"and {b.shape}.")
+    if a.shape != b.shape:
+        raise ValueError(
+            f"hybrid level table: a has {a.size} entries but b has {b.size}; "
+            "both are the nlev + 1 half-level (interface) coefficients.")
+    if a.size < 3:
+        raise ValueError(
+            f"hybrid level table has {a.size} half levels; at least 3 "
+            "(2 layers) are needed.")
+    if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
+        raise ValueError("hybrid level table: a and b must be finite.")
+    if b[0] > b[-1]:
+        raise ValueError(
+            "hybrid level table looks SURFACE-FIRST (b decreases from "
+            f"b[0]={b[0]:g} to b[-1]={b[-1]:g}). The table must be top-of-"
+            "atmosphere first, like ECHAM's vct_a/vct_b (a[0]≈0, b[0]=0 at the "
+            "top; a[-1]=0, b[-1]=1 at the surface). Reverse both arrays "
+            "yourself if that is what you intended.")
+    if a[-1] != 0.0 or b[-1] != 1.0:
+        raise ValueError(
+            "hybrid level table must end at the surface interface (a[-1]=0, "
+            f"b[-1]=1 so that p = ps); got a[-1]={a[-1]:g}, b[-1]={b[-1]:g}. "
+            "Is the table truncated at the bottom?")
+    if np.any(a < 0.0) or np.any(b < 0.0) or np.any(b > 1.0):
+        raise ValueError(
+            "hybrid level table: a must be >= 0 (Pa) and b within [0, 1]. "
+            "ECHAM's vct_a is in Pa; a table with a normalised a (a/p0) must be "
+            "multiplied by p0 = 101325 Pa first.")
+    if np.any(np.diff(b) < 0.0):
+        raise ValueError(
+            "hybrid level table: b must be non-decreasing from the top to the "
+            "surface.")
+    for ps in (REFERENCE_SURFACE_PRESSURE_PA, *_SURFACE_PRESSURE_RANGE_PA):
+        dp = np.diff(a + b * ps)
+        if not np.all(dp > 0.0):
+            k = int(np.argmin(dp))
+            raise ValueError(
+                "hybrid level table: interface pressure does not increase "
+                f"strictly downward at ps={ps:g} Pa (layer {k} has "
+                f"dp={dp[k]:g} Pa). A table must have positive layer mass for "
+                "every surface pressure the model can reach.")
+    return _checked_hybrid(jnp.asarray(a), jnp.asarray(b))
+
+
+def read_vct_file(path) -> 'HybridCoordinates':
+    """Read ECHAM's ``vct_a``/``vct_b`` from a netCDF file into hybrid levels.
+
+    The built-in L47/L95 tables were transcribed from exactly these variables
+    (``nvclev`` dimension, ``vct_a`` in Pa, ``vct_b`` dimensionless, TOA first)
+    of production ECHAM initial-condition files, so such a file can be named
+    directly. The values are validated by :func:`hybrid_levels_from_table`.
+
+    Raises:
+        ValueError: if either variable is missing, or the table is invalid.
+
+    """
+    import xarray as xr
+
+    with xr.open_dataset(path, decode_times=False) as ds:
+        missing = [v for v in ("vct_a", "vct_b") if v not in ds.variables]
+        if missing:
+            raise ValueError(
+                f"{path}: no {', '.join(missing)} variable; a level-table file "
+                "carries ECHAM's vct_a (Pa) and vct_b (dimensionless) on the "
+                f"half levels. Variables present: {sorted(map(str, ds.variables))}.")
+        a = np.asarray(ds["vct_a"].values, dtype=np.float64)
+        b = np.asarray(ds["vct_b"].values, dtype=np.float64)
+    return hybrid_levels_from_table(a, b)
+
+
+def levels_from_level_table(level_table, layers=None) -> 'HybridCoordinates':
+    """Resolve a ``grid.level_table`` value into hybrid levels.
+
+    Args:
+        level_table: a mapping with ``a`` and ``b`` lists (the half-level
+            coefficients, Pa and dimensionless, TOA first), or the path of a
+            netCDF file carrying ``vct_a``/``vct_b`` (:func:`read_vct_file`).
+            A path must already be resolved to a local file;
+            ``jcm.runners.build_coords`` resolves ``hf://`` and relative paths
+            before calling.
+        layers: the configured layer count, if any; it must equal the table's
+            ``len(a) - 1``.
+
+    Returns:
+        The validated ``HybridCoordinates``.
+
+    Raises:
+        ValueError: on a malformed table, a layer-count mismatch, or an
+            unrecognised ``level_table`` type.
+
+    """
+    from collections.abc import Mapping
+    if isinstance(level_table, Mapping):
+        if set(level_table) != {"a", "b"}:
+            raise ValueError(
+                "grid.level_table given inline must be {a: [...], b: [...]} "
+                f"(the half-level coefficients); got keys {sorted(level_table)}.")
+        levels = hybrid_levels_from_table(level_table["a"], level_table["b"])
+    elif isinstance(level_table, str) or hasattr(level_table, "__fspath__"):
+        levels = read_vct_file(level_table)
+    else:
+        raise ValueError(
+            "grid.level_table must be {a: [...], b: [...]} or the path of a "
+            f"netCDF file with vct_a/vct_b; got {type(level_table).__name__}.")
+    if layers is not None and int(layers) != levels.layers:
+        raise ValueError(
+            f"grid.layers={int(layers)} but the level table has {levels.layers} "
+            f"layers (len(a) - 1 = {levels.layers}). Set grid.layers to match, "
+            "or null to take it from the table.")
+    return levels
+
+
+def is_builtin_table(levels) -> bool:
+    """Whether ``levels`` is one of the built-in tables (:func:`get_echam_levels`).
+
+    The built-in tables are the ones the level-resolved boundary data (ozone,
+    oxidants) and the ``(truncation, nlev)`` hyperdiffusion profiles are
+    published for; any other table that merely shares a level count is a
+    different vertical grid. Compared to float32 round-off, since the built-in
+    arrays are float32 unless x64 is enabled while a table read from a file is
+    float64.
+    """
+    n = int(levels.layers)
+    if n not in BUILTIN_LEVEL_COUNTS:
+        return False
+    ref = get_echam_levels(n)
+    return bool(
+        np.allclose(np.asarray(levels.a_boundaries, np.float64),
+                    np.asarray(ref.a_boundaries, np.float64),
+                    rtol=1e-6, atol=1e-6)
+        and np.allclose(np.asarray(levels.b_boundaries, np.float64),
+                        np.asarray(ref.b_boundaries, np.float64),
+                        rtol=1e-6, atol=1e-6))
