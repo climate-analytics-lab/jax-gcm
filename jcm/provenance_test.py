@@ -929,5 +929,93 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
         self.assertEqual(rebuilt.params, {})
 
 
+class RecordOpensWithoutClearingTest(unittest.TestCase):
+    """A model built from Python never calls ``start_run`` (#1236).
+
+    Every test starts from the state of a fresh process (no record open,
+    empty registries) and restores whatever the rest of the session left,
+    so the outcome does not depend on test order.
+    """
+
+    def setUp(self):
+        self._saved = {k: provenance._state[k]
+                       for k in ("base", "inputs", "facts")}
+        provenance._state.update(base=None, inputs={}, facts={})
+
+    def tearDown(self):
+        provenance._state.update(self._saved)
+
+    @staticmethod
+    def _input_file(directory, size):
+        path = Path(directory) / f"in_{size}.nc"
+        path.write_bytes(b"x" * size)
+        return str(path)
+
+    def test_fact_and_input_recorded_before_first_collect_survive(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = self._input_file(d, 7)
+            provenance.record_fact("dated_input_persistence", "persisted")
+            provenance.record_input(path)
+            prov = provenance.collect()
+            attrs = provenance.attrs()
+            sidecar = provenance.write_sidecar(Path(d) / "out.nc")
+            on_disk = json.loads(sidecar.read_text())
+        self.assertEqual(prov["facts"]["dated_input_persistence"],
+                         "persisted")
+        self.assertEqual(prov["inputs"][path]["size"], 7)
+        self.assertEqual(attrs["jcm_prov_dated_input_persistence"],
+                         "persisted")
+        self.assertIn(path, json.loads(attrs["jcm_prov_inputs"]))
+        self.assertEqual(on_disk["facts"]["dated_input_persistence"],
+                         "persisted")
+        self.assertIn(path, on_disk["inputs"])
+
+    def test_collect_opens_the_record_without_clearing(self):
+        provenance.collect()
+        provenance.record_fact("late", "1")
+        self.assertEqual(provenance.collect()["facts"]["late"], "1")
+
+    def test_created_is_the_time_of_the_first_thing_recorded(self):
+        self.assertIsNone(provenance._state["base"])
+        provenance.record_fact("k", "v")
+        created = provenance._state["base"]["created"]
+        self.assertEqual(provenance.collect()["created"], created)
+        # An input that is not a file records nothing and opens nothing.
+        provenance._state["base"] = None
+        provenance.record_input("auto")
+        self.assertIsNone(provenance._state["base"])
+
+    def test_start_run_is_the_only_call_that_empties_the_registries(self):
+        with tempfile.TemporaryDirectory() as d:
+            provenance.record_fact("k", "v")
+            provenance.record_input(self._input_file(d, 3))
+            provenance.collect()                 # does not clear
+            self.assertEqual(provenance.collect()["facts"]["k"], "v")
+            provenance.start_run()               # a second run starts clean
+            prov = provenance.collect()
+        self.assertNotIn("k", prov["facts"])
+        self.assertEqual(prov["inputs"], {})
+
+    def test_start_run_keeps_its_config_after_early_records(self):
+        from omegaconf import OmegaConf
+        provenance.record_fact("early", "1")
+        provenance.start_run(OmegaConf.create({"run": {"total_time": 10}}))
+        prov = provenance.collect()
+        self.assertIn("total_time: 10", prov["config_yaml"])
+        self.assertNotIn("early", prov["facts"])
+
+    def test_run_hash_separates_runs_differing_in_an_early_input(self):
+        hashes = []
+        with tempfile.TemporaryDirectory() as d:
+            for size in (5, 6):
+                provenance._state.update(base=None, inputs={}, facts={})
+                path = Path(d) / "same_name.nc"
+                path.write_bytes(b"x" * size)
+                os.utime(path, (1_000_000, 1_000_000))   # same mtime
+                provenance.record_input(str(path))
+                hashes.append(provenance.collect()["run_hash"])
+        self.assertNotEqual(*hashes)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,11 +36,17 @@ tracing, which is where the values become the ones the executable will
 use — see :class:`jcm.predictions.ModelPredictions` for why reading them
 afterwards is not the same thing.
 
-Lifecycle: :func:`start_run` at run start (captures code/env/config and
-resets the input registry), :func:`record_input` / :func:`record_fact`
-during model build, :func:`attrs` / :func:`write_sidecar` at output time
-(inputs and the run hash are finalized lazily, after the build has
-touched every file). The parameter record travels on the predictions
+Lifecycle: :func:`start_run` at run start (captures the config and resets
+the registries — it is the only call that empties them),
+:func:`record_input` / :func:`record_fact` during model build,
+:func:`attrs` / :func:`write_sidecar` at output time (inputs and the run
+hash are finalized lazily, after the build has touched every file). A
+process that never calls :func:`start_run` (a model built from Python)
+still gets a record: the first thing recorded, or the first
+:func:`collect`, opens it without clearing anything, so what the build
+recorded reaches the output. Probes are best-effort and cannot fail a run:
+a probe that cannot produce its value leaves a ``<probe failed: ...>``
+marker in the record rather than raising. The parameter record travels on the predictions
 object rather than through this module's registry: two models built in
 one process would otherwise overwrite each other's parameters, and the
 one that wrote the file need not be the one that ran last.
@@ -511,6 +517,13 @@ def start_run(cfg=None) -> None:
     libraries (pyses, mam4_jax, …) and can flip the live x64 setting
     *after* run start, so an eager snapshot here would miss them.
     """
+    _state["base"] = _new_base(cfg)
+    _state["inputs"] = {}
+    _state["facts"] = {}
+
+
+def _new_base(cfg=None) -> dict:
+    """Return the ``{"created", "config_yaml"}`` header of a new record."""
     config_yaml = None
     if cfg is not None:
         from omegaconf import OmegaConf
@@ -521,12 +534,23 @@ def start_run(cfg=None) -> None:
             # hydra:-runtime interpolations only resolve inside a live
             # Hydra app; the unresolved form still records every choice.
             config_yaml = OmegaConf.to_yaml(cfg, resolve=False)
-    _state["base"] = {
+    return {
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "config_yaml": config_yaml,
     }
-    _state["inputs"] = {}
-    _state["facts"] = {}
+
+
+def _ensure_record() -> None:
+    """Open the record if none is open, without touching the registries.
+
+    A model built from Python never calls :func:`start_run`, yet the build
+    already records inputs and facts. Whatever opens the record implicitly
+    must therefore keep what was recorded before it; only :func:`start_run`
+    empties the registries. ``created`` is the time of the first thing
+    recorded (or of the first :func:`collect`, whichever comes first).
+    """
+    if _state["base"] is None:
+        _state["base"] = _new_base()
 
 
 def _mirror_revision_facts() -> dict:
@@ -574,11 +598,13 @@ def record_input(requested, resolved=None, *, force_hash: bool = False) -> None:
     entry = describe_input(resolved, force_hash=force_hash)
     if str(requested) != resolved:
         entry["requested"] = str(requested)
+    _ensure_record()
     _state["inputs"][resolved] = entry
 
 
 def record_fact(key: str, value) -> None:
     """Record a run-shaping fact (e.g. ozone_source = prescribed/analytic)."""
+    _ensure_record()
     _state["facts"][key] = value
 
 
@@ -592,8 +618,7 @@ def collect(params: dict | None = None) -> dict:
     *params* is the record from :func:`describe_params`, carried by the
     predictions object rather than by this module's registry.
     """
-    if _state["base"] is None:
-        start_run()
+    _ensure_record()
     prov = dict(_state["base"])
     prov["code"] = probe_code()
     prov["environment"] = probe_environment()
