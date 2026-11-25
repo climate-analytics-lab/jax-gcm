@@ -515,7 +515,8 @@ class CmorWriterTest(unittest.TestCase):
 
     def _dataset(self, **extra):
         import xarray as xr
-        base = {"geopotential": ("level", np.array([9806.65, 19613.3])),
+        import jcm.constants as c
+        base = {"geopotential": ("level", np.array([1000.0, 2000.0]) * c.grav),
                 "surface_pressure": ((), np.float64(101325.0))}
         base.update(extra)
         return xr.Dataset({k: xr.DataArray(v[1], dims=v[0] if v[0] else ())
@@ -532,7 +533,7 @@ class CmorWriterTest(unittest.TestCase):
             convert(ds, "JCM-t", "all_2000", "2010", "monthly", pathlib.Path(td))
             got = xr.open_dataset(pathlib.Path(td) /
                                   "aerocom_JCM-t_all_2000_zg_ModelLevel_2010_monthly.nc")
-        # 9806.65 m2/s2 / 9.80665 = 1000 m
+        # (1000, 2000) * c.grav / c.grav = (1000, 2000) m
         np.testing.assert_allclose(np.asarray(got["zg"]), [1000.0, 2000.0], rtol=1e-4)
 
     def test_height_full_preferred_over_geopotential(self):

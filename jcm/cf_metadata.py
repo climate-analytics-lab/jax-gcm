@@ -145,7 +145,17 @@ _VARIABLE_ATTRS: dict[str, dict[str, str]] = {
     },
 }
 
-#: Attributes for the non-vertical coordinate axes.
+#: CF attributes for a constant-pressure vertical coordinate axis (``plev``),
+#: shared by :func:`jcm.analysis.to_pressure_levels` and CMOR exporters.
+PLEV_COORD_ATTRS: dict[str, str] = {
+    "standard_name": "air_pressure",
+    "long_name": "pressure",
+    "units": "Pa",
+    "positive": "down",
+    "axis": "Z",
+}
+
+#: Attributes for non-sigma coordinate axes (including constant-pressure ``plev``).
 _COORD_ATTRS: dict[str, dict[str, str]] = {
     "lon": {
         "standard_name": "longitude",
@@ -159,6 +169,7 @@ _COORD_ATTRS: dict[str, dict[str, str]] = {
         "axis": "Y",
         "long_name": "latitude",
     },
+    "plev": PLEV_COORD_ATTRS,
     # ``units`` for time is owned by xarray's datetime encoding — setting it
     # here would collide with the encoding on write. Applied only to a
     # datetime64 axis; see ``_time_attrs``.

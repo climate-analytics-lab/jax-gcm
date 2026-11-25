@@ -29,54 +29,52 @@ contact asks for it, and record the choice in the submission notes.
 from __future__ import annotations
 
 import argparse
+import itertools
 import pathlib
 import sys
 
 import xarray as xr
 
+from jcm.cmor_converter import (
+    cmor_variable,
+    shared_source_entries,
+    to_cmor_units,
+    validate_token,
+    write_cmor_variable,
+    write_netcdf_atomic,
+)
+
+# Vertical coordinate types for CMOR variables shared with ``jcm.cmor_converter``.
+# Source fallback priority, scales, and CF metadata come from
+# ``jcm.cmor_converter.shared_source_entries`` (first-present wins).
+_SHARED_VERT: dict[str, str] = {
+    "rlut": "TOA", "rlutcs": "TOA", "rsut": "TOA", "rsutcs": "TOA", "rsdt": "TOA",
+    "rsds": "Surface", "rlds": "Surface", "rsus": "Surface", "rlus": "Surface",
+    "hfls": "Surface", "hfss": "Surface",
+    "ps": "Surface", "ts": "Surface", "tas": "Surface", "uas": "Surface",
+    "vas": "Surface", "psl": "Surface",
+    "ta": "ModelLevel", "hus": "ModelLevel", "hur": "ModelLevel",
+    "ua": "ModelLevel", "va": "ModelLevel", "zg": "ModelLevel",
+    "clt": "Column", "prw": "Column",
+}
+
 # jcm name -> (CMOR name, units, vertical coordinate type, scale, offset)
 #
-# ``scale``/``offset`` convert jcm units to the units AeroCom requests.
-# Only variables JCM actually writes are listed; the remaining requested
-# fields need model-side work (see jax-gcm#581).
+# First-present wins when multiple JCM keys map to the same CMOR variable,
+# matching ``jcm.cmor_converter``. ``scale``/``offset`` convert jcm units to
+# the units AeroCom requests. Only variables JCM actually writes are listed;
+# the remaining requested fields need model-side work (see jax-gcm#581).
 NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
-    # --- radiative fluxes (TOA / surface) ---
-    "radiation.toa_lw_up": ("rlut", "W m-2", "TOA", 1.0, 0.0),
-    "radiation.toa_lw_up_clear": ("rlutcs", "W m-2", "TOA", 1.0, 0.0),
-    "radiation.toa_sw_up": ("rsut", "W m-2", "TOA", 1.0, 0.0),
-    "radiation.toa_sw_up_clear": ("rsutcs", "W m-2", "TOA", 1.0, 0.0),
-    "radiation.toa_sw_down": ("rsdt", "W m-2", "TOA", 1.0, 0.0),
-    "radiation.surface_sw_down": ("rsds", "W m-2", "Surface", 1.0, 0.0),
-    "radiation.surface_lw_down": ("rlds", "W m-2", "Surface", 1.0, 0.0),
-    "radiation.surface_sw_up": ("rsus", "W m-2", "Surface", 1.0, 0.0),
-    "radiation.surface_lw_up": ("rlus", "W m-2", "Surface", 1.0, 0.0),
-    # --- turbulent fluxes ---
-    "surface.latent_heat_flux": ("hfls", "W m-2", "Surface", 1.0, 0.0),
-    "surface.sensible_heat_flux": ("hfss", "W m-2", "Surface", 1.0, 0.0),
-    # CMIP's hfss is the dry-cp sensible heat; ECHAM's own ``ahfs`` above
-    # carries the evaporated vapour's enthalpy. Later entries win, so the
-    # dry flux replaces it when the run saved it.
-    "surface.sensible_heat_flux_dry": ("hfss", "W m-2", "Surface", 1.0, 0.0),
-    # --- basic state ---
-    "surface_pressure": ("ps", "Pa", "Surface", 1.0, 0.0),
-    "surface.surface_temperature": ("ts", "K", "Surface", 1.0, 0.0),
-    "temperature": ("ta", "K", "ModelLevel", 1.0, 0.0),
-    "specific_humidity": ("hus", "kg kg-1", "ModelLevel", 1.0, 0.0),
-    "relative_humidity": ("hur", "%", "ModelLevel", 100.0, 0.0),
-    "u_wind": ("ua", "m s-1", "ModelLevel", 1.0, 0.0),
-    "v_wind": ("va", "m s-1", "ModelLevel", 1.0, 0.0),
+    # --- shared CMOR variables (radiative/turbulent fluxes, basic state, clt, prw) ---
+    **shared_source_entries(
+        _SHARED_VERT,
+        units_overrides={"clt": "1", "hus": "kg kg-1"},
+    ),
+    # --- AeroCom-only model-level state ---
     "pressure_full": ("pfull", "Pa", "ModelLevel", 1.0, 0.0),
-    # ``height_full`` is already geopotential HEIGHT in metres. jcm also
-    # writes ``geopotential`` in m2/s2 (see the dynamics units table); it
-    # is mapped with the explicit 1/g conversion so a run that only saved
-    # the potential still produces a correct ``zg``. When both are
-    # present the height wins (dict order below, resolved in convert()).
-    "geopotential": ("zg", "m", "ModelLevel", 1.0 / 9.80665, 0.0),
-    "height_full": ("zg", "m", "ModelLevel", 1.0, 0.0),
     "air_density": ("rho", "kg m-3", "ModelLevel", 1.0, 0.0),
     "layer_thickness": ("dzhalf", "m", "ModelLevel", 1.0, 0.0),
     # --- clouds ---
-    "radiation.total_cloud_cover": ("clt", "1", "Column", 1.0, 0.0),
     "clouds.cloud_fraction": ("cl", "1", "ModelLevel", 1.0, 0.0),
     "qc": ("clw", "kg kg-1", "ModelLevel", 1.0, 0.0),
     "qi": ("cli", "kg kg-1", "ModelLevel", 1.0, 0.0),
@@ -95,14 +93,26 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "clouds.precip_rain": ("prlr", "kg m-2 s-1", "Surface", 1.0, 0.0),
     "clouds.precip_snow": ("prls", "kg m-2 s-1", "Surface", 1.0, 0.0),
     "convection.precip_conv": ("prc", "kg m-2 s-1", "Surface", 1.0, 0.0),
-    # --- aerosol optics ---
-    # Column AOD at ~550 nm: MACv2-SP publishes it as ``macsp.od550aer``; JAM
-    # (without the aerocom_optics Mie pass) as the band-centre-approx
-    # ``jam_optics.aod_550`` (#640). Either maps to od550aer; the exact-
-    # wavelength ``od550aer`` diagnostic below supersedes both when present
-    # (later entries win in ``convert``).
-    "macsp.od550aer": ("od550aer", "1", "Column", 1.0, 0.0),
+    # --- spectral aerosol optics (jax-gcm#584) ---
+    # Exact-wavelength ``od550aer`` from the diagnostic Mie pass is listed
+    # BEFORE band-centre ``jam_optics.aod_550`` / ``macsp.od550aer`` (first
+    # present wins in ``convert``).
+    "od550aer": ("od550aer", "1", "Column", 1.0, 0.0),
     "jam_optics.aod_550": ("od550aer", "1", "Column", 1.0, 0.0),
+    "macsp.od550aer": ("od550aer", "1", "Column", 1.0, 0.0),
+    "abs550aer": ("abs550aer", "1", "Column", 1.0, 0.0),
+    "od355aer": ("od355aer", "1", "Column", 1.0, 0.0),
+    "od440aer": ("od440aer", "1", "Column", 1.0, 0.0),
+    "od670aer": ("od670aer", "1", "Column", 1.0, 0.0),
+    "od865aer": ("od865aer", "1", "Column", 1.0, 0.0),
+    "ssa440aer": ("ssa440aer", "1", "Column", 1.0, 0.0),
+    "ang4487aer": ("ang4487aer", "1", "Column", 1.0, 0.0),
+    "aerindex": ("aerindex", "1", "Column", 1.0, 0.0),
+    "ec355aer": ("ec355aer", "m-1", "ModelLevel", 1.0, 0.0),
+    # Column Angstrom exponent: JAM's 550/865 band ratio (#640) or MACv2-SP's
+    # plume value.
+    "jam_optics.angstrom": ("angstrm", "1", "Column", 1.0, 0.0),
+    "macsp.angstrom": ("angstrm", "1", "Column", 1.0, 0.0),
     # --- CFMIP satellite simulators (jax-gcm#581) ---
     # CALIPSO and MODIS cloud products. jcm already emits these under their
     # CMOR names, so the mapping is mostly identity — but without an entry
@@ -132,27 +142,6 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     # other simulator covers; CMIP wants percent. The clisccp histogram is
     # reassembled separately (see _HISTOGRAMS below).
     "cltisccp": ("cltisccp", "%", "Column", 100.0, 0.0),
-    # --- spectral aerosol optics (jax-gcm#584) ---
-    # These come from the diagnostic Mie pass at the OBSERVATION
-    # wavelengths, so ``od550aer`` here is at exactly 550 nm. It is listed
-    # after ``macsp.od550aer`` / ``jam_optics.aod_550`` (band-centre AODs)
-    # deliberately: later entries win, so the exact-wavelength field
-    # supersedes the band-centre one when a run has both.
-    "od550aer": ("od550aer", "1", "Column", 1.0, 0.0),
-    "abs550aer": ("abs550aer", "1", "Column", 1.0, 0.0),
-    "od355aer": ("od355aer", "1", "Column", 1.0, 0.0),
-    "od440aer": ("od440aer", "1", "Column", 1.0, 0.0),
-    "od670aer": ("od670aer", "1", "Column", 1.0, 0.0),
-    "od865aer": ("od865aer", "1", "Column", 1.0, 0.0),
-    "ssa440aer": ("ssa440aer", "1", "Column", 1.0, 0.0),
-    "ang4487aer": ("ang4487aer", "1", "Column", 1.0, 0.0),
-    "aerindex": ("aerindex", "1", "Column", 1.0, 0.0),
-    "ec355aer": ("ec355aer", "m-1", "ModelLevel", 1.0, 0.0),
-    # Column Angstrom exponent: MACv2-SP's plume value or JAM's 550/865 band
-    # ratio (#640). ``ang550865aer`` from the aerocom_optics Mie pass, when
-    # present, is the higher-fidelity field.
-    "macsp.angstrom": ("angstrm", "1", "Column", 1.0, 0.0),
-    "jam_optics.angstrom": ("angstrm", "1", "Column", 1.0, 0.0),
     # --- microphysical process rates (jax-gcm#585), column-integrated ---
     "autoconv": ("autoconv", "kg m-2 s-1", "Column", 1.0, 0.0),
     "accretn": ("accretn", "kg m-2 s-1", "Column", 1.0, 0.0),
@@ -174,11 +163,10 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "radiation.toa_sw_up_clear_noa": ("rsutcsnoa", "W m-2", "TOA", 1.0, 0.0),
     "radiation.toa_lw_up_clear_noa": ("rlutcsnoa", "W m-2", "TOA", 1.0, 0.0),
     # --- near-surface / column meteorology (jax-gcm#581 residuals) ---
-    "aerocom_tas": ("tas", "K", "Surface", 1.0, 0.0),
-    "aerocom_uas": ("uas", "m s-1", "Surface", 1.0, 0.0),
-    "aerocom_vas": ("vas", "m s-1", "Surface", 1.0, 0.0),
+    # ``aerocom_tas``, ``aerocom_uas``, ``aerocom_vas``, ``aerocom_psl``,
+    # ``aerocom_clt``, and ``aerocom_prw`` are populated above via
+    # ``shared_source_entries``.
     "aerocom_dew2": ("dew2", "K", "Surface", 1.0, 0.0),
-    "aerocom_psl": ("psl", "Pa", "Surface", 1.0, 0.0),
     "aerocom_prsn": ("prsn", "kg m-2 s-1", "Surface", 1.0, 0.0),
     "aerocom_prcr": ("prcr", "kg m-2 s-1", "Surface", 1.0, 0.0),
     "aerocom_prcs": ("prcs", "kg m-2 s-1", "Surface", 1.0, 0.0),
@@ -191,7 +179,8 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     # --- boundary layer ---
     "vertical_diffusion.pbl_height": ("hdtcbl", "m", "Surface", 1.0, 0.0),
     # --- AerocomDiagnostics term output ---
-    "aerocom_clt": ("clt", "1", "Column", 1.0, 0.0),
+    # ``aerocom_clt`` is mapped above via ``SOURCES["clt"]`` so ``clouds.total_cloud_cover``
+    # remains the highest-priority ``clt`` source across both CMOR tools.
     "aerocom_ttop": ("ttop", "K", "Column", 1.0, 0.0),
     "aerocom_cdr": ("cdr", "m", "Column", 1.0, 0.0),
     "aerocom_icr": ("icr", "m", "Column", 1.0, 0.0),
@@ -205,7 +194,6 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "aerocom_iwp": ("iwp", "kg m-2", "Column", 1.0, 0.0),
     "aerocom_cllvi": ("cllvi", "kg m-2", "Column", 1.0, 0.0),
     "aerocom_clivi": ("clivi", "kg m-2", "Column", 1.0, 0.0),
-    "aerocom_prw": ("prw", "kg m-2", "Column", 1.0, 0.0),
     "aerocom_cdnum": ("cdnum", "m-2", "Column", 1.0, 0.0),
     "aerocom_icnum": ("icnum", "m-2", "Column", 1.0, 0.0),
     "aerocom_albedo": ("albedo", "1", "Column", 1.0, 0.0),
@@ -248,89 +236,18 @@ BURDEN_SPECIES = ("so4", "bc", "oc", "poa", "soa", "ss", "du", "moa",
                   "dms", "so2", "h2so4", "soag")
 
 
-# CF standard names for the subset where the mapping is unambiguous. The
-# short CMOR id is NOT a CF standard name, so anything absent here simply
-# gets no ``standard_name`` attribute (which is optional) rather than a
-# guessed one that a CF checker would reject.
-CF_STANDARD_NAMES = {
-    "wap": "lagrangian_tendency_of_air_pressure",
-    "w500": "lagrangian_tendency_of_air_pressure",
-    "w700": "lagrangian_tendency_of_air_pressure",
-    "ta": "air_temperature",
-    "ps": "surface_air_pressure",
-    "ts": "surface_temperature",
-    "hus": "specific_humidity",
-    "hur": "relative_humidity",
-    "ua": "eastward_wind",
-    "va": "northward_wind",
-    "zg": "geopotential_height",
-    "rho": "air_density",
-    "clt": "cloud_area_fraction",
-    "cl": "cloud_area_fraction_in_atmosphere_layer",
-    "clw": "mass_fraction_of_cloud_liquid_water_in_air",
-    "cli": "mass_fraction_of_cloud_ice_in_air",
-    "lwp": "atmosphere_mass_content_of_cloud_liquid_water",
-    "iwp": "atmosphere_mass_content_of_cloud_ice",
-    "prw": "atmosphere_mass_content_of_water_vapor",
-    "rlut": "toa_outgoing_longwave_flux",
-    "rlutcs": "toa_outgoing_longwave_flux_assuming_clear_sky",
-    "rsut": "toa_outgoing_shortwave_flux",
-    "rsutcs": "toa_outgoing_shortwave_flux_assuming_clear_sky",
-    "rsdt": "toa_incoming_shortwave_flux",
-    "rsds": "surface_downwelling_shortwave_flux_in_air",
-    "rsus": "surface_upwelling_shortwave_flux_in_air",
-    "rlds": "surface_downwelling_longwave_flux_in_air",
-    "rlus": "surface_upwelling_longwave_flux_in_air",
-    "hfls": "surface_upward_latent_heat_flux",
-    "hfss": "surface_upward_sensible_heat_flux",
-    "cltcalipso": "cloud_area_fraction",
-    "cllcalipso": "cloud_area_fraction_in_atmosphere_layer",
-    "clmcalipso": "cloud_area_fraction_in_atmosphere_layer",
-    "clhcalipso": "cloud_area_fraction_in_atmosphere_layer",
-    "cltmodis": "cloud_area_fraction",
-    "cltisccp": "cloud_area_fraction",
-    "tas": "air_temperature",
-    "uas": "eastward_wind",
-    "vas": "northward_wind",
-    "dew2": "dew_point_temperature",
-    "psl": "air_pressure_at_mean_sea_level",
-    "prsn": "snowfall_flux",
-    "ptp": "tropopause_air_pressure",
-    "rsutnoa": "toa_outgoing_shortwave_flux",
-    "rlutnoa": "toa_outgoing_longwave_flux",
-    "clwmodis": "liquid_water_cloud_area_fraction",
-    "climodis": "ice_cloud_area_fraction",
-    "tauwmodis": "atmosphere_optical_thickness_due_to_cloud",
-    "tauimodis": "atmosphere_optical_thickness_due_to_cloud",
-    "reffclwmodis": "effective_radius_of_cloud_liquid_water_particles",
-    "reffclimodis": "effective_radius_of_cloud_ice_particles",
-    "lwpmodis": "atmosphere_mass_content_of_cloud_liquid_water",
-    "iwpmodis": "atmosphere_mass_content_of_cloud_ice",
-    "od550aer": "atmosphere_optical_thickness_due_to_ambient_aerosol_particles",
-    "abs550aer": "atmosphere_absorption_optical_thickness_due_to_ambient_aerosol_particles",
-    "od550so4": "atmosphere_optical_thickness_due_to_sulfate_ambient_aerosol_particles",
-    "od550bc": "atmosphere_optical_thickness_due_to_black_carbon_ambient_aerosol_particles",
-    "od550oa": "atmosphere_optical_thickness_due_to_particulate_organic_matter_ambient_aerosol_particles",
-    "od550ss": "atmosphere_optical_thickness_due_to_sea_salt_ambient_aerosol_particles",
-    "od550dust": "atmosphere_optical_thickness_due_to_dust_ambient_aerosol_particles",
-    "od550aerh2o": "atmosphere_optical_thickness_due_to_water_in_ambient_aerosol_particles",
-    "ec355aer": "volume_extinction_coefficient_in_air_due_to_ambient_aerosol_particles",
-    "ang4487aer": "angstrom_exponent_of_ambient_aerosol_in_air",
-}
-
 VALID_VERT = ("Surface", "TOA", "Column", "ModelLevel")
+
+# ``comment`` attribute stamped on every written variable.
+_COMMENT = ("Produced by tools/aerocom_cmor.py from JCM output; "
+            "see jax-gcm#581 for coverage.")
 
 
 def _check_model_name(name: str) -> str:
-    if "_" in name:
-        raise SystemExit(
-            f"--model {name!r}: underscores are not allowed in <ModelName> "
-            "(AeroCom convention); use '-' instead.")
-    if len(name) > 20:
-        raise SystemExit(
-            f"--model {name!r}: <ModelName> is capped at 20 characters "
-            f"(got {len(name)}).")
-    return name
+    try:
+        return validate_token("--model", name, max_len=20)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _filename(convention, model, experiment, var, vert, period, freq):
@@ -378,7 +295,7 @@ _CFAD_NLEV, _CFAD_DZ = 40, 480.0
 
 
 def _centers(edges):
-    return [0.5 * (a + b) for a, b in zip(edges[:-1], edges[1:])]
+    return [0.5 * (a + b) for a, b in itertools.pairwise(edges)]
 
 
 # name -> (dim1 name, centers1, edges1, dim2 name, centers2, edges2,
@@ -441,7 +358,7 @@ def _collect_histograms(ds: xr.Dataset) -> tuple[dict[str, xr.Dataset], set[str]
         for dim, edges in ((d1, e1), (d2, e2)):
             if edges is None:
                 continue
-            bounds = [[a, b] for a, b in zip(edges[:-1], edges[1:])]
+            bounds = [[a, b] for a, b in itertools.pairwise(edges)]
             pieces[f"{dim}_bnds"] = xr.DataArray(
                 bounds, dims=(dim, "bnds"), name=f"{dim}_bnds")
             da.coords[dim].attrs["bounds"] = f"{dim}_bnds"
@@ -641,7 +558,8 @@ def convert(
     na_aliases: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Write one file per mapped variable; return (written, skipped)."""
-    outdir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        outdir.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
 
     # Recover the CFMIP/CMIP-defined COSP means from jcm's #1079 companions
@@ -652,11 +570,12 @@ def convert(
 
     candidates: dict[str, tuple[xr.DataArray, str, str]] = {}
     for src, (cmor, units, vert, scale, offset) in NAME_MAP.items():
-        if src not in ds.data_vars:
+        if src not in ds.data_vars or cmor in candidates:
             continue
-        # Later entries win, so a directly-available field (e.g.
-        # height_full for zg) overrides a converted one (geopotential/g).
-        da = ds[src] * scale + offset
+        # First-present wins (matching ``jcm.cmor_converter``), so a preferred
+        # field (e.g. height_full for zg, dry sensible heat for hfss, exact-
+        # wavelength od550aer) beats lower-priority fallbacks.
+        da = to_cmor_units(ds[src], src, units, scale=scale, offset=offset)
         candidates[cmor] = (da, units, vert)
     for name, da in _collect_burdens(ds).items():
         candidates[name] = (da, "kg m-2", "Column")
@@ -674,31 +593,24 @@ def convert(
             if noa in candidates:
                 candidates[na] = candidates[noa]
 
+    global_attrs = {"model_id": model, "experiment_id": experiment,
+                    "frequency": freq}
+    level_order = "TOA-first" if flip_levels else "surface-first"
     for cmor, (da, units, vert) in sorted(candidates.items()):
         assert vert in VALID_VERT, vert
         if flip_levels and "level" in da.dims:
             da = da.isel(level=slice(None, None, -1))
-        da = da.rename(cmor)
-        # ``standard_name`` must be a real CF standard name, not the short
-        # CMOR id (``ta`` is not a standard name; ``air_temperature`` is), or
-        # a CF checker rejects the file. Omitted where we do not have a
-        # verified mapping rather than guessed.
-        attrs = {"units": units, "long_name": cmor,
-                 "comment": ("Produced by tools/aerocom_cmor.py from JCM "
-                             "output; see jax-gcm#581 for coverage.")}
-        if cmor in CF_STANDARD_NAMES:
-            attrs["standard_name"] = CF_STANDARD_NAMES[cmor]
-        da.attrs.update(attrs)
+        # Models submit on their native grid, so the CMIP dimension/latitude
+        # layout (``jcm.cmor_converter.to_cmip_layout``) is deliberately not
+        # applied here.
+        da = cmor_variable(da, cmor, units=units, long_name=cmor,
+                           comment=_COMMENT)
         fname = _filename(convention, model, experiment, cmor, vert, period, freq)
-        if not dry_run:
-            out = xr.Dataset({cmor: da})
-            out.attrs.update(
-                model_id=model, experiment_id=experiment, frequency=freq,
-                vertical_coordinate_type=vert,
-                level_order=("TOA-first" if flip_levels else "surface-first"),
-            )
-            out.to_netcdf(outdir / fname)
-        written.append(fname)
+        written.append(write_cmor_variable(
+            da, outdir / fname,
+            {**global_attrs, "vertical_coordinate_type": vert,
+             "level_order": level_order},
+            compress=False, dry_run=dry_run))
 
     # Joint histograms are whole Datasets (variable + bin bounds), written
     # outside the DataArray loop above.
@@ -706,11 +618,8 @@ def convert(
         fname = _filename(convention, model, experiment, name, "Column",
                           period, freq)
         if not dry_run:
-            hds.attrs.update(
-                model_id=model, experiment_id=experiment, frequency=freq,
-                vertical_coordinate_type="Column",
-            )
-            hds.to_netcdf(outdir / fname)
+            hds.attrs.update(global_attrs, vertical_coordinate_type="Column")
+            write_netcdf_atomic(hds, outdir / fname)
         written.append(fname)
 
     mapped_srcs = {s for s in NAME_MAP if s in ds.data_vars}

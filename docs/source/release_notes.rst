@@ -4,6 +4,25 @@ Release Notes
 dev (unreleased)
 ----------------
 
+New capabilities
+^^^^^^^^^^^^^^^^
+
+- **AtmosphereBench / CMIP6 CMOR post-processing and shared CMOR library.**
+  ``tools/atmospherebench_cmor.py`` converts JCM output NetCDF files or run
+  directories into the AtmosphereBench / CMIP6 submission directory layout
+  (``<exp>/<member>/`` for member experiments, ``<exp>/`` for single-member
+  experiments, or ``--flat``) with one CMOR variable per file (``Amon``,
+  ``day``, and ``fx`` fields ``sftlf`` and ``areacella``), pressure-level
+  interpolation via ``jcm.analysis.to_pressure_levels``, cadence validation,
+  and automatic daily resampling (including ``tasmax``/``tasmin``) for
+  sub-daily chunk files. The shared JCM-to-CMOR variable mappings, CF
+  standard names, coordinate metadata (delegating to ``jcm.cf_metadata``),
+  physical constants (``jcm.constants.rearth`` and ``c.grav``), token
+  validation, and atomic single-variable NetCDF writer now live in
+  ``jcm/cmor_converter.py`` and are shared with ``tools/aerocom_cmor.py`` so
+  both exporters resolve the same source fields (including total cloud cover
+  ``clt``).
+
 Bug fixes
 ^^^^^^^^^
 
