@@ -36,9 +36,9 @@ import sys
 import xarray as xr
 
 from jcm.cmor_converter import (
-    CF_STANDARD_NAMES,
-    scale_source_dataarray,
+    cmor_variable,
     shared_source_entries,
+    to_cmor_units,
     validate_token,
     write_cmor_variable,
     write_netcdf_atomic,
@@ -179,7 +179,7 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     # --- boundary layer ---
     "vertical_diffusion.pbl_height": ("hdtcbl", "m", "Surface", 1.0, 0.0),
     # --- AerocomDiagnostics term output ---
-    # ``aerocom_clt`` is mapped above via ``CLT_SOURCES`` so ``clouds.total_cloud_cover``
+    # ``aerocom_clt`` is mapped above via ``SOURCES["clt"]`` so ``clouds.total_cloud_cover``
     # remains the highest-priority ``clt`` source across both CMOR tools.
     "aerocom_ttop": ("ttop", "K", "Column", 1.0, 0.0),
     "aerocom_cdr": ("cdr", "m", "Column", 1.0, 0.0),
@@ -237,6 +237,10 @@ BURDEN_SPECIES = ("so4", "bc", "oc", "poa", "soa", "ss", "du", "moa",
 
 
 VALID_VERT = ("Surface", "TOA", "Column", "ModelLevel")
+
+# ``comment`` attribute stamped on every written variable.
+_COMMENT = ("Produced by tools/aerocom_cmor.py from JCM output; "
+            "see jax-gcm#581 for coverage.")
 
 
 def _check_model_name(name: str) -> str:
@@ -571,7 +575,7 @@ def convert(
         # First-present wins (matching ``jcm.cmor_converter``), so a preferred
         # field (e.g. height_full for zg, dry sensible heat for hfss, exact-
         # wavelength od550aer) beats lower-priority fallbacks.
-        da = scale_source_dataarray(ds[src], cmor, src, scale, offset)
+        da = to_cmor_units(ds[src], src, units, scale=scale, offset=offset)
         candidates[cmor] = (da, units, vert)
     for name, da in _collect_burdens(ds).items():
         candidates[name] = (da, "kg m-2", "Column")
@@ -589,37 +593,24 @@ def convert(
             if noa in candidates:
                 candidates[na] = candidates[noa]
 
+    global_attrs = {"model_id": model, "experiment_id": experiment,
+                    "frequency": freq}
+    level_order = "TOA-first" if flip_levels else "surface-first"
     for cmor, (da, units, vert) in sorted(candidates.items()):
         assert vert in VALID_VERT, vert
         if flip_levels and "level" in da.dims:
             da = da.isel(level=slice(None, None, -1))
+        # Models submit on their native grid, so the CMIP dimension/latitude
+        # layout (``jcm.cmor_converter.to_cmip_layout``) is deliberately not
+        # applied here.
+        da = cmor_variable(da, cmor, units=units, long_name=cmor,
+                           comment=_COMMENT)
         fname = _filename(convention, model, experiment, cmor, vert, period, freq)
-        written.append(
-            write_cmor_variable(
-                da,
-                cmor=cmor,
-                target=outdir / fname,
-                global_attrs={
-                    "model_id": model,
-                    "experiment_id": experiment,
-                    "frequency": freq,
-                    "vertical_coordinate_type": vert,
-                    "level_order": ("TOA-first" if flip_levels else "surface-first"),
-                },
-                units=units,
-                standard_name=CF_STANDARD_NAMES.get(cmor),
-                long_name=cmor,
-                comment=(
-                    "Produced by tools/aerocom_cmor.py from JCM "
-                    "output; see jax-gcm#581 for coverage."
-                ),
-                compress=False,
-                sort_lat=False,
-                transpose_cmor=False,
-                drop_extra_coords=False,
-                dry_run=dry_run,
-            )
-        )
+        written.append(write_cmor_variable(
+            da, outdir / fname,
+            {**global_attrs, "vertical_coordinate_type": vert,
+             "level_order": level_order},
+            compress=False, dry_run=dry_run))
 
     # Joint histograms are whole Datasets (variable + bin bounds), written
     # outside the DataArray loop above.
@@ -627,10 +618,7 @@ def convert(
         fname = _filename(convention, model, experiment, name, "Column",
                           period, freq)
         if not dry_run:
-            hds.attrs.update(
-                model_id=model, experiment_id=experiment, frequency=freq,
-                vertical_coordinate_type="Column",
-            )
+            hds.attrs.update(global_attrs, vertical_coordinate_type="Column")
             write_netcdf_atomic(hds, outdir / fname)
         written.append(fname)
 

@@ -148,12 +148,7 @@ def cell_area(ds: xr.Dataset) -> xr.DataArray:
         area_2d,
         coords={"lat": lat, "lon": lon},
         dims=("lat", "lon"),
-        name="areacella",
-        attrs={
-            "standard_name": "cell_area",
-            "long_name": "Grid-Cell Area for Atmospheric Grid Variables",
-            "units": "m2",
-        },
+        attrs={"standard_name": "cell_area", "units": "m2"},
     )
 
 

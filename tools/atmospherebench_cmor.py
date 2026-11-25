@@ -39,12 +39,13 @@ Convert explicit monthly files only::
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime
 import pathlib
 import re
 import sys
 import warnings
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 
 import numpy as np
 import xarray as xr
@@ -54,12 +55,15 @@ from jcm.cmor_converter import (
     CMOR_META,
     FX_VARS,
     PLEV_VARS,
+    cmor_variable,
     date_ymd,
     extract_direct_variable,
     extract_plev_variable,
     extract_tas,
     get_time_bounds,
     median_step_days,
+    time_bounds_names,
+    to_cmip_layout,
     validate_token,
     validate_variant_label,
     write_cmor_variable,
@@ -79,10 +83,33 @@ DEFAULT_MONTHLY_PLEV_HPA: tuple[float, ...] = (
 #: 850 hPa and MJO diagnostics at 850/200 hPa).
 DEFAULT_DAILY_PLEV_HPA: tuple[float, ...] = (850.0, 200.0)
 
+#: Default monthly variable set: every time-varying CMOR variable except the
+#: daily extremes.
+DEFAULT_MONTHLY_VARS: tuple[str, ...] = tuple(
+    v for v in CMOR_META if v not in FX_VARS and v not in ("tasmax", "tasmin")
+)
+
 #: Default daily variable set requested by AtmosphereBench.
 DEFAULT_DAILY_VARS: tuple[str, ...] = (
     "pr", "tas", "tasmax", "tasmin", "rlut", "ua", "zg",
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class _Table:
+    """Per-CMOR-table defaults for the time-varying variables."""
+
+    frequency: str
+    plevs_hpa: tuple[float, ...]
+    variables: tuple[str, ...]
+    #: Leading digits of ``YYYYMMDD`` kept in the filename date stamp.
+    stamp_digits: int
+
+
+_TABLES: dict[str, _Table] = {
+    "Amon": _Table("mon", DEFAULT_MONTHLY_PLEV_HPA, DEFAULT_MONTHLY_VARS, 6),
+    "day": _Table("day", DEFAULT_DAILY_PLEV_HPA, DEFAULT_DAILY_VARS, 8),
+}
 
 _MONTHLY_FILE_RE = re.compile(r"^(?P<prefix>.+)_monthly_\d{4}-\d{2}\.nc$")
 _CHUNK_FILE_RE = re.compile(r"^(?P<prefix>.+)_day(?P<day>\d+(?:\.\d+)?)\.nc$")
@@ -90,9 +117,7 @@ _CHUNK_FILE_RE = re.compile(r"^(?P<prefix>.+)_day(?P<day>\d+(?:\.\d+)?)\.nc$")
 
 def _resample_subdaily_to_daily(ds: xr.Dataset) -> xr.Dataset:
     """Aggregate a sub-daily JCM Dataset into daily means plus ``tasmax``/``tasmin``."""
-    bounds_name = ds["time"].attrs.get("bounds", "time_bounds")
-    drop_vars = [v for v in (bounds_name, "time_bounds") if v in ds]
-    ds_no_bounds = ds.drop_vars(drop_vars) if drop_vars else ds
+    ds_no_bounds = ds.drop_vars(time_bounds_names(ds))
 
     # Extract raw sub-daily near-surface temperature before averaging so we can
     # compute daily tasmax and tasmin.
@@ -117,25 +142,52 @@ def _resample_subdaily_to_daily(ds: xr.Dataset) -> xr.Dataset:
     return daily
 
 
+def _match_table_cadence(ds: xr.Dataset, table: str, resample_daily: bool) -> xr.Dataset:
+    """Check the cadence of ``ds`` against ``table``, resampling sub-daily input to daily."""
+    step_days = median_step_days(ds, get_time_bounds(ds))
+    if step_days is None:
+        return ds
+    if table == "Amon":
+        if step_days < 25.0:
+            raise ValueError(
+                f"Expected monthly data for table='Amon', but median time step is "
+                f"{step_days:.2f} days. Pass --freq day for daily/sub-daily inputs."
+            )
+        return ds
+    if step_days > 1.5:
+        raise ValueError(
+            f"Expected daily or sub-daily data for table='day', but median "
+            f"time step is {step_days:.2f} days."
+        )
+    if step_days >= 0.9:
+        return ds
+    if not resample_daily:
+        raise ValueError(
+            f"Input for table='day' has sub-daily cadence ({step_days * 24:.2f} h). "
+            "Enable daily resampling (--resample-daily) to aggregate to daily means "
+            "and tasmax/tasmin."
+        )
+    print(
+        f"INFO tools/atmospherebench_cmor.py: resampling sub-daily input "
+        f"({step_days * 24:.2f} h cadence) to daily means (plus tasmax/tasmin).",
+        file=sys.stderr,
+    )
+    return _resample_subdaily_to_daily(ds)
+
+
 def _time_stamp(
     ds: xr.Dataset,
-    table: str,
+    stamp_digits: int,
     time_bounds: xr.DataArray | None = None,
 ) -> str:
-    """Format ``<start>-<end>`` CMOR date token from ``ds['time']`` (or ``time_bounds``)."""
+    """Format the ``<start>-<end>`` CMOR date token from ``time_bounds`` (or ``ds['time']``)."""
     if "time" not in ds.coords or ds.sizes.get("time", 0) == 0:
         raise ValueError("Dataset has no non-empty 'time' coordinate.")
-    if time_bounds is not None and time_bounds.ndim == 2 and time_bounds.shape[1] == 2:
-        t0 = time_bounds.values[0, 0]
-        t1 = time_bounds.values[-1, 0]
-    else:
-        t0 = ds.coords["time"].values[0]
-        t1 = ds.coords["time"].values[-1]
-    y0, m0, d0 = date_ymd(t0)
-    y1, m1, d1 = date_ymd(t1)
-    if table == "Amon":
-        return f"{y0:04d}{m0:02d}-{y1:04d}{m1:02d}"
-    return f"{y0:04d}{m0:02d}{d0:02d}-{y1:04d}{m1:02d}{d1:02d}"
+    starts = ds.coords["time"].values if time_bounds is None else time_bounds.values[:, 0]
+    return "-".join(
+        "{:04d}{:02d}{:02d}".format(*date_ymd(t))[:stamp_digits]
+        for t in (starts[0], starts[-1])
+    )
 
 
 def cmor_filename(
@@ -187,146 +239,115 @@ def convert_dataset(
     outdir: pathlib.Path,
     variables: Sequence[str] | None = None,
     plevs_hpa: Sequence[float] | None = None,
-    write_fx: bool = True,
-    fx_vars_filter: Sequence[str] | None = None,
+    fx_vars: Collection[str] | None = None,
     resample_daily: bool = True,
     start_year: int | None = None,
     end_year: int | None = None,
     dry_run: bool = False,
-    missing_out: list[str] | None = None,
-) -> list[str]:
-    """Convert one JCM Dataset into AtmosphereBench CMOR files; return written filenames."""
+) -> tuple[dict[str, str], list[str]]:
+    """Convert one JCM Dataset into AtmosphereBench CMOR files.
+
+    ``variables`` selects the CMOR variables to export (default: the table's
+    standard set). ``fx_vars`` selects the fixed grid fields to write alongside
+    them: ``None`` means every fixed field, or just those named in an explicit
+    ``variables``; pass an empty collection to write none.
+
+    Returns ``(written, missing)``: the filename written for each CMOR
+    variable, and the sorted names of the target variables the input could not
+    supply.
+    """
     validate_token("--model", model)
     validate_token("--experiment", experiment)
     validate_token("--grid-label", grid_label)
     validate_variant_label(member)
-    if table not in ("Amon", "day"):
+    if table not in _TABLES:
         raise ValueError(f"Unsupported CMOR table {table!r}; expected 'Amon' or 'day'.")
+    spec = _TABLES[table]
 
     explicit_plevs = plevs_hpa is not None
-    effective_plevs = (
+    plevs = (
         validate_pressure_levels(plevs_hpa).tolist()
-        if plevs_hpa is not None
-        else list(DEFAULT_DAILY_PLEV_HPA if table == "day" else DEFAULT_MONTHLY_PLEV_HPA)
+        if explicit_plevs
+        else list(spec.plevs_hpa)
     )
 
-    frequency = "mon" if table == "Amon" else "day"
-    explicit_vars = variables is not None
     if variables is None:
-        if table == "day":
-            target_vars = list(DEFAULT_DAILY_VARS)
-        else:
-            target_vars = [v for v in CMOR_META if v not in ("sftlf", "areacella", "tasmax", "tasmin")]
+        target_vars = list(spec.variables)
     else:
         unknown = [v for v in variables if v not in CMOR_META]
         if unknown:
             raise ValueError(f"Unknown CMOR variable(s): {', '.join(unknown)}")
         target_vars = list(dict.fromkeys(variables))
+    if fx_vars is None:
+        fx_vars = FX_VARS if variables is None else target_vars
 
     ds = _slice_years(ds, start_year, end_year)
+    ds = _match_table_cadence(ds, table, resample_daily)
     time_bounds = get_time_bounds(ds)
-
-    step_days = median_step_days(ds, time_bounds)
-    if table == "Amon" and step_days is not None and step_days < 25.0:
-        raise ValueError(
-            f"Expected monthly data for table='Amon', but median time step is "
-            f"{step_days:.2f} days. Pass --freq day for daily/sub-daily inputs."
-        )
-    if table == "day" and step_days is not None:
-        if step_days > 1.5:
-            raise ValueError(
-                f"Expected daily or sub-daily data for table='day', but median "
-                f"time step is {step_days:.2f} days."
-            )
-        if step_days < 0.9:
-            if not resample_daily:
-                raise ValueError(
-                    f"Input for table='day' has sub-daily cadence ({step_days * 24:.2f} h). "
-                    "Enable daily resampling (--resample-daily) to aggregate to daily means "
-                    "and tasmax/tasmin."
-                )
-            print(
-                f"INFO tools/atmospherebench_cmor.py: resampling sub-daily input "
-                f"({step_days * 24:.2f} h cadence) to daily means (plus tasmax/tasmin).",
-                file=sys.stderr,
-            )
-            ds = _resample_subdaily_to_daily(ds)
-            time_bounds = get_time_bounds(ds)
 
     if not dry_run:
         outdir.mkdir(parents=True, exist_ok=True)
-    date_stamp = _time_stamp(ds, table, time_bounds=time_bounds)
-
-    def _global_attrs(cmor: str, tbl: str, freq: str) -> dict[str, str]:
-        return {
-            "Conventions": "CF-1.8",
-            "model_id": model,
-            "source_id": model,
-            "experiment_id": experiment,
-            "variant_label": member,
-            "table_id": tbl,
-            "variable_id": cmor,
-            "realm": "atmos",
-            "frequency": freq,
-            "grid_label": grid_label,
-            "comment": "Produced by tools/atmospherebench_cmor.py from JCM output.",
-        }
-
-    written: list[str] = []
-    missing: list[str] = []
+    date_stamp = _time_stamp(ds, spec.stamp_digits, time_bounds)
 
     # Stream one variable at a time (time-varying first, then fx) to keep peak
-    # memory low on long runs.
-    non_fx_targets = sorted(v for v in target_vars if v not in FX_VARS)
-    fx_targets: list[str] = []
-    if write_fx:
-        if fx_vars_filter is not None:
-            fx_targets = sorted(v for v in fx_vars_filter if v in FX_VARS)
-        elif explicit_vars:
-            fx_targets = sorted(v for v in target_vars if v in FX_VARS)
-        else:
-            fx_targets = sorted(FX_VARS)
+    # memory low on long runs: (variable, table, frequency, date stamp, bounds).
+    jobs = [
+        (v, table, spec.frequency, date_stamp, time_bounds)
+        for v in sorted(set(target_vars) - FX_VARS)
+    ] + [(v, "fx", "fx", None, None) for v in sorted(FX_VARS.intersection(fx_vars))]
 
-    work_items = [(v, table) for v in non_fx_targets] + [(v, "fx") for v in fx_targets]
-    for cmor, tbl in work_items:
-        is_fx = tbl == "fx"
+    written: dict[str, str] = {}
+    missing: list[str] = []
+    for cmor, tbl, frequency, stamp, bounds in jobs:
         if cmor in PLEV_VARS:
-            da = extract_plev_variable(
-                ds, cmor, effective_plevs, subset_preinterp=explicit_plevs
-            )
+            da = extract_plev_variable(ds, cmor, plevs, subset_preinterp=explicit_plevs)
         else:
             da = extract_direct_variable(ds, cmor)
         if da is None:
             missing.append(cmor)
             continue
-        fname = cmor_filename(
-            cmor, tbl, model, experiment, member, grid_label,
-            None if is_fx else date_stamp,
-        )
-        written.append(
-            write_cmor_variable(
-                da,
-                cmor=cmor,
-                target=outdir / fname,
-                global_attrs=_global_attrs(cmor, tbl, "fx" if is_fx else frequency),
-                table=tbl,
-                time_bounds=None if is_fx else time_bounds,
-                dry_run=dry_run,
-            )
+        fname = cmor_filename(cmor, tbl, model, experiment, member, grid_label, stamp)
+        written[cmor] = write_cmor_variable(
+            cmor_variable(to_cmip_layout(da), cmor, table=tbl),
+            outdir / fname,
+            {
+                "Conventions": "CF-1.8",
+                "model_id": model,
+                "source_id": model,
+                "experiment_id": experiment,
+                "variant_label": member,
+                "table_id": tbl,
+                "variable_id": cmor,
+                "realm": "atmos",
+                "frequency": frequency,
+                "grid_label": grid_label,
+                "comment": "Produced by tools/atmospherebench_cmor.py from JCM output.",
+            },
+            time_bounds=bounds,
+            dry_run=dry_run,
         )
 
-    if missing_out is not None:
-        missing_out.extend(sorted(missing))
-
-    if missing and explicit_vars:
+    missing.sort()
+    if missing and variables is not None:
         warnings.warn(
             f"Requested CMOR variable(s) not available in input ({table}): "
-            f"{', '.join(sorted(missing))}",
+            f"{', '.join(missing)}",
             UserWarning,
             stacklevel=2,
         )
+    return written, missing
 
-    return written
+
+def _classify_inputs(
+    files: Sequence[pathlib.Path],
+) -> tuple[list[tuple[pathlib.Path, re.Match]], list[tuple[pathlib.Path, re.Match]]]:
+    """Split ``files`` into monthly files and chunk files (ordered by day), by filename."""
+    monthly = [(p, m) for p in files if (m := _MONTHLY_FILE_RE.match(p.name))]
+    chunks = sorted(
+        ((p, m) for p in files if (m := _CHUNK_FILE_RE.match(p.name))),
+        key=lambda item: float(item[1].group("day")),
+    )
+    return monthly, chunks
 
 
 def discover_inputs(
@@ -337,39 +358,25 @@ def discover_inputs(
     """Resolve input files or a JCM run directory into ``{'Amon': [...], 'day': [...]}``."""
     if len(paths) == 1 and paths[0].is_dir():
         run_dir = paths[0]
-        monthly_matches = [
-            (p, m)
-            for p in sorted(run_dir.glob("*_monthly_*.nc"))
-            if (m := _MONTHLY_FILE_RE.match(p.name)) is not None
-        ]
-        chunk_matches = [
-            (p, m)
-            for p in run_dir.glob("*_day*.nc")
-            if (m := _CHUNK_FILE_RE.match(p.name)) is not None
-        ]
+        monthly, chunks = _classify_inputs(sorted(run_dir.glob("*.nc")))
         if prefix is not None:
-            monthly_matches = [(p, m) for p, m in monthly_matches if m.group("prefix") == prefix]
-            chunk_matches = [(p, m) for p, m in chunk_matches if m.group("prefix") == prefix]
+            monthly = [(p, m) for p, m in monthly if m.group("prefix") == prefix]
+            chunks = [(p, m) for p, m in chunks if m.group("prefix") == prefix]
         else:
-            prefixes = {m.group("prefix") for _, m in monthly_matches + chunk_matches}
+            prefixes = {m.group("prefix") for _, m in monthly + chunks}
             if len(prefixes) > 1:
                 raise ValueError(
                     f"Multiple JCM run prefixes found in {run_dir}: "
                     f"{', '.join(sorted(prefixes))}. Pass --prefix or explicit file paths."
                 )
 
-        monthly = [p for p, _ in monthly_matches]
-        chunks = [
-            p
-            for p, _ in sorted(chunk_matches, key=lambda item: float(item[1].group("day")))
-        ]
         out: dict[str, list[pathlib.Path]] = {}
-        if freq in ("auto", "both", "mon") and monthly:
-            out["Amon"] = monthly
-        if freq in ("auto", "both", "day") and chunks:
-            out["day"] = chunks
-        if freq == "both" and ("Amon" not in out or "day" not in out):
-            missing_tables = [t for t in ("Amon", "day") if t not in out]
+        if freq != "day" and monthly:
+            out["Amon"] = [p for p, _ in monthly]
+        if freq != "mon" and chunks:
+            out["day"] = [p for p, _ in chunks]
+        if freq == "both" and len(out) < 2:
+            missing_tables = [t for t in _TABLES if t not in out]
             raise FileNotFoundError(
                 f"--freq both requested, but missing {', '.join(missing_tables)} files in {run_dir}"
             )
@@ -393,19 +400,16 @@ def discover_inputs(
     if freq == "mon":
         return {"Amon": files}
 
-    monthly_explicit = [p for p in files if _MONTHLY_FILE_RE.match(p.name)]
-    chunk_explicit = sorted(
-        (p for p in files if _CHUNK_FILE_RE.match(p.name)),
-        key=lambda p: float(_CHUNK_FILE_RE.match(p.name).group("day")),  # type: ignore[union-attr]
-    )
-    if monthly_explicit and chunk_explicit and len(monthly_explicit) + len(chunk_explicit) == len(files):
-        return {"Amon": monthly_explicit, "day": chunk_explicit}
+    monthly, chunks = _classify_inputs(files)
+    chunk_files = [p for p, _ in chunks]
+    if monthly and chunks and len(monthly) + len(chunks) == len(files):
+        return {"Amon": [p for p, _ in monthly], "day": chunk_files}
     if freq == "both":
         raise FileNotFoundError(
             "--freq both requires both *_monthly_YYYY-MM.nc and *_day*.nc inputs."
         )
-    if len(chunk_explicit) == len(files):
-        return {"day": chunk_explicit}
+    if len(chunks) == len(files):
+        return {"day": chunk_files}
     return {"Amon": files}
 
 
@@ -542,10 +546,16 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _split_csv(raw: str) -> list[str]:
+    """Split a comma-separated CLI value, dropping empty items."""
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 def _parse_plev_arg(raw: str | None, flag: str) -> list[float] | None:
+    """Parse a ``--plevs``-style value, failing before any input is opened."""
     if raw is None:
         return None
-    parts = [x.strip() for x in raw.split(",") if x.strip()]
+    parts = _split_csv(raw)
     if not parts:
         raise ValueError(f"{flag} must be a non-empty comma-separated list of pressures in hPa.")
     try:
@@ -558,32 +568,27 @@ def _parse_plev_arg(raw: str | None, flag: str) -> list[float] | None:
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point."""
     args = build_parser().parse_args(argv)
-    variables = (
-        [v.strip() for v in args.variables.split(",") if v.strip()]
-        if args.variables
-        else None
-    )
-    monthly_plevs = _parse_plev_arg(args.plevs, "--plevs")
-    daily_plevs = _parse_plev_arg(args.daily_plevs, "--daily-plevs")
+    variables = _split_csv(args.variables) if args.variables else None
+    plevs = {
+        "Amon": _parse_plev_arg(args.plevs, "--plevs"),
+        "day": _parse_plev_arg(args.daily_plevs, "--daily-plevs"),
+    }
 
     grouped = discover_inputs(args.inputs, freq=args.freq, prefix=args.prefix)
     outdir = resolve_output_dir(args.out, args.experiment, args.member, flat=args.flat)
 
-    all_written: list[str] = []
-    missing_by_table: dict[str, list[str]] = {}
+    # Fixed fields are written once, from the first table that can supply them.
     remaining_fx: set[str] = set()
     if not args.no_fx:
-        if variables is not None:
-            remaining_fx = {v for v in variables if v in FX_VARS}
-        else:
-            remaining_fx = set(FX_VARS)
+        remaining_fx = set(FX_VARS if variables is None else FX_VARS.intersection(variables))
 
-    for table in ("Amon", "day"):
+    all_written: list[str] = []
+    missing_by_table: dict[str, list[str]] = {}
+    for table in _TABLES:
         if table not in grouped:
             continue
-        table_missing: list[str] = []
         with _open_inputs(grouped[table]) as ds:
-            written = convert_dataset(
+            written, missing = convert_dataset(
                 ds,
                 model=args.model,
                 experiment=args.experiment,
@@ -592,21 +597,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 grid_label=args.grid_label,
                 outdir=outdir,
                 variables=variables,
-                plevs_hpa=monthly_plevs if table == "Amon" else daily_plevs,
-                write_fx=bool(remaining_fx),
-                fx_vars_filter=sorted(remaining_fx) if remaining_fx else None,
+                plevs_hpa=plevs[table],
+                fx_vars=set(remaining_fx),
                 resample_daily=args.resample_daily,
                 start_year=args.start_year,
                 end_year=args.end_year,
                 dry_run=args.dry_run,
-                missing_out=table_missing,
             )
-            for fname in written:
-                var_name = fname.split("_", 1)[0]
-                remaining_fx.discard(var_name)
-            all_written.extend(written)
-            if table_missing:
-                missing_by_table[table] = table_missing
+        remaining_fx -= written.keys()
+        all_written.extend(written.values())
+        if missing:
+            missing_by_table[table] = missing
 
     verb = "would write" if args.dry_run else "wrote"
     print(f"{verb} {len(all_written)} file(s) to {outdir}")

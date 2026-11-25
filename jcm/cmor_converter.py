@@ -7,6 +7,9 @@ and CF coordinate metadata live in one place and cannot drift apart.
 
 Design choices
 --------------
+* **One source table:** :data:`SOURCES` lists, for every CMOR variable, the
+  JCM fields that can supply it in fallback priority order (first present
+  wins). Both exporters read it, so they always resolve the same field.
 * **Single source priority for ``clt``:** Both exporters read total cloud cover
   in the order ``clouds.total_cloud_cover`` -> ``aerocom_clt`` ->
   ``radiation.total_cloud_cover`` -> ``shortwave_rad.cloudc``, preferring the
@@ -20,16 +23,22 @@ Design choices
 * **CF coordinates from :mod:`jcm.cf_metadata`:** Standard ``lat``/``lon``/
   ``time``/``plev`` coordinate attributes come from
   :func:`jcm.cf_metadata.apply_cf_attributes` rather than being re-tabled here.
+* **Composable writer:** :func:`cmor_variable` stamps the CF variable
+  attributes, :func:`to_cmip_layout` applies the CMIP dimension/latitude
+  layout, and :func:`write_cmor_variable` writes the file. Exporters that
+  submit on the native grid (AeroCom) simply skip the layout step.
 """
 
 from __future__ import annotations
 
 import datetime
+import functools
+import operator
 import os
 import pathlib
 import re
 import warnings
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 import xarray as xr
@@ -40,7 +49,7 @@ from jcm.cf_metadata import apply_cf_attributes
 from jcm.physics.surface.echam.surface_types import DIAG_TILE_NAMES
 
 #: Land tile index on ECHAM's ``("water", "sea_ice", "land")`` surface-tile axis.
-ECHAM_LAND_TILE_INDEX: int = DIAG_TILE_NAMES.index("land")
+_ECHAM_LAND_TILE_INDEX: int = DIAG_TILE_NAMES.index("land")
 
 #: Fixed (time-invariant) CMOR grid fields.
 FX_VARS = frozenset({"sftlf", "areacella"})
@@ -48,18 +57,8 @@ FX_VARS = frozenset({"sftlf", "areacella"})
 #: 3D CMOR variables that live on ``plev`` when pressure-interpolated.
 PLEV_VARS = frozenset({"ta", "hus", "hur", "ua", "va", "zg"})
 
-#: Source variable(s) in fallback priority order for each 3D CMOR variable.
-PLEV_SOURCE_CANDIDATES: dict[str, tuple[str, ...]] = {
-    "ta": ("temperature",),
-    "hus": ("specific_humidity",),
-    "hur": ("relative_humidity",),
-    "ua": ("u_wind",),
-    "va": ("v_wind",),
-    "zg": ("height_full", "geopotential"),
-}
-
 #: Regex for CMIP6 variant labels such as ``r1i1p1f1``.
-VARIANT_RE = re.compile(r"^r\d+i\d+p\d+f\d+$")
+_VARIANT_RE = re.compile(r"^r\d+i\d+p\d+f\d+$")
 
 #: CF metadata for core CMOR variables:
 #: ``cmor_name -> (cmip6_units, standard_name, long_name)``.
@@ -180,7 +179,7 @@ CF_STANDARD_NAMES: dict[str, str] = {
 }
 
 #: CF ``positive`` direction attribute for radiative and turbulent fluxes.
-FLUX_POSITIVE: dict[str, str] = {
+_FLUX_POSITIVE: dict[str, str] = {
     "rsdt": "down",
     "rsut": "up",
     "rlut": "up",
@@ -198,47 +197,58 @@ FLUX_POSITIVE: dict[str, str] = {
     "hfss": "up",
 }
 
-#: Canonical source priority for total cloud cover (highest priority first).
-CLT_SOURCES: tuple[str, ...] = (
-    "clouds.total_cloud_cover",
-    "aerocom_clt",
-    "radiation.total_cloud_cover",
-    "shortwave_rad.cloudc",
-)
-
-#: Direct JCM -> CMOR source mappings with fallback priority (first present wins):
-#: ``cmor_name -> ((jcm_name, scale), ...)``.
-DIRECT_SOURCES: dict[str, tuple[tuple[str, float], ...]] = {
-    "tas": (("surface.temperature_2m", 1.0), ("aerocom_tas", 1.0)),
-    "ts": (("surface.surface_temperature", 1.0), ("surface.skin_temperature", 1.0)),
+#: JCM source field(s) for each CMOR variable, highest priority first (first
+#: present wins). Unit conversions are not tabled here: see :func:`to_cmor_units`.
+SOURCES: dict[str, tuple[str, ...]] = {
+    "tas": ("surface.temperature_2m", "aerocom_tas"),
+    "ts": ("surface.surface_temperature", "surface.skin_temperature"),
     "evspsbl": (
-        ("surface.evaporation", 1.0),
-        ("surface_exchange.evaporation", 1.0),
-        ("vertical_diffusion.surface_evaporation", 1.0),
+        "surface.evaporation",
+        "surface_exchange.evaporation",
+        "vertical_diffusion.surface_evaporation",
     ),
-    "hfls": (("surface.latent_heat_flux", 1.0), ("surface_exchange.latent_heat_flux", 1.0)),
+    "hfls": ("surface.latent_heat_flux", "surface_exchange.latent_heat_flux"),
     "hfss": (
-        ("surface.sensible_heat_flux_dry", 1.0),
-        ("surface.sensible_heat_flux", 1.0),
-        ("surface_exchange.sensible_heat_flux", 1.0),
+        "surface.sensible_heat_flux_dry",
+        "surface.sensible_heat_flux",
+        "surface_exchange.sensible_heat_flux",
     ),
-    "rsdt": (("radiation.toa_sw_down", 1.0),),
-    "rsut": (("radiation.toa_sw_up", 1.0),),
-    "rlut": (("radiation.toa_lw_up", 1.0), ("longwave_rad.ftop", 1.0)),
-    "rsutcs": (("radiation.toa_sw_up_clear", 1.0), ("clouds.toa_sw_up_clear", 1.0)),
-    "rlutcs": (("radiation.toa_lw_up_clear", 1.0), ("clouds.toa_lw_up_clear", 1.0)),
-    "rsds": (("radiation.surface_sw_down", 1.0), ("surface_exchange.downward_shortwave_flux", 1.0)),
-    "rsus": (("radiation.surface_sw_up", 1.0),),
-    "rlds": (("radiation.surface_lw_down", 1.0), ("surface_exchange.downward_longwave_flux", 1.0)),
-    "rlus": (("radiation.surface_lw_up", 1.0),),
-    "prw": (("aerocom_prw", 1.0),),
-    "ps": (("surface_pressure", 1.0), ("surface_exchange.surface_pressure", 1.0)),
-    "psl": (("aerocom_psl", 1.0),),
-    "huss": (("surface.humidity_2m", 1.0),),
-    "uas": (("vertical_diffusion.wind_10m_u", 1.0), ("aerocom_uas", 1.0)),
-    "vas": (("vertical_diffusion.wind_10m_v", 1.0), ("aerocom_vas", 1.0)),
-    "tasmax": (("tasmax", 1.0),),
-    "tasmin": (("tasmin", 1.0),),
+    "rsdt": ("radiation.toa_sw_down",),
+    "rsut": ("radiation.toa_sw_up",),
+    "rlut": ("radiation.toa_lw_up", "longwave_rad.ftop"),
+    "rsutcs": ("radiation.toa_sw_up_clear", "clouds.toa_sw_up_clear"),
+    "rlutcs": ("radiation.toa_lw_up_clear", "clouds.toa_lw_up_clear"),
+    "rsds": ("radiation.surface_sw_down", "surface_exchange.downward_shortwave_flux"),
+    "rsus": ("radiation.surface_sw_up",),
+    "rlds": ("radiation.surface_lw_down", "surface_exchange.downward_longwave_flux"),
+    "rlus": ("radiation.surface_lw_up",),
+    "prw": ("aerocom_prw",),
+    "ps": ("surface_pressure", "surface_exchange.surface_pressure"),
+    "psl": ("aerocom_psl",),
+    "huss": ("surface.humidity_2m",),
+    "uas": ("vertical_diffusion.wind_10m_u", "aerocom_uas"),
+    "vas": ("vertical_diffusion.wind_10m_v", "aerocom_vas"),
+    "tasmax": ("tasmax",),
+    "tasmin": ("tasmin",),
+    "clt": (
+        "clouds.total_cloud_cover",
+        "aerocom_clt",
+        "radiation.total_cloud_cover",
+        "shortwave_rad.cloudc",
+    ),
+    "ta": ("temperature",),
+    "hus": ("specific_humidity",),
+    "hur": ("relative_humidity",),
+    "ua": ("u_wind",),
+    "va": ("v_wind",),
+    "zg": ("height_full", "geopotential"),
+}
+
+#: Sources whose JCM -> CMOR factor depends on a model constant. Evaluated on
+#: every use so overrides applied via :func:`jcm.constants.set_constants` after
+#: module import are honoured.
+_LIVE_SCALES: dict[str, Callable[[], float]] = {
+    "geopotential": lambda: 1.0 / c.grav,
 }
 
 
@@ -259,88 +269,105 @@ def validate_token(flag: str, value: str, *, max_len: int | None = None) -> str:
 
 def validate_variant_label(member: str) -> str:
     """Validate a CMIP6 variant label such as ``r1i1p1f1``."""
-    if not VARIANT_RE.match(member):
+    if not _VARIANT_RE.match(member):
         raise ValueError(
             f"--member={member!r}: expected CMIP variant label like 'r1i1p1f1'."
         )
     return member
 
 
-def is_percent_units(da: xr.DataArray) -> bool:
+# --- unit conversion ------------------------------------------------------
+
+
+def _is_percent(da: xr.DataArray) -> bool:
     """Return True if ``da`` already declares percent units."""
-    units = str(da.attrs.get("units", "")).strip().lower()
-    return units in ("%", "percent")
+    return str(da.attrs.get("units", "")).strip().lower() in ("%", "percent")
 
 
-def source_scale(cmor: str, src: str, base_scale: float = 1.0) -> float:
-    """Return the multiplicative JCM->CMOR scale factor for ``(cmor, src)``.
-
-    Reads ``jcm.constants.grav`` live on every call so overrides applied via
-    :func:`jcm.constants.set_constants` after module import are honoured.
-    """
-    if src == "geopotential":
-        return 1.0 / c.grav
-    if cmor == "hur":
-        return 100.0
-    return base_scale
+def _to_percent(da: xr.DataArray) -> xr.DataArray:
+    """Convert a fraction to percent, leaving a field that already declares percent alone."""
+    return da if _is_percent(da) else da * 100.0
 
 
-def scale_source_dataarray(
+def _source_scale(src: str, default: float = 1.0) -> float:
+    """Return the multiplicative JCM -> CMOR factor for ``src`` (live constants win)."""
+    live = _LIVE_SCALES.get(src)
+    return live() if live is not None else default
+
+
+def to_cmor_units(
     da: xr.DataArray,
-    cmor: str,
     src: str,
-    base_scale: float = 1.0,
+    units: str,
+    *,
+    scale: float = 1.0,
     offset: float = 0.0,
 ) -> xr.DataArray:
-    """Apply live unit scaling (avoiding double ``%`` scaling) and offset to ``da``."""
-    scale = source_scale(cmor, src, base_scale)
-    if scale == 100.0 and is_percent_units(da):
-        scale = 1.0
-    if scale != 1.0:
-        da = da * scale
+    """Convert the JCM source field ``src`` to the CMOR ``units`` requested.
+
+    * ``units == "%"`` is a fraction -> percent conversion; a source that
+      already declares percent units is passed through, and ``scale`` is not
+      consulted.
+    * A source in :data:`_LIVE_SCALES` (``geopotential`` -> height) is scaled
+      by the live model constant.
+    * Anything else is ``da * scale``.
+
+    ``offset`` is added last in every case.
+    """
+    if units == "%":
+        da = _to_percent(da)
+    else:
+        scale = _source_scale(src, scale)
+        if scale != 1.0:
+            da = da * scale
     if offset != 0.0:
         da = da + offset
     return da
 
 
+# --- source lookup and derived variables ----------------------------------
+
+
+def _first_present(ds: xr.Dataset, names: Iterable[str]) -> str | None:
+    """Return the first of ``names`` that is a data variable of ``ds``."""
+    return next((name for name in names if name in ds.data_vars), None)
+
+
+def _sum_present(ds: xr.Dataset, names: Iterable[str]) -> xr.DataArray | None:
+    """Sum whichever of ``names`` are data variables of ``ds`` (None if none are)."""
+    parts = [ds[name] for name in names if name in ds.data_vars]
+    return functools.reduce(operator.add, parts) if parts else None
+
+
 def _lookup_direct(ds: xr.Dataset, cmor: str) -> xr.DataArray | None:
-    for src, scale in DIRECT_SOURCES.get(cmor, ()):
-        if src in ds.data_vars:
-            return scale_source_dataarray(ds[src], cmor, src, scale)
-    return None
+    src = _first_present(ds, SOURCES.get(cmor, ()))
+    if src is None:
+        return None
+    return to_cmor_units(ds[src], src, CMOR_META[cmor][0])
 
 
-def extract_tas(
-    ds: xr.Dataset,
-    *,
-    allow_lowest_level_fallback: bool = True,
-) -> xr.DataArray | None:
-    """Extract 2 m air temperature ``tas``, optionally falling back to lowest model level."""
+def extract_tas(ds: xr.Dataset) -> xr.DataArray | None:
+    """Extract 2 m air temperature ``tas``, falling back to the lowest model level."""
     direct = _lookup_direct(ds, "tas")
     if direct is not None:
         return direct
-    if (
-        allow_lowest_level_fallback
-        and "temperature" in ds.data_vars
-        and "level" in ds["temperature"].dims
-    ):
-        temp = ds["temperature"]
-        if "pressure_full" in ds.data_vars and "level" in ds["pressure_full"].dims:
-            mean_p = ds["pressure_full"].mean(
-                [d for d in ds["pressure_full"].dims if d != "level"]
-            )
-            sfc_idx = int(np.argmax(np.asarray(mean_p.values)))
-        else:
-            sfc_idx = 0
-        warnings.warn(
-            "Falling back to lowest-model-level 'temperature' for CMOR 'tas' "
-            "because neither 'surface.temperature_2m' nor 'aerocom_tas' is present; "
-            "this approximates 2 m air temperature.",
-            UserWarning,
-            stacklevel=2,
+    if "temperature" not in ds.data_vars or "level" not in ds["temperature"].dims:
+        return None
+    if "pressure_full" in ds.data_vars and "level" in ds["pressure_full"].dims:
+        mean_p = ds["pressure_full"].mean(
+            [d for d in ds["pressure_full"].dims if d != "level"]
         )
-        return temp.isel(level=sfc_idx, drop=True)
-    return None
+        sfc_idx = int(np.argmax(np.asarray(mean_p.values)))
+    else:
+        sfc_idx = 0
+    warnings.warn(
+        "Falling back to lowest-model-level 'temperature' for CMOR 'tas' "
+        "because neither 'surface.temperature_2m' nor 'aerocom_tas' is present; "
+        "this approximates 2 m air temperature.",
+        UserWarning,
+        stacklevel=2,
+    )
+    return ds["temperature"].isel(level=sfc_idx, drop=True)
 
 
 def extract_clt(ds: xr.Dataset, *, units: str = "%") -> xr.DataArray | None:
@@ -349,47 +376,30 @@ def extract_clt(ds: xr.Dataset, *, units: str = "%") -> xr.DataArray | None:
     Returns values in ``[0, 100]`` when ``units="%"`` (CMIP6 / AtmosphereBench)
     or ``[0, 1]`` when ``units="1"`` (AeroCom).
     """
-    for key in CLT_SOURCES:
-        if key in ds.data_vars:
-            da = ds[key]
-            in_pct = is_percent_units(da)
-            if units == "%":
-                if not in_pct:
-                    da = da * 100.0
-                return da.clip(0.0, 100.0)
-            if units == "1":
-                if in_pct:
-                    da = da / 100.0
-                return da.clip(0.0, 1.0)
-            raise ValueError(f"Unsupported clt units {units!r}; expected '%' or '1'.")
-    return None
+    src = _first_present(ds, SOURCES["clt"])
+    if src is None:
+        return None
+    da = ds[src]
+    if units == "%":
+        return _to_percent(da).clip(0.0, 100.0)
+    if units == "1":
+        return (da / 100.0 if _is_percent(da) else da).clip(0.0, 1.0)
+    raise ValueError(f"Unsupported clt units {units!r}; expected '%' or '1'.")
 
 
 def extract_pr(ds: xr.Dataset) -> xr.DataArray | None:
     """Extract total surface precipitation flux ``pr`` [kg m-2 s-1]."""
     if "surface_exchange.precipitation" in ds.data_vars:
         return ds["surface_exchange.precipitation"]
-    echam_parts = [
-        ds[k]
-        for k in ("clouds.precip_rain", "clouds.precip_snow", "convection.precip_conv")
-        if k in ds.data_vars
-    ]
-    if echam_parts:
-        out = echam_parts[0]
-        for part in echam_parts[1:]:
-            out = out + part
-        return out
-    speedy_parts = [
-        ds[k]
-        for k in ("condensation.precls", "convection.precnv")
-        if k in ds.data_vars
-    ]
-    if speedy_parts:
-        out = speedy_parts[0]
-        for part in speedy_parts[1:]:
-            out = out + part
+    echam = _sum_present(
+        ds, ("clouds.precip_rain", "clouds.precip_snow", "convection.precip_conv")
+    )
+    if echam is not None:
+        return echam
+    speedy = _sum_present(ds, ("condensation.precls", "convection.precnv"))
+    if speedy is not None:
         # SPEEDY stores precipitation in g m-2 s-1 (= 1e-3 kg m-2 s-1).
-        return out * 1e-3
+        return speedy * 1e-3
     return None
 
 
@@ -407,43 +417,44 @@ def extract_prw(ds: xr.Dataset) -> xr.DataArray | None:
 
 def extract_sftlf(ds: xr.Dataset) -> xr.DataArray | None:
     """Extract land area fraction ``sftlf`` [%], preferring ``surface_type='land'`` metadata."""
-    da: xr.DataArray | None = None
-    for name in sorted(ds.data_vars):
-        if (
-            str(name).startswith("surface_exchange.tile_fraction.")
+    src = next(
+        (
+            name
+            for name in sorted(ds.data_vars)
+            if str(name).startswith("surface_exchange.tile_fraction.")
             and ds[name].attrs.get("surface_type") == "land"
-        ):
-            da = ds[name]
-            break
-    if da is None:
-        for key in (
-            f"surface_exchange.tile_fraction.{ECHAM_LAND_TILE_INDEX}",
-            f"vertical_diffusion.surface_fraction.{ECHAM_LAND_TILE_INDEX}",
-        ):
-            if key in ds.data_vars:
-                da = ds[key]
-                break
-    if da is None:
+        ),
+        None,
+    ) or _first_present(
+        ds,
+        (
+            f"surface_exchange.tile_fraction.{_ECHAM_LAND_TILE_INDEX}",
+            f"vertical_diffusion.surface_fraction.{_ECHAM_LAND_TILE_INDEX}",
+        ),
+    )
+    if src is None:
         return None
+    da = ds[src]
     if "time" in da.dims:
         da = da.isel(time=0, drop=True)
-    return scale_source_dataarray(da, "sftlf", "sftlf", 100.0).clip(0.0, 100.0)
+    return _to_percent(da).clip(0.0, 100.0)
 
 
-def compute_areacella(ds: xr.Dataset) -> xr.DataArray | None:
+def _areacella(ds: xr.Dataset) -> xr.DataArray | None:
     """Compute spherical grid-cell areas ``areacella`` [m2] via :func:`jcm.analysis.cell_area`."""
     if "lat" not in ds.coords or "lon" not in ds.coords:
         return None
     return cell_area(ds)
 
 
-DERIVED_EXTRACTORS: dict[str, Callable[[xr.Dataset], xr.DataArray | None]] = {
+#: CMOR variables that need more than a renamed (and rescaled) source field.
+_DERIVED_EXTRACTORS: dict[str, Callable[[xr.Dataset], xr.DataArray | None]] = {
     "tas": extract_tas,
     "clt": extract_clt,
     "pr": extract_pr,
     "prw": extract_prw,
     "sftlf": extract_sftlf,
-    "areacella": compute_areacella,
+    "areacella": _areacella,
 }
 
 
@@ -455,35 +466,24 @@ def shared_source_entries(
     """Build a first-present-wins ``jcm_src -> (cmor, units, vert, scale, offset)`` table.
 
     Covers every CMOR variable in ``vert_by_cmor`` using the canonical fallback
-    priority in :data:`DIRECT_SOURCES`, :data:`PLEV_SOURCE_CANDIDATES`, and
-    :data:`CLT_SOURCES` so downstream exporters share the exact same source
-    priority without duplicating mappings.
+    priority in :data:`SOURCES`, so downstream exporters share the exact same
+    source priority without duplicating mappings. ``scale`` records the
+    conversion :func:`to_cmor_units` applies for the entry's units.
     """
     overrides = units_overrides or {}
     out: dict[str, tuple[str, str, str, float, float]] = {}
-
-    def _add(cmor: str, src: str, scale: float) -> None:
+    for cmor, vert in vert_by_cmor.items():
         units = overrides.get(cmor, CMOR_META[cmor][0])
-        out[src] = (cmor, units, vert_by_cmor[cmor], scale, 0.0)
-
-    for cmor in vert_by_cmor:
-        if cmor == "clt":
-            scale = 1.0 if overrides.get("clt") == "1" else 100.0
-            for src in CLT_SOURCES:
-                _add(cmor, src, scale)
-        elif cmor in PLEV_SOURCE_CANDIDATES:
-            for src in PLEV_SOURCE_CANDIDATES[cmor]:
-                _add(cmor, src, source_scale(cmor, src))
-        elif cmor in DIRECT_SOURCES:
-            for src, scale in DIRECT_SOURCES[cmor]:
-                _add(cmor, src, scale)
+        for src in SOURCES[cmor]:
+            scale = 100.0 if units == "%" else _source_scale(src)
+            out[src] = (cmor, units, vert, scale, 0.0)
     return out
 
 
 def extract_direct_variable(ds: xr.Dataset, cmor: str) -> xr.DataArray | None:
     """Extract a 2D, derived, or fixed (``fx``) CMOR variable from ``ds``."""
-    if cmor in DERIVED_EXTRACTORS:
-        return DERIVED_EXTRACTORS[cmor](ds)
+    if cmor in _DERIVED_EXTRACTORS:
+        return _DERIVED_EXTRACTORS[cmor](ds)
     return _lookup_direct(ds, cmor)
 
 
@@ -495,16 +495,12 @@ def extract_plev_variable(
     subset_preinterp: bool = False,
 ) -> xr.DataArray | None:
     """Extract and pressure-interpolate one 3D CMOR variable onto ``plevs_hpa`` [hPa]."""
-    src: str | None = None
-    for candidate in PLEV_SOURCE_CANDIDATES[cmor]:
-        if candidate in ds.data_vars:
-            src = candidate
-            break
+    src = _first_present(ds, SOURCES[cmor])
     if src is None:
         return None
 
-    da_src = ds[src]
-    if "level" in da_src.dims:
+    da = ds[src]
+    if "level" in da.dims:
         if "pressure_full" not in ds.data_vars:
             warnings.warn(
                 f"Skipping 3D CMOR variable {cmor!r} (source {src!r}): "
@@ -513,10 +509,8 @@ def extract_plev_variable(
                 stacklevel=2,
             )
             return None
-        interp_ds = to_pressure_levels(ds[[src, "pressure_full"]], list(plevs_hpa))
-        da = interp_ds[src]
-    elif "plev" in da_src.dims:
-        da = da_src
+        da = to_pressure_levels(ds[[src, "pressure_full"]], list(plevs_hpa))[src]
+    elif "plev" in da.dims:
         plev_units = str(da.coords["plev"].attrs.get("units", "")).strip().lower()
         if plev_units in ("hpa", "mb", "millibar"):
             da = da.assign_coords(plev=da.coords["plev"].values.astype(np.float64) * 100.0)
@@ -540,7 +534,18 @@ def extract_plev_variable(
     else:
         return None
 
-    return scale_source_dataarray(da, cmor, src)
+    return to_cmor_units(da, src, CMOR_META[cmor][0])
+
+
+# --- time axis helpers ----------------------------------------------------
+
+
+def _is_datetime_like(values) -> bool:
+    """Return True for a datetime64 or cftime (object dtype) array of time values."""
+    arr = np.asarray(values)
+    return np.issubdtype(arr.dtype, np.datetime64) or (
+        arr.size > 0 and hasattr(arr.flat[0], "year")
+    )
 
 
 def date_ymd(val) -> tuple[int, int, int]:
@@ -548,25 +553,29 @@ def date_ymd(val) -> tuple[int, int, int]:
     if hasattr(val, "year") and hasattr(val, "month") and hasattr(val, "day"):
         return int(val.year), int(val.month), int(val.day)
     if isinstance(val, np.datetime64):
-        s = str(np.datetime_as_string(val, unit="D"))
-        y, m, d = s.split("-")
+        y, m, d = str(np.datetime_as_string(val, unit="D")).split("-")
         return int(y), int(m), int(d)
     raise TypeError(f"Unsupported time coordinate value: {val!r} ({type(val).__name__})")
 
 
+def time_bounds_names(ds: xr.Dataset) -> list[str]:
+    """Names of the CF time-bounds variables present in ``ds`` (the declared one first)."""
+    declared = ds["time"].attrs.get("bounds", "time_bounds")
+    return [name for name in dict.fromkeys((declared, "time_bounds")) if name in ds]
+
+
 def get_time_bounds(ds: xr.Dataset) -> xr.DataArray | None:
-    """Return the CF time-bounds variable from ``ds`` (data_vars or coords), if present."""
+    """Return the well-formed ``(time, 2)`` CF time-bounds variable of ``ds``, if any."""
     if "time" not in ds.coords:
         return None
-    bounds_name = ds["time"].attrs.get("bounds", "time_bounds")
-    if bounds_name in ds:
-        return ds[bounds_name]
-    if bounds_name != "time_bounds" and "time_bounds" in ds:
-        return ds["time_bounds"]
-    return None
+    names = time_bounds_names(ds)
+    if not names:
+        return None
+    bounds = ds[names[0]]
+    return bounds if bounds.ndim == 2 and bounds.shape[1] == 2 else None
 
 
-def timedelta_days(delta) -> float:
+def _timedelta_days(delta) -> float:
     """Convert a numpy timedelta64 or datetime.timedelta to float days."""
     if isinstance(delta, np.timedelta64):
         return float(delta / np.timedelta64(1, "s")) / 86400.0
@@ -576,21 +585,25 @@ def timedelta_days(delta) -> float:
 
 
 def median_step_days(ds: xr.Dataset, time_bounds: xr.DataArray | None) -> float | None:
-    """Estimate the median sampling/averaging interval [days] of ``ds['time']``."""
-    if time_bounds is not None and time_bounds.ndim == 2 and time_bounds.shape[1] == 2:
-        tb = time_bounds.values
-        widths = [timedelta_days(tb[i, 1] - tb[i, 0]) for i in range(tb.shape[0])]
-        if widths:
-            return float(np.median(widths))
-    if "time" in ds.coords and ds.sizes.get("time", 0) >= 2:
-        tvals = ds.coords["time"].values
-        diffs = [timedelta_days(tvals[i + 1] - tvals[i]) for i in range(len(tvals) - 1)]
-        if diffs:
-            return float(np.median(diffs))
-    return None
+    """Estimate the median sampling/averaging interval [days] of ``ds['time']``.
+
+    ``time_bounds`` is the result of :func:`get_time_bounds`; interval widths
+    are preferred over the spacing of the time stamps when it is available.
+    """
+    if time_bounds is not None and time_bounds.shape[0] > 0:
+        edges = time_bounds.values
+        steps = edges[:, 1] - edges[:, 0]
+    elif "time" in ds.coords and ds.sizes.get("time", 0) >= 2:
+        steps = np.diff(ds.coords["time"].values)
+    else:
+        return None
+    return float(np.median([_timedelta_days(step) for step in steps]))
 
 
-def cell_methods(cmor: str, table: str) -> str:
+# --- CF variable metadata, layout, and writer -----------------------------
+
+
+def _cell_methods(cmor: str, table: str) -> str:
     """Return the CF-1.8 ``cell_methods`` string for ``(cmor, table)``."""
     if table == "fx":
         return "area: sum" if cmor == "areacella" else "area: mean"
@@ -601,89 +614,89 @@ def cell_methods(cmor: str, table: str) -> str:
     return "area: time: mean"
 
 
-def standardize_dataarray(
+def cmor_variable(
     da: xr.DataArray,
     cmor: str,
     *,
     table: str | None = None,
     units: str | None = None,
-    standard_name: str | None = None,
     long_name: str | None = None,
     comment: str | None = None,
-    sort_lat: bool = True,
-    transpose_cmor: bool = True,
-    drop_extra_coords: bool = True,
 ) -> xr.DataArray:
-    """Standardize dimensions, latitude order, and CF variable attributes."""
-    if drop_extra_coords:
-        extra_coords = [c_name for c_name in da.coords if c_name not in da.dims]
-        if extra_coords:
-            da = da.drop_vars(extra_coords)
+    """Rename ``da`` to ``cmor`` and replace its attributes with the CF variable attributes.
 
-    if transpose_cmor:
-        ordered_dims = [d for d in ("time", "plev", "lat", "lon") if d in da.dims]
-        remaining = [d for d in da.dims if d not in ordered_dims]
-        da = da.transpose(*ordered_dims, *remaining)
-
-    if sort_lat and "lat" in da.dims and da.sizes["lat"] > 1:
-        lat_vals = da.coords["lat"].values
-        if lat_vals[0] > lat_vals[-1]:
-            da = da.isel(lat=slice(None, None, -1))
-
+    ``units`` and ``long_name`` default to the :data:`CMOR_META` entry (the
+    long name falls back to ``cmor`` itself for variables outside that table).
+    ``standard_name`` is only written where :data:`CF_STANDARD_NAMES` has a
+    verified mapping, and ``cell_methods`` only when a CMOR ``table`` is given.
+    """
     meta = CMOR_META.get(cmor)
-    resolved_units = units if units is not None else (meta[0] if meta else da.attrs.get("units"))
-    resolved_std = (
-        standard_name
-        if standard_name is not None
-        else CF_STANDARD_NAMES.get(cmor)
-    )
-    resolved_long = long_name if long_name is not None else (meta[2] if meta else cmor)
+    if units is None and meta is not None:
+        units = meta[0]
+    if long_name is None:
+        long_name = meta[2] if meta is not None else cmor
 
-    da = da.rename(cmor)
     attrs: dict[str, str] = {}
-    if resolved_units is not None:
-        attrs["units"] = resolved_units
-    if resolved_std is not None:
-        attrs["standard_name"] = resolved_std
-    attrs["long_name"] = resolved_long
+    if units is not None:
+        attrs["units"] = units
+    if cmor in CF_STANDARD_NAMES:
+        attrs["standard_name"] = CF_STANDARD_NAMES[cmor]
+    attrs["long_name"] = long_name
     if table is not None:
-        attrs["cell_methods"] = cell_methods(cmor, table)
-    if cmor in FLUX_POSITIVE:
-        attrs["positive"] = FLUX_POSITIVE[cmor]
+        attrs["cell_methods"] = _cell_methods(cmor, table)
+    if cmor in _FLUX_POSITIVE:
+        attrs["positive"] = _FLUX_POSITIVE[cmor]
     if comment is not None:
         attrs["comment"] = comment
+
+    da = da.rename(cmor)
     da.attrs = attrs
     return da
 
 
-def apply_cmor_coord_attrs(out: xr.Dataset) -> None:
+def _drop_aux_coords(da: xr.DataArray) -> xr.DataArray:
+    """Drop every coordinate of ``da`` that is not one of its dimensions."""
+    return da.drop_vars([name for name in da.coords if name not in da.dims])
+
+
+def to_cmip_layout(da: xr.DataArray) -> xr.DataArray:
+    """Apply the CMIP layout: no auxiliary coords, ``(time, plev, lat, lon)``, south-to-north."""
+    da = _drop_aux_coords(da)
+    leading = [d for d in ("time", "plev", "lat", "lon") if d in da.dims]
+    da = da.transpose(*leading, *(d for d in da.dims if d not in leading))
+    if "lat" in da.dims and da.sizes["lat"] > 1:
+        lat = da.coords["lat"].values
+        if lat[0] > lat[-1]:
+            da = da.isel(lat=slice(None, None, -1))
+    return da
+
+
+def _apply_coord_attrs(out: xr.Dataset) -> None:
     """Stamp CF coordinate attributes using :func:`jcm.cf_metadata.apply_cf_attributes`."""
     apply_cf_attributes(out)
-    if "time" in out.coords:
-        # Remove encoding-owned keys from attrs so xarray.to_netcdf does not
-        # fail with "failed to prevent overwriting existing key units in attrs".
-        out["time"].attrs.pop("units", None)
-        out["time"].attrs.pop("calendar", None)
-        if out.sizes.get("time", 0) > 0 and hasattr(out["time"].values[0], "year"):
-            # cftime coordinates are datetime-like even though their numpy dtype is object.
-            out["time"].attrs["standard_name"] = "time"
-            out["time"].attrs["long_name"] = "time"
-            out["time"].attrs["axis"] = "T"
-        if "time_bounds" in out.data_vars:
-            out["time"].attrs["bounds"] = "time_bounds"
-            out["time_bounds"].attrs.pop("units", None)
-            out["time_bounds"].attrs.pop("calendar", None)
+    if "time" not in out.coords:
+        return
+    time = out["time"]
+    # Remove encoding-owned keys from attrs so xarray.to_netcdf does not
+    # fail with "failed to prevent overwriting existing key units in attrs".
+    time.attrs.pop("units", None)
+    time.attrs.pop("calendar", None)
+    if "time" in out.sizes and _is_datetime_like(time.values):
+        # ``apply_cf_attributes`` only recognises datetime64; a cftime axis is
+        # datetime-like too even though its numpy dtype is object.
+        time.attrs.update(standard_name="time", long_name="time", axis="T")
+    if "time_bounds" in out.data_vars:
+        time.attrs["bounds"] = "time_bounds"
+        out["time_bounds"].attrs.pop("units", None)
+        out["time_bounds"].attrs.pop("calendar", None)
 
 
-def time_encoding(out: xr.Dataset) -> dict[str, dict]:
+def _time_encoding(out: xr.Dataset) -> dict[str, dict]:
     """Build NetCDF time encoding preserving cftime calendars when present."""
     if "time" not in out.coords:
         return {}
     tvals = out["time"].values
-    is_datetime_like = np.issubdtype(np.asarray(tvals).dtype, np.datetime64) or (
-        len(tvals) > 0 and hasattr(tvals[0], "year")
-    )
-    if not is_datetime_like:
+    if not _is_datetime_like(tvals):
         return {}
     t_enc: dict[str, str] = {"units": "days since 1850-01-01", "dtype": "float64"}
     cal = out["time"].encoding.get("calendar")
@@ -715,55 +728,35 @@ def write_netcdf_atomic(
 
 def write_cmor_variable(
     da: xr.DataArray,
-    *,
-    cmor: str,
     target: pathlib.Path,
     global_attrs: Mapping[str, str],
-    table: str | None = None,
-    units: str | None = None,
-    standard_name: str | None = None,
-    long_name: str | None = None,
-    comment: str | None = None,
+    *,
     time_bounds: xr.DataArray | None = None,
     compress: bool = True,
-    sort_lat: bool = True,
-    transpose_cmor: bool = True,
-    drop_extra_coords: bool = True,
     dry_run: bool = False,
 ) -> str:
-    """Standardize and atomically write one CMOR variable NetCDF file."""
-    std_da = standardize_dataarray(
-        da,
-        cmor,
-        table=table,
-        units=units,
-        standard_name=standard_name,
-        long_name=long_name,
-        comment=comment,
-        sort_lat=sort_lat,
-        transpose_cmor=transpose_cmor,
-        drop_extra_coords=drop_extra_coords,
-    )
+    """Atomically write one named CMOR variable to ``target``; return the file name.
+
+    ``da`` is written as given (see :func:`cmor_variable` and
+    :func:`to_cmip_layout`), with CF coordinate attributes and time encoding
+    added. ``dry_run`` skips the write and only reports the file name.
+    """
     if dry_run:
         return target.name
 
-    data_vars: dict[str, xr.DataArray] = {cmor: std_da}
-    if time_bounds is not None and "time" in std_da.dims:
-        tb = time_bounds
-        extra = [c_name for c_name in tb.coords if c_name not in tb.dims]
-        if extra:
-            tb = tb.drop_vars(extra)
-        data_vars["time_bounds"] = tb
+    data_vars: dict[str, xr.DataArray] = {da.name: da}
+    if time_bounds is not None and "time" in da.dims:
+        data_vars["time_bounds"] = _drop_aux_coords(time_bounds)
 
     out = xr.Dataset(data_vars)
-    if "time" in std_da.coords and "calendar" in std_da.coords["time"].encoding:
-        out["time"].encoding["calendar"] = std_da.coords["time"].encoding["calendar"]
-    apply_cmor_coord_attrs(out)
+    if "time" in da.coords and "calendar" in da.coords["time"].encoding:
+        out["time"].encoding["calendar"] = da.coords["time"].encoding["calendar"]
+    _apply_coord_attrs(out)
     out.attrs.update(global_attrs)
 
     encoding: dict[str, dict] = {}
     if compress:
-        encoding[cmor] = {"zlib": True, "complevel": 4}
-    encoding.update(time_encoding(out))
+        encoding[da.name] = {"zlib": True, "complevel": 4}
+    encoding.update(_time_encoding(out))
     write_netcdf_atomic(out, target, encoding=encoding)
     return target.name
