@@ -49,6 +49,15 @@ leaves existing behaviour unchanged.
   semi-Lagrangian departure-point iteration count (default 1), and
   ``run.health.max_q_gkg`` makes the health gate's humidity ceiling
   configurable (default 100 g/kg, ``null`` disables it).
+- **Drive JCM from a host process.** ``jcm.configurations.from_config``
+  builds the model, forcing and ``run_kwargs`` from any composed config, a
+  downstream overlay's included; ``load`` is now compose-then-``from_config``
+  and takes an ``extra_config_dir``. ``jcm.nudging.window_forcing`` puts one
+  segment's window of a host-resident nudging target on the device, the same
+  call the chunked runner makes, so a caller alternating ``Model.run`` and
+  ``Model.resume`` no longer carries the whole target there.
+  ``runners.apply_log_level`` is public. A co-simulation host needs no
+  ``runners._*`` call (:doc:`design/packaged_config_tree`).
 - **The ERA5 prefetch regrids in time chunks.** ``python -m jcm.data.era5``
   streams each chunk into the cache file, so its peak host memory follows the
   chunk (a 4 GiB working set by default, ``--time-chunk`` to change it) and

@@ -83,8 +83,9 @@ def _compose(name: str, overrides: list[str], extra_config_dir=None):
     context still composes after ``load`` returns (F3).
 
     ``extra_config_dir`` joins Hydra's search path (``hydra.searchpath``), so a
-    downstream's own groups and recipes compose with jcm's: a file there that
-    shares a group/name with jcm's wins, new groups and names are added.
+    downstream's own groups and recipes compose with jcm's. The entry sits
+    behind jcm's own directory, so new groups and names are added and a file
+    that shares a group/name with one of jcm's does not replace it.
     """
     if extra_config_dir is not None:
         overrides = [f"hydra.searchpath=[{Path(extra_config_dir).resolve().as_uri()}]",
