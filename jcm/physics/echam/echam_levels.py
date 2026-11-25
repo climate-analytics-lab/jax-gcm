@@ -24,6 +24,11 @@ The ``a_boundaries`` values are in **Pascals** (Pa).
 ``dinosaur.primitive_equations.PrimitiveEquationsHybrid`` expects ``a``
 in its ``hpa_quantity`` unit (default hPa); ``Model`` overrides this
 to ``units.pascal`` when constructed with these ``HybridCoordinates``.
+
+A table of the user's own (the same ``vct_a``/``vct_b`` convention, any level
+count) is built by :func:`hybrid_levels_from_table`, :func:`read_vct_file` or,
+from a grid config's ``level_table``, :func:`levels_from_level_table`; see
+``docs/source/science/dynamical_core.md`` for what the model does with one.
 """
 
 import jax.numpy as jnp
