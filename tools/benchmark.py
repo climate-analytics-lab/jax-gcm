@@ -286,7 +286,10 @@ def _auto_emission_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
     # is_published also rejects a sigma grid that merely shares a published
     # (token, nlev); the shared manifest keeps this enumerator and the runner's
     # ``auto`` resolver from disagreeing on which keys to fetch (F2).
-    vertical = str(grid.get("vertical", "hybrid"))
+    # A user level table (grid.level_table) is not the built-in table the
+    # bundles are on, so it matches no published vertical: nothing to prefetch.
+    vertical = ("user-table" if grid.get("level_table") is not None
+                else str(grid.get("vertical", "hybrid")))
     for product in gridded:
         if mm.is_published(manifest, product, token, int(nlev), vertical):
             out.append(
@@ -375,9 +378,10 @@ def _auto_ozone_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
     manifest = mm.load_manifest()
     product = mm.product_for_key(manifest, "ozone_file")
     token = f"t{int(trunc)}"
+    vertical = ("user-table" if grid.get("level_table") is not None
+                else str(grid.get("vertical", "hybrid")))
     if product is None or not mm.is_published(
-            manifest, product, token, int(nlev),
-            str(grid.get("vertical", "hybrid"))):
+            manifest, product, token, int(nlev), vertical):
         return []
     return ["hf://" + mm.bundle_path(manifest, product, token, int(nlev))]
 

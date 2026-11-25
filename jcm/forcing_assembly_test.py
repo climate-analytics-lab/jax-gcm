@@ -351,5 +351,65 @@ class TestPythonDoor(unittest.TestCase):
                     composed)
 
 
+class TestUserHybridTableGuard(unittest.TestCase):
+    """A user table must never silently pull a built-in table's level-resolved bundle.
+
+    Ozone and oxidants are published per ``(grid, nlev)`` on ECHAM's L47/L95
+    tables and mapped level for level (no vertical interpolation), so a user
+    table that merely has 47 or 95 levels would receive data on other pressures.
+    """
+
+    @staticmethod
+    def _coords(nlev, truncation=63, perturb=True):
+        from jcm.physics.echam.echam_levels import (get_echam_levels,
+                                                    hybrid_levels_from_table)
+        from jcm.utils import get_coords
+        base = get_echam_levels(nlev)
+        a = np.asarray(base.a_boundaries, np.float64)
+        b = np.asarray(base.b_boundaries, np.float64)
+        if perturb:        # still a valid table, not ECHAM's
+            b = b.copy()
+            b[-2] -= 1e-3
+        return get_coords(hybrid_levels_from_table(a, b),
+                          spectral_truncation=truncation)
+
+    def test_auto_ozone_raises_on_a_user_table_with_a_published_count(self):
+        for nlev in (47, 95):
+            with self.subTest(nlev=nlev):
+                with self.assertRaisesRegex(ValueError, "user table"):
+                    fa._resolve_auto_ozone(self._coords(nlev))
+
+    def test_auto_oxidants_raise_on_a_user_table_but_level_free_keys_resolve(self):
+        coords = self._coords(47)
+        with self.assertRaisesRegex(ValueError, "oxidants_file=auto"):
+            fa._resolve_one_emission_input("auto", "oxidants_file", coords,
+                                           jam=True, is_pyses=False)
+        # Level-free products are mapped onto the columns, not the levels.
+        with patch.object(fa.ir, "resolve_input") as resolve:
+            resolve.return_value = SimpleNamespace(is_none=False,
+                                                   paths=("emissions.nc",))
+            self.assertEqual(
+                fa._resolve_one_emission_input("auto", "emissions_file", coords,
+                                               jam=True, is_pyses=False),
+                "emissions.nc")
+
+    def test_builtin_tables_and_unpublished_counts_pass_the_guard(self):
+        fa.reject_user_hybrid_for_mirror_data(
+            self._coords(47, perturb=False), "forcing.ozone_file=auto")
+        fa.reject_user_hybrid_for_mirror_data(
+            self._coords(95, perturb=False), "forcing.ozone_file=auto")
+        # No bundle exists for 9 levels; the resolvers already fail on their own.
+        from jcm.physics.echam.echam_levels import hybrid_levels_from_table
+        from jcm.utils import get_coords
+        a = np.array([0.0, 100.0, 5000.0, 9000.0, 0.0])
+        b = np.array([0.0, 0.0, 0.2, 0.7, 1.0])
+        coords = get_coords(hybrid_levels_from_table(a, b), spectral_truncation=21)
+        fa.reject_user_hybrid_for_mirror_data(coords, "forcing.ozone_file=auto")
+
+    def test_from_bundles_refuses_a_user_table(self):
+        with self.assertRaisesRegex(ValueError, "from_bundles"):
+            ForcingData.from_bundles(self._coords(47), aerosol=None)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,5 +4,10 @@
 # validated). 360 lon x 180 lat on the middle-atmosphere L47 grid.
 vertical: hybrid
 layers: 47
+# Optional own hybrid table instead of the built-in one that `layers` names:
+# {a: [...], b: [...]} half-level coefficients (Pa / dimensionless, top first)
+# or the path of a netCDF file with ECHAM vct_a/vct_b; layers must then equal
+# len(a) - 1 (or be null). null keeps the built-in L47/L95 table.
+level_table: null
 spectral_truncation: 119
 spmd_mesh: null

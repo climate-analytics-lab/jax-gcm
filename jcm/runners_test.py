@@ -2845,6 +2845,138 @@ class TestBuilderErrorAndSelectorPaths(unittest.TestCase):
             build_model(cfg)
 
 
+class TestUserLevelTableGrid(unittest.TestCase):
+    """``grid.level_table``: a hybrid grid that names its own half-level table."""
+
+    _OFFLINE = ["terrain=aquaplanet", "forcing=default",
+                "forcing.ozone_file=analytic", "physics.land_model=prescribed"]
+
+    @staticmethod
+    def _l95_subset_table(indices=(0, 10, 20, 30, 40, 55, 70, 80, 90, 95)):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        full = get_echam_levels(95)
+        idx = list(indices)
+        return {"a": np.asarray(full.a_boundaries, np.float64)[idx].tolist(),
+                "b": np.asarray(full.b_boundaries, np.float64)[idx].tolist()}
+
+    def _cfg(self, table, layers=None, extra=()):
+        cfg = _compose(["grid=echam_t63_l47_hybrid", "grid.spectral_truncation=21",
+                        *extra])
+        cfg.grid.layers = layers
+        cfg.grid.level_table = table
+        return cfg
+
+    def test_default_is_null_and_keeps_the_builtin_table(self):
+        cfg = _compose(["grid=echam_t63_l47_hybrid", "grid.spectral_truncation=21"])
+        self.assertIsNone(cfg.grid.level_table)
+        self.assertEqual(build_coords(cfg).vertical.layers, 47)
+
+    def test_inline_table_sets_the_vertical_and_the_layer_count(self):
+        table = self._l95_subset_table()
+        coords = build_coords(self._cfg(table))
+        self.assertEqual(coords.nodal_shape[0], 9)
+        np.testing.assert_allclose(np.asarray(coords.vertical.a_boundaries),
+                                   table["a"], rtol=1e-6)
+
+    def test_builtin_values_as_a_table_equal_layers_47(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        built_in = get_echam_levels(47)
+        table = {"a": np.asarray(built_in.a_boundaries, np.float64).tolist(),
+                 "b": np.asarray(built_in.b_boundaries, np.float64).tolist()}
+        user = build_coords(self._cfg(table, layers=47)).vertical
+        ref = build_coords(_compose(["grid=echam_t63_l47_hybrid",
+                                     "grid.spectral_truncation=21"])).vertical
+        np.testing.assert_array_equal(np.asarray(user.a_boundaries),
+                                      np.asarray(ref.a_boundaries))
+        np.testing.assert_array_equal(np.asarray(user.b_boundaries),
+                                      np.asarray(ref.b_boundaries))
+        # ... and the identical hyperdiffusion profile, the built-in index table
+        d_user = build_diffusion(self._cfg(table, layers=47))
+        d_ref = build_diffusion(_compose(["grid=echam_t63_l47_hybrid",
+                                          "grid.spectral_truncation=21"]))
+        np.testing.assert_array_equal(d_user.level_orders_temp,
+                                      d_ref.level_orders_temp)
+
+    def test_file_table_resolves_like_the_inline_one(self):
+        import tempfile
+        table = self._l95_subset_table()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "vct.nc")
+            xr.Dataset({"vct_a": ("nvclev", table["a"]),
+                        "vct_b": ("nvclev", table["b"])}).to_netcdf(path)
+            from_file = build_coords(self._cfg(path)).vertical
+        inline = build_coords(self._cfg(table)).vertical
+        np.testing.assert_array_equal(np.asarray(from_file.a_boundaries),
+                                      np.asarray(inline.a_boundaries))
+
+    def test_layers_must_agree_with_the_table(self):
+        with self.assertRaisesRegex(ValueError, "grid.layers=47 .* 9 layers"):
+            build_coords(self._cfg(self._l95_subset_table(), layers=47))
+
+    def test_level_table_needs_a_hybrid_grid(self):
+        from omegaconf import open_dict
+        cfg = _compose(["grid=speedy_t31_l8"])
+        with open_dict(cfg.grid):   # only the hybrid grid configs declare the key
+            cfg.grid.level_table = self._l95_subset_table()
+        with self.assertRaisesRegex(ValueError, "set grid.vertical=hybrid"):
+            build_coords(cfg)
+
+    def test_surface_first_table_is_rejected_not_flipped(self):
+        table = self._l95_subset_table()
+        reversed_table = {"a": table["a"][::-1], "b": table["b"][::-1]}
+        with self.assertRaisesRegex(ValueError, "SURFACE-FIRST"):
+            build_coords(self._cfg(reversed_table))
+
+    def test_auto_diffusion_maps_the_profile_by_pressure(self):
+        cfg = self._cfg(self._l95_subset_table())
+        cfg.grid.spectral_truncation = 63   # tabulated for L95 (T31 only for L47)
+        cfg.diffusion = {"kind": "auto"}
+        import logging
+        with self.assertNoLogs("jcm.diffusion", level=logging.WARNING):
+            diffusion = build_diffusion(cfg)
+        self.assertEqual(len(diffusion.level_orders_temp), 9)
+        self.assertEqual(int(diffusion.level_orders_temp[0]), 1)
+        self.assertEqual(int(diffusion.level_orders_temp[-1]), 4)
+
+    def test_build_model_constructs_on_the_user_table(self):
+        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid",
+                        "grid.spectral_truncation=21", *self._OFFLINE,
+                        "run.time_step=10", "init=jw"])
+        cfg.grid.layers = None
+        cfg.grid.level_table = self._l95_subset_table()
+        model = build_model(cfg)
+        self.assertEqual(model.coords.vertical.layers, 9)
+
+    @pytest.mark.slow
+    def test_user_table_model_takes_a_finite_step(self):
+        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid",
+                        "grid.spectral_truncation=21", *self._OFFLINE,
+                        "run.time_step=10", "init=jw"])
+        cfg.grid.layers = None
+        cfg.grid.level_table = self._l95_subset_table()
+        model = build_model(cfg)
+        preds = model.run(save_interval=10 / 1440, total_time=10 / 1440)
+        temperature = np.asarray(preds.dynamics.temperature)
+        self.assertEqual(temperature.shape[1], 9)
+        self.assertTrue(np.all(np.isfinite(temperature)))
+
+    def test_prefetch_enumerator_skips_bundles_for_a_user_table(self):
+        # tools/benchmark.py must not warm the built-in-table bundle for a grid
+        # that names its own levels, even at a published (grid, nlev).
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_bench", Path(__file__).parent.parent / "tools" / "benchmark.py")
+        bench = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bench)
+        from omegaconf import OmegaConf
+        base = {"grid": {"spectral_truncation": 63, "layers": 47,
+                         "vertical": "hybrid"}, "forcing": {"ozone_file": "auto"}}
+        plain = bench._auto_ozone_files(OmegaConf.create(base))
+        self.assertEqual(len(plain), 1)
+        base["grid"]["level_table"] = self._l95_subset_table()
+        self.assertEqual(bench._auto_ozone_files(OmegaConf.create(base)), [])
+
+
 class TestRunDispatchErrorPaths(unittest.TestCase):
     def test_run_unknown_mode_raises(self):
         cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8"])

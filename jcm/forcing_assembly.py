@@ -149,6 +149,7 @@ def _resolve_auto_ozone(coords):
             _vertical_kind(coords),
         )
         return None
+    reject_user_hybrid_for_mirror_data(coords, "forcing.ozone_file=auto")
     nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
     nlev = int(coords.nodal_shape[0])
     manifest = mm.load_manifest()
@@ -357,6 +358,50 @@ def _vertical_kind(coords) -> str:
     return "hybrid" if isinstance(coords.vertical, HybridCoordinates) else "sigma"
 
 
+def reject_user_hybrid_for_mirror_data(coords, what) -> None:
+    """Refuse a mirror/packaged level-resolved product on a user hybrid table.
+
+    The level-resolved boundary data (ozone, oxidants) are published per
+    ``(grid, nlev)`` on the BUILT-IN ECHAM L47/L95 tables, and the model maps
+    them level for level: nothing here interpolates them vertically (the ozone
+    loader checks the level count and horizontal grid only; the oxidant reader
+    checks the count, and the file's ``hyam``/``hybm`` when it carries them).
+    A user table (``grid.level_table``) that merely has 47 or 95 levels would
+    therefore pull a bundle on different pressures without any error — the same
+    silent corruption :func:`_vertical_kind` guards against for sigma grids. So
+    this raises, naming what to supply. A user table whose count is not a
+    published one needs no guard here: no bundle exists for it, and the
+    resolvers already fail (ozone) or report the unresolved key (oxidants).
+
+    Args:
+        coords: the model ``CoordinateSystem``.
+        what: the config key / entry point being resolved, for the message.
+
+    Raises:
+        ValueError: ``coords`` carries a non-built-in hybrid table whose level
+            count is one the mirror publishes bundles for.
+
+    """
+    if _vertical_kind(coords) != "hybrid":
+        return
+    nlev = int(coords.nodal_shape[0])
+    if nlev not in mm.load_manifest()["levels"]:
+        return
+    from jcm.physics.echam.echam_levels import is_builtin_table
+    if is_builtin_table(coords.vertical):
+        return
+    raise ValueError(
+        f"{what} would resolve to the data mirror's {nlev}-level bundle, "
+        f"but this grid's {nlev} hybrid levels are a user table "
+        "(grid.level_table), not the built-in ECHAM "
+        f"L{nlev} table the bundle is on, and the file is mapped level for "
+        "level with no vertical interpolation. Supply a file built for these "
+        "levels (jcm.data.bc.interpolate_ozone.vertical_interp_log_p maps any "
+        "pressure-level field onto them; oxidants must carry matching "
+        "hyam/hybm) via the key, or opt out: forcing.ozone_file=analytic, "
+        "forcing.<key>=null for the others.")
+
+
 # ---------------------------------------------------------------------------
 # auto emission resolution
 # ---------------------------------------------------------------------------
@@ -434,6 +479,11 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
         # pySES only gets here for a grid-free product, which needs no
         # spectral grid identity (and its native coords have none).
         spectral = not is_pyses
+        if spectral:
+            manifest = mm.load_manifest()
+            if mm.product(manifest, mm.product_for_key(manifest, key))["levels"]:
+                reject_user_hybrid_for_mirror_data(
+                    coords, f"forcing.{key}=auto")
         r = ir.resolve_input(
             key, "auto", grid_token=_grid_token(coords) if spectral else None,
             nlev=int(coords.nodal_shape[0]) if spectral else None,

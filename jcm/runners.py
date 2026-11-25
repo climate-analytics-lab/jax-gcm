@@ -118,6 +118,33 @@ def configure_host_device_count(n: int | None) -> None:
 # Coordinate system
 # ---------------------------------------------------------------------------
 
+def _grid_level_table(grid):
+    """Hybrid levels named by ``grid.level_table``, or ``None`` if unset.
+
+    ``level_table`` is either inline ``{a: [...], b: [...]}`` half-level
+    coefficients or the path of a netCDF file carrying ECHAM's
+    ``vct_a``/``vct_b`` (``hf://`` and the usual path resolution apply, with
+    provenance recorded). It only means something on a ``hybrid`` grid, so any
+    other family raises rather than ignore it. ``grid.layers``, when also
+    given, must equal the table's ``len(a) - 1``.
+    """
+    table = grid.get("level_table", None)
+    if table is None:
+        return None
+    if grid.get("vertical", None) != "hybrid":
+        raise ValueError(
+            f"grid.level_table is a hybrid-level table but grid.vertical="
+            f"{grid.get('vertical', None)!r}; set grid.vertical=hybrid.")
+    from omegaconf import OmegaConf
+
+    from jcm.physics.echam.echam_levels import levels_from_level_table
+    if OmegaConf.is_config(table):
+        table = OmegaConf.to_container(table, resolve=True)
+    if isinstance(table, str):
+        table = _resolve_data_path(table)
+    return levels_from_level_table(table, grid.get("layers", None))
+
+
 def build_coords(cfg: DictConfig):
     """Build a ``CoordinateSystem`` from ``cfg.grid``.
 
@@ -134,15 +161,18 @@ def build_coords(cfg: DictConfig):
     this family and ``sigma`` is for physics that does not care about the
     spacing (Held-Suarez). Layer count is independent of physics: each
     physics package is responsible for raising if it can't accept the chosen
-    ``cfg.grid.layers``.
+    ``cfg.grid.layers``. A ``hybrid`` grid may instead name its own
+    half-level table with ``cfg.grid.level_table`` (see
+    :func:`_grid_level_table`); the layer count is then the table's.
 
     ``cfg.grid.spmd_mesh`` (optional) is a ``[x, y, z]`` triple specifying
     the SPMD device mesh over (longitude, latitude, vertical); pass ``null``
     or omit to run on a single device.
     """
     grid = cfg.grid
-    layers = grid.layers
     truncation = grid.spectral_truncation
+    user_levels = _grid_level_table(grid)
+    layers = user_levels.layers if user_levels is not None else grid.layers
     spmd_mesh = grid.get("spmd_mesh", None)
     spmd_mesh = tuple(spmd_mesh) if spmd_mesh is not None else None
 
@@ -163,17 +193,23 @@ def build_coords(cfg: DictConfig):
         )
     if vertical == "hybrid":
         # ECHAM/ICON ship pre-tuned full-depth hybrid tables for 47 / 95
-        # levels; for any other count the user has to drop the table in by
-        # hand. Keep the error chatty so the failure mode is obvious.
+        # levels (``layers``); any other table is the user's own, named by
+        # ``grid.level_table``. Keep the error chatty so the failure mode is
+        # obvious.
         from jcm.physics.echam.echam_levels import get_echam_levels
-        try:
-            vert = get_echam_levels(layers)
-        except ValueError as exc:
-            raise ValueError(
-                f"hybrid coords with {layers} levels are not pre-configured. "
-                "Use one of the supported counts (47, 95) or extend "
-                "jcm.physics.echam.echam_levels.get_echam_levels."
-            ) from exc
+        if user_levels is not None:
+            vert = user_levels
+        else:
+            try:
+                vert = get_echam_levels(layers)
+            except ValueError as exc:
+                raise ValueError(
+                    f"hybrid coords with {layers} levels are not "
+                    "pre-configured. Use one of the supported counts "
+                    "(47, 95) or name your own half-level table with "
+                    "grid.level_table ({a: [...], b: [...]} or a netCDF "
+                    "file with vct_a/vct_b)."
+                ) from exc
         return get_coords(
             vertical_coords=vert,
             spectral_truncation=truncation,
@@ -713,7 +749,10 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
     is what the L95 middle-atmosphere grids exist to exploit. Any other
     grid — SPEEDY T31L8, Held-Suarez, a hybrid grid at an untabulated level
     count — gets the uniform SPEEDY del² profile, with a warning in the
-    hybrid case since that is unlikely to be what was intended (#579).
+    hybrid case since that is unlikely to be what was intended (#579). A
+    hybrid grid that names its own table (``grid.level_table``) is the
+    exception: it gets the ECHAM profile mapped onto its levels by reference
+    pressure, at any level count (:func:`jcm.diffusion.echam_lmidatm_orders`).
 
     Set ``cfg.diffusion.kind: default`` to force the uniform SPEEDY profile
     (24h temp / 12h vor_q / 2h div), ``echam_lmidatm`` to force the ECHAM
@@ -727,16 +766,20 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
     scale = 1.0 if diffusion is None else float(diffusion.get("scale", 1.0))
 
     grid_cfg = cfg.get("grid", None)
-    layers = int(grid_cfg.get("layers", 0)) if grid_cfg is not None else 0
+    # A user level table (``grid.level_table``) fixes the layer count and gets
+    # ECHAM's order profile mapped onto its levels by pressure.
+    levels = _grid_level_table(grid_cfg) if grid_cfg is not None else None
+    layers = (levels.layers if levels is not None
+              else int(grid_cfg.get("layers", 0)) if grid_cfg is not None else 0)
     truncation = int(grid_cfg.get("spectral_truncation", 0)) if grid_cfg is not None else 0
     vertical = str(grid_cfg.get("vertical", "")) if grid_cfg is not None else ""
 
     if kind == "auto":
-        base = DiffusionFilter.auto(truncation, layers, vertical)
+        base = DiffusionFilter.auto(truncation, layers, vertical, levels)
     elif kind == "default":
         base = DiffusionFilter.default()
     elif kind == "echam_lmidatm":
-        base = DiffusionFilter.echam_lmidatm(truncation, layers)
+        base = DiffusionFilter.echam_lmidatm(truncation, layers, levels)
     elif kind == "echam_t63_l47":
         base = DiffusionFilter.echam_t63_l47()
     elif kind == "echam_t85_l47":
