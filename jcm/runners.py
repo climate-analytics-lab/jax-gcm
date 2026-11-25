@@ -1303,6 +1303,12 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     lid sits outside the shipped radiation schemes' validity and both
     refrigerates and accelerates unbounded without it.
     """
+    if (cfg.get("grid", None) or {}).get("level_table", None) is not None:
+        raise ValueError(
+            "grid.level_table is not supported on the pySES backend: its "
+            "vertical grid is the dycore's own (dycore.nlev, the built-in "
+            "ECHAM table) and its forcing maps level-resolved inputs onto "
+            "that table.")
     import jax.numpy as jnp
 
     from jcm.dycore.pyses import PysesCamSEDycore

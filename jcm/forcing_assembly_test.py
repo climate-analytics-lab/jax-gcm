@@ -406,6 +406,104 @@ class TestUserHybridTableGuard(unittest.TestCase):
         coords = get_coords(hybrid_levels_from_table(a, b), spectral_truncation=21)
         fa.reject_user_hybrid_for_mirror_data(coords, "forcing.ozone_file=auto")
 
+    # -- the data-level check: every route ends at the attach function -------
+
+    _PACKAGED_OZONE = "pkg://data/bc/t63/ozone.nc"      # 47 levels, T63
+
+    def _ozone_cfg(self, path):
+        return OmegaConf.create({"ozone_file": path, "ozone_align": "wrap_year"})
+
+    def test_explicit_path_to_builtin_ozone_is_refused_on_a_user_table(self):
+        # What the ``ma-*`` presets do: name the built-in bundle explicitly.
+        with self.assertRaisesRegex(ValueError, "not the model"):
+            fa._attach_ozone(None, self._ozone_cfg(self._PACKAGED_OZONE),
+                             self._coords(47))
+
+    def test_builtin_table_still_loads_the_explicit_ozone_bundle(self):
+        forcing = fa._attach_ozone(None, self._ozone_cfg(self._PACKAGED_OZONE),
+                                   self._coords(47, perturb=False))
+        self.assertTrue(bool(forcing.ozone_climatology.is_loaded()))
+
+    def test_ozone_on_the_users_own_levels_loads(self):
+        # A file that carries the user table's own coefficients passes.
+        import tempfile
+        from pathlib import Path
+        coords = self._coords(47)
+        with xr.open_dataset(fa._resolve_data_path(self._PACKAGED_OZONE),
+                             decode_times=False) as src:
+            ds = src.load()
+        ds["level_a_pa"].values[:] = np.asarray(coords.vertical.a_centers)
+        ds["level_b"].values[:] = np.asarray(coords.vertical.b_centers)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mine.nc"
+            ds.to_netcdf(path)
+            forcing = fa._attach_ozone(None, self._ozone_cfg(str(path)), coords)
+        self.assertTrue(bool(forcing.ozone_climatology.is_loaded()))
+
+    def test_bundle_without_a_vertical_coordinate_falls_back_to_the_path(self):
+        import tempfile
+        from pathlib import Path
+        manifest = fa.mm.load_manifest()
+        with xr.open_dataset(fa._resolve_data_path(self._PACKAGED_OZONE),
+                             decode_times=False) as src:
+            bare = src.drop_vars(["level_pressure_pa", "level_a_pa",
+                                  "level_b"]).load()
+        user = self._coords(47)
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = (Path(tmp) / ("datasets--" + manifest["repo"].replace("/", "--"))
+                     / "snapshots" / "rev" / "bundles" / "t63_l47")
+            cache.mkdir(parents=True)
+            mirrored = cache / "ozone_pd.nc"
+            bare.to_netcdf(mirrored)
+            local = Path(tmp) / "mine.nc"
+            bare.to_netcdf(local)
+            # the mirror's copy on a user table: refused, saying why
+            with self.assertRaisesRegex(ValueError, "no vertical coordinate"):
+                fa._attach_ozone(None, self._ozone_cfg(str(mirrored)), user)
+            # the same bytes as the user's own file: their statement, accepted
+            forcing = fa._attach_ozone(None, self._ozone_cfg(str(local)), user)
+            self.assertTrue(bool(forcing.ozone_climatology.is_loaded()))
+            # and on the built-in table the mirror copy loads as before
+            forcing = fa._attach_ozone(None, self._ozone_cfg(str(mirrored)),
+                                       self._coords(47, perturb=False))
+            self.assertTrue(bool(forcing.ozone_climatology.is_loaded()))
+
+    def test_explicit_oxidant_bundle_is_checked_on_a_user_table(self):
+        import tempfile
+        from pathlib import Path
+        manifest = fa.mm.load_manifest()
+        coords = self._coords(47, truncation=21)
+        lat, lon = fa._model_latlon_deg(coords)
+        shape = (12, 47, lat.size, lon.size)
+        ds = xr.Dataset(
+            {name: (("time", "mlev", "lat", "lon"), np.ones(shape, np.float32))
+             for name in ("OH_VMR_avrg", "NO3_VMR_avrg", "O3_VMR_avrg",
+                          "H2O2_VMR_avrg")},
+            coords={"time": np.arange(1, 13), "lat": lat, "lon": lon})
+        builtin = self._coords(47, truncation=21, perturb=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = (Path(tmp) / ("datasets--" + manifest["repo"].replace("/", "--"))
+                     / "snapshots" / "rev" / "bundles" / "t21_l47")
+            cache.mkdir(parents=True)
+            path = cache / "oxidants_pd.nc"
+            ds.to_netcdf(path)
+            cfg = OmegaConf.create({"oxidants_file": str(path)})
+            with self.assertRaisesRegex(ValueError, "no vertical coordinate"):
+                fa._attach_oxidants(None, cfg, coords)
+            self.assertIsNotNone(
+                fa._attach_oxidants(None, cfg, builtin).oxidant_vmr)
+            # with hyam/hybm present they are compared with the model's
+            a_b = np.asarray(builtin.vertical.a_centers, np.float64)
+            b_b = np.asarray(builtin.vertical.b_centers, np.float64)
+            ds2 = ds.assign(hyam=("mlev", a_b), hybm=("mlev", b_b))
+            path2 = cache / "oxidants_pi.nc"
+            ds2.to_netcdf(path2)
+            cfg2 = OmegaConf.create({"oxidants_file": str(path2)})
+            self.assertIsNotNone(
+                fa._attach_oxidants(None, cfg2, builtin).oxidant_vmr)
+            with self.assertRaisesRegex(ValueError, "hyam/hybm"):
+                fa._attach_oxidants(None, cfg2, coords)
+
     def test_from_bundles_refuses_a_user_table(self):
         with self.assertRaisesRegex(ValueError, "from_bundles"):
             ForcingData.from_bundles(self._coords(47), aerosol=None)

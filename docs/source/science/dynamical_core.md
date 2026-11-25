@@ -184,11 +184,20 @@ The level-resolved boundary data (ozone, oxidants) are published per
 for level, with no vertical interpolation (the ozone loader checks the level
 count and horizontal grid, the oxidant reader the count and, when the file
 carries them, ``hyam``/``hybm``). A user table that happens to have 47 or 95
-levels therefore must not receive those bundles: ``auto`` ozone and oxidants
-(and ``ForcingData.from_bundles``) raise for it, naming the remedy — supply a
-file on the table's own levels (``jcm.data.bc.interpolate_ozone.
-vertical_interp_log_p`` maps any pressure-level field onto given pressures) or
-opt out (``forcing.ozone_file=analytic``, ``forcing.oxidants_file=null``).
+levels therefore must not receive those bundles. Every route (``auto``, an
+explicit ``hf://bundles/...`` path as the ``ma-*`` configurations set, a
+packaged or local file, ``ForcingData.from_bundles``) ends at one attach
+function per input, which checks the data: a file that carries its vertical
+coordinate (ozone: the mid-level ``level_a_pa``/``level_b`` written by
+``interpolate_ozone``; oxidants: ``hyam``/``hybm``) is compared with the
+model's and a mismatch raises, for built-in and user tables alike; a file with
+none is refused on a user table when it is a published bundle, and accepted when
+it is a local file, whose naming is the user's statement that it is on their
+levels. The ``auto`` routes and ``from_bundles`` fail earlier, before any fetch.
+The remedy is a file on the table's own levels
+(``jcm.data.bc.interpolate_ozone.vertical_interp_log_p`` maps any pressure-level
+field onto given pressures) or an opt-out (``forcing.ozone_file=analytic``,
+``forcing.oxidants_file=null``). The pySES backend rejects ``grid.level_table``.
 
 **What ECHAM/CAM does.** ECHAM6 (Stevens et al. 2013, *JAMES*) is a spectral-
 transform core with leapfrog + semi-implicit correction and spectral (∇²ⁿ)

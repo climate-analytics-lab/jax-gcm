@@ -2976,6 +2976,35 @@ class TestUserLevelTableGrid(unittest.TestCase):
         base["grid"]["level_table"] = self._l95_subset_table()
         self.assertEqual(bench._auto_ozone_files(OmegaConf.create(base)), [])
 
+    def test_prefetch_keeps_level_free_bundles_when_layers_is_null(self):
+        # ``layers: null`` is the table's own count; only the level-RESOLVED
+        # bundles are suppressed, an offline node still needs the others.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_bench2", Path(__file__).parent.parent / "tools" / "benchmark.py")
+        bench = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bench)
+        from omegaconf import OmegaConf
+        base = {"physics": {"aerosol_module": "jam"},
+                "grid": {"spectral_truncation": 63, "layers": 47,
+                         "vertical": "hybrid"}}
+        plain = bench._auto_emission_files(OmegaConf.create(base))
+        self.assertTrue(any("oxidants" in f for f in plain))
+        base["grid"]["layers"] = None
+        base["grid"]["level_table"] = self._l95_subset_table()
+        table = bench._auto_emission_files(OmegaConf.create(base))
+        self.assertFalse(any("oxidants" in f for f in table))
+        self.assertTrue(any("emissions" in f for f in table))
+        self.assertEqual(set(table), {f for f in plain if "oxidants" not in f})
+
+    def test_pyses_backend_rejects_a_level_table(self):
+        cfg = _compose(["dycore=pyses_ne30l47"])
+        from omegaconf import open_dict
+        with open_dict(cfg.grid):
+            cfg.grid.level_table = self._l95_subset_table()
+        with self.assertRaisesRegex(ValueError, "pySES"):
+            build_model(cfg)
+
 
 class TestRunDispatchErrorPaths(unittest.TestCase):
     def test_run_unknown_mode_raises(self):

@@ -278,7 +278,13 @@ def _auto_emission_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
         return out
     grid = cfg.get("grid") or {}
     trunc, nlev = grid.get("spectral_truncation"), grid.get("layers")
-    if trunc is None or nlev is None:
+    # A user level table (grid.level_table) is not the built-in table the
+    # level-resolved bundles are on, so those match no published vertical; the
+    # level-free bundles (emissions, dms, dust) still resolve, and a table may
+    # leave ``layers`` null (the count is the table's), so a missing count only
+    # ends the walk for a built-in grid.
+    user_table = grid.get("level_table") is not None
+    if trunc is None or (nlev is None and not user_table):
         return out
     # grid_token: ``t{truncation}`` — the same relation utils.get_coords uses.
     token = f"t{int(trunc)}"
@@ -286,14 +292,10 @@ def _auto_emission_files(cfg, jcm_root: pathlib.Path = REPO) -> list[str]:
     # is_published also rejects a sigma grid that merely shares a published
     # (token, nlev); the shared manifest keeps this enumerator and the runner's
     # ``auto`` resolver from disagreeing on which keys to fetch (F2).
-    # A user level table (grid.level_table) is not the built-in table the
-    # bundles are on, so it matches no published vertical: nothing to prefetch.
-    vertical = ("user-table" if grid.get("level_table") is not None
-                else str(grid.get("vertical", "hybrid")))
+    vertical = "user-table" if user_table else str(grid.get("vertical", "hybrid"))
     for product in gridded:
-        if mm.is_published(manifest, product, token, int(nlev), vertical):
-            out.append(
-                "hf://" + mm.bundle_path(manifest, product, token, int(nlev)))
+        if mm.is_published(manifest, product, token, nlev, vertical):
+            out.append("hf://" + mm.bundle_path(manifest, product, token, nlev))
     return out
 
 
