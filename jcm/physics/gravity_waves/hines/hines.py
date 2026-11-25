@@ -254,13 +254,30 @@ def _rms_total_and_per_azimuth_8(squared_amplitude: jnp.ndarray
     s = squared_amplitude
     sum_odd = (s[0] + s[2] + s[4] + s[6]) * 0.5
     sum_even = (s[1] + s[3] + s[5] + s[7]) * 0.5
-    sa1 = jnp.sqrt(s[0] + s[4] + sum_even)
-    sa2 = jnp.sqrt(s[1] + s[5] + sum_odd)
-    sa3 = jnp.sqrt(s[2] + s[6] + sum_even)
-    sa4 = jnp.sqrt(s[3] + s[7] + sum_odd)
+    sa1 = _sqrt_dead_spectrum(s[0] + s[4] + sum_even)
+    sa2 = _sqrt_dead_spectrum(s[1] + s[5] + sum_odd)
+    sa3 = _sqrt_dead_spectrum(s[2] + s[6] + sum_even)
+    sa4 = _sqrt_dead_spectrum(s[3] + s[7] + sum_odd)
     sigma_alpha = jnp.stack([sa1, sa2, sa3, sa4, sa1, sa2, sa3, sa4])
-    sigma_t = jnp.sqrt(jnp.sum(s))
+    sigma_t = _sqrt_dead_spectrum(jnp.sum(s))
     return sigma_t, sigma_alpha
+
+
+def _sqrt_dead_spectrum(x: jnp.ndarray) -> jnp.ndarray:
+    """``sqrt(x)`` of a squared amplitude, with a zero derivative where ``x == 0``.
+
+    The squared amplitudes are non-negative by construction, and they are
+    exactly 0 only where the spectrum has died: there ``_hines_integral_slope1``
+    holds the integral at 0 (its ``maximum(., 0)``, and its zero where
+    ``cutoff_wavenumber <= min_wavenumber``), so the derivative of ``x``
+    itself is 0. A plain ``sqrt`` multiplies that 0 by its infinite slope at
+    0, which makes the reverse-mode cotangent NaN. Forming the root on a safe
+    operand at exactly 0 (the double-where) gives the dead level the
+    plateau's zero derivative and leaves every value, NaN included, that of
+    ``sqrt``.
+    """
+    dead = x == 0.0
+    return jnp.where(dead, 0.0, jnp.sqrt(jnp.where(dead, 1.0, x)))
 
 
 # ---------------------------------------------------------------------------
@@ -301,11 +318,27 @@ def _hines_integral_slope1(
     q_alpha = azimuth_wind * inv_bvfb
     qm = q_alpha * cutoff_wavenumber
     qmm = q_alpha * min_wavenumber
+    use_taylor = (jnp.abs(qm) < qm_min) | (jnp.abs(q_alpha) < q_min)
+    zeroed = cutoff_wavenumber <= min_wavenumber
 
     # Analytic branch (slope=1): -(log(1-qm) - (1-qm) - log(1-qmm) + (1-qmm)) / q^2
+    #
+    # On the branch's own lanes 1 - qm > 0. The cutoff there is above
+    # ``min_wavenumber``, so it is this level's trial N_b / D or, where that
+    # is not smaller, the running minimum. D = f_amp sigma_alpha + n_over_m + U
+    # with n_over_m >= N / m_mol > 0, so for U > 0, q N_b / D = U / D < 1 and
+    # the running minimum is no larger than the trial; for U <= 0, qm <= 0.
+    # On a zeroed lane the cutoff is floored at ``min_wavenumber`` instead,
+    # and a projected wind above N_b / min_wavenumber puts 1 - qm <= 0, where
+    # the log's floor (1e-300, which is 0 in float32) gives log(0). The logs
+    # are therefore formed on the stand-in qm = qmm = 0.5 off the branch's
+    # lanes (the double-where): a ``where`` discards the unselected value but
+    # not its derivative, and a zero cotangent times log's infinite slope at
+    # 0 is NaN.
     inv_q2 = 1.0 / (q_alpha * q_alpha + 1e-300)
-    one_m_qm = 1.0 - qm
-    one_m_qmm = 1.0 - qmm
+    analytic_lane = ~(use_taylor | zeroed)
+    one_m_qm = 1.0 - jnp.where(analytic_lane, qm, 0.5)
+    one_m_qmm = 1.0 - jnp.where(analytic_lane, qmm, 0.5)
     analytic = -(jnp.log(jnp.maximum(one_m_qm, 1e-300))
                  - one_m_qm
                  - jnp.log(jnp.maximum(one_m_qmm, 1e-300))
@@ -321,12 +354,48 @@ def _hines_integral_slope1(
         (poly_qm - poly_qmm) * inv_q2,
     )
 
-    use_taylor = (jnp.abs(qm) < qm_min) | (jnp.abs(q_alpha) < q_min)
     integral = jnp.where(use_taylor, taylor, analytic)
 
     integral = jnp.maximum(integral, 0.0)
-    integral = jnp.where(cutoff_wavenumber <= min_wavenumber, 0.0, integral)
+    integral = jnp.where(zeroed, 0.0, integral)
     return integral
+
+
+# ---------------------------------------------------------------------------
+# Helper: trial cutoff wavenumber of the upward sweep
+# ---------------------------------------------------------------------------
+
+def _trial_cutoff_wavenumber(
+    bv_freq_launch: jnp.ndarray,
+    denominator: jnp.ndarray,
+    running_min: jnp.ndarray,
+) -> jnp.ndarray:
+    r"""Trial cutoff :math:`m = N_b / D`, kept only where ``0 < m < running_min``.
+
+    :math:`D = f_1 \sigma_\alpha + N/m_\text{sub} + U_\alpha` is the
+    per-azimuth denominator of the level-by-level cutoff (Hines 1997). Where
+    the quotient is not positive (the projected wind :math:`U_\alpha`
+    outweighs the other terms) or not below the running minimum, the cutoff is
+    the running minimum: the reference's quotient, then
+    ``where(m <= 0, running_min, m)``, then ``minimum(m, running_min)``.
+
+    The quotient is formed for the selection on a denominator replaced by 1
+    where it is exactly 0, and formed again for the value only where it is
+    kept (the double-where). Near :math:`D = 0` the projected wind cancels the
+    other terms, the quotient's derivative is unbounded, and the discarding
+    ``where``/``minimum`` would turn it into a NaN reverse-mode cotangent;
+    where the quotient is kept, :math:`|D| > N_b / \mathrm{running\_min}`
+    bounds it. The selection is written as the negation of the reference's
+    two discarding tests, so a NaN quotient is kept and propagates as it does
+    there. The value equals the reference's for every input except
+    :math:`N_b = D = 0`, where the reference's quotient is NaN; that point
+    does not occur, because ``_brunt_vaisala`` bounds :math:`N^2` away from 0.
+    """
+    nonzero = denominator != 0.0
+    trial = bv_freq_launch / jnp.where(nonzero, denominator, 1.0)
+    keep = nonzero & ~(trial <= 0.0) & ~(trial >= running_min)
+    return jnp.where(
+        keep, bv_freq_launch / jnp.where(keep, denominator, 1.0), running_min)
 
 
 # ---------------------------------------------------------------------------
@@ -517,10 +586,10 @@ def _hines_extro_column(
         )
 
         # Trial cutoff wavenumber at this level:
-        m_trial = bv_freq_launch / (
-            f_amp * sigma_alpha[below] + n_over_m + azimuth_wind[level])
-        m_trial = jnp.where(m_trial <= 0.0, m_alpha_min_running, m_trial)
-        m_trial = jnp.minimum(m_trial, m_alpha_min_running)
+        m_trial = _trial_cutoff_wavenumber(
+            bv_freq_launch,
+            f_amp * sigma_alpha[below] + n_over_m + azimuth_wind[level],
+            m_alpha_min_running)
         m_trial = jnp.maximum(m_trial, m_min)
         m_alpha_l = jnp.where(do_alpha, m_trial, m_min)
         m_alpha_min_running_new = jnp.minimum(m_alpha_min_running, m_alpha_l)
