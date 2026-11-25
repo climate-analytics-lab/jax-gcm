@@ -408,6 +408,43 @@ class SavedOmegaMatchesSavedStateTest(unittest.TestCase):
     def _rel(a, b):
         return float(np.abs(a - b).max() / np.abs(b).max())
 
+    def test_non_dict_physics_payload_is_averaged_untouched(self):
+        """A raw ``Physics`` whose diagnostics are not a ``dict`` still averages.
+
+        The re-alignment is for ``dict`` payloads that publish omega. Any
+        other pytree a raw ``Physics`` returns (here a ``FrozenDict``, with
+        the omega provider on) goes through the accumulator as it is.
+        """
+        from flax.core import FrozenDict
+
+        from jcm.physics_interface import Physics, PhysicsTendency
+
+        class _CountingPhysics(Physics):
+            def initial_carry_state(self, coords):
+                return FrozenDict({"counter": jnp.zeros(())})
+
+            def get_empty_data(self, coords):
+                return FrozenDict({"counter": jnp.zeros(())})
+
+            def compute_tendencies(self, state, forcing, terrain,
+                                   prev_physics_data=None):
+                prev = (prev_physics_data if prev_physics_data is not None
+                        else self.initial_carry_state(None))
+                return (PhysicsTendency.zeros(state.temperature.shape),
+                        FrozenDict({"counter": prev["counter"] + 1.0}))
+
+        coords = _coords()
+        dycore = DinosaurDycore(coords=coords,
+                                terrain=TerrainData.aquaplanet(coords),
+                                dt_seconds=1800.0, compute_omega=True)
+        model = Model(dycore=dycore, physics=_CountingPhysics())
+        preds = model.run(save_interval=2 * self.DT_DAYS,
+                          total_time=4 * self.DT_DAYS, output_averages=True)
+        self.assertIsInstance(preds.physics, FrozenDict)
+        # Two-step means of a counter that reads 1, 2 then 3, 4.
+        np.testing.assert_allclose(np.asarray(preds.physics["counter"]),
+                                   [1.5, 3.5])
+
     def test_snapshot_omega_is_diagnosed_from_the_saved_state(self):
         model, dycore = self._model()
         preds, omega_t3 = self._run(model, dycore, 3)

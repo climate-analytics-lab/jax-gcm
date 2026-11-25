@@ -465,16 +465,25 @@ def _op_split_trajectory(
                 # states the dynamics average uses (see the argument's
                 # docstring): sum_{k=1..N} f(x_k) = sum_{k=0..N-1} f(x_k)
                 # + f(x_N) - f(x_0).
+                #
+                # Only a ``dict`` payload that publishes one of them is
+                # touched. A raw ``Physics`` may return any pytree (``None``,
+                # an array, another ``Mapping`` type), which the accumulator
+                # carries as it is and which has no such entry to re-align.
                 f_end = saved_state_fields_fn(x_next)
-                f_start = saved_state_fields_fn(x)
-                diag_sum = {
-                    **diag_sum,
-                    **{name: diag_sum[name]
-                       + ((f_end[name] - f_start[name]) / inner_steps
-                          ).reshape(diag_sum[name].shape
-                                    ).astype(diag_sum[name].dtype)
-                       for name in f_end if name in diag_sum},
-                }
+                realigned = (
+                    [name for name in f_end if name in diag_sum]
+                    if isinstance(diag_sum, dict) else [])
+                if realigned:
+                    f_start = saved_state_fields_fn(x)
+                    diag_sum = {
+                        **diag_sum,
+                        **{name: diag_sum[name]
+                           + ((f_end[name] - f_start[name]) / inner_steps
+                              ).reshape(diag_sum[name].shape
+                                        ).astype(diag_sum[name].dtype)
+                           for name in realigned},
+                    }
             preds = post_process_fn(x_next, ps_next).replace(
                 dynamics=averaged_dynamics,
                 physics=diag_sum,
