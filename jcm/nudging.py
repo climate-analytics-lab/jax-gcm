@@ -201,6 +201,68 @@ def window_target(target: NudgingTarget, start_seconds: int,
         cut, target, is_leaf=lambda x: isinstance(x, TimeSeries))
 
 
+def _epoch_seconds(when) -> int:
+    """Exact integer seconds since 1970-01-01 of ``when``.
+
+    ``when`` is an int/float count of epoch seconds, a ``jax_datetime``
+    ``Datetime`` (what ``Model.start_time`` is), or anything numpy reads as a
+    datetime (``datetime.datetime``, ``numpy.datetime64``, ``pandas.Timestamp``).
+    """
+    import numpy as np
+    if isinstance(when, (int, float, np.integer, np.floating)):
+        return int(when)
+    if hasattr(when, "delta"):
+        return int(_host_epoch_seconds(when))
+    return int(np.datetime64(when, "s").astype(np.int64))
+
+
+def window_forcing(forcing, start, span_seconds: float, *, n_samples=None):
+    """Return ``forcing`` with its nudging target cut to one segment's window.
+
+    A host that steps the model itself (``Model.run`` then repeated
+    ``Model.resume``) keeps the whole nudging target in host memory and calls
+    this before each call, so only the samples that segment can look up are on
+    the device. :func:`jcm.runners.run_chunked` windows each chunk through this
+    same function, so a segmented run and a chunked run see identical samples.
+
+    The window is :func:`samples_per_span` samples long (the segment, plus the
+    sample at or before its start and one past its end for an interpolating
+    leaf) and starts at the last sample at or before ``start``
+    (:func:`window_target`). Its length depends only on ``span_seconds`` and
+    the target's spacing, never on ``start``, so every segment of one length
+    has one shape and the compiled program is reused. A window that would run
+    past the end of the series is clamped to end there, and a ``persist="hold"``
+    leaf then holds its last sample as the whole series would.
+
+    Args:
+        forcing: a :class:`~jcm.forcing.ForcingData`.
+        start: the segment's start: epoch seconds, a ``jax_datetime``
+            ``Datetime`` (e.g. ``model.start_time``), or a
+            ``datetime``/``numpy.datetime64``.
+        span_seconds: the longest segment this call will integrate, in
+            seconds. A host that integrates a fixed segment passes that length
+            every time.
+        n_samples: override the window length (default
+            :func:`samples_per_span` of ``span_seconds``).
+
+    Returns:
+        ``forcing`` with the windowed target moved to the device; ``forcing``
+        itself when it has no target or the target has no dated leaf.
+
+    """
+    import jax
+    import jax.numpy as jnp
+    target = getattr(forcing, "nudging_target", None)
+    if target is None:
+        return forcing
+    n = samples_per_span(target, span_seconds) if n_samples is None else n_samples
+    if n is None:
+        return forcing
+    windowed = window_target(target, _epoch_seconds(start), n)
+    return forcing.copy(nudging_target=jax.tree_util.tree_map(
+        jnp.asarray, windowed))
+
+
 # ---------------------------------------------------------------------------
 # What to nudge, with what timescale
 # ---------------------------------------------------------------------------

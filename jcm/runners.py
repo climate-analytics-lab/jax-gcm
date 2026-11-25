@@ -1066,16 +1066,20 @@ def _resolve_start_time(cfg: DictConfig):
 _LOG_LEVEL_NAMES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
-def _apply_log_level(cfg: DictConfig) -> None:
+def apply_log_level(cfg: DictConfig) -> None:
     """Set the ``jcm`` logger level from ``cfg.run.log_level``.
 
     The level goes on the ``jcm`` logger rather than the root one, so the
     CLI's verbosity knob covers jcm's own output without deciding a level for
     anything else in the host process. ``jcm`` the *library* sets no level at
     all — this function and Hydra's own ``job_logging`` are the only logging
-    configuration jcm performs, and both belong to the CLI. Called only from
-    :func:`run`, never from the model builders: those are reachable from
-    :func:`jcm.configurations.load`, a library door.
+    configuration jcm performs, and both belong to the process's entry point.
+    :func:`run` calls it; the model builders never do, because they are
+    reachable from the library doors (:func:`jcm.configurations.load`,
+    :func:`jcm.configurations.from_config`), where resetting the host's
+    ``jcm`` level would be the library configuring logging. A host that wants
+    the config's level calls this itself, or passes
+    ``from_config(..., apply_log_level=True)``.
 
     A numeric level is taken as-is, spelled as an int or a string: a config
     writer reasonably tries ``run.log_level=50``, and an interpolation such
@@ -1109,6 +1113,11 @@ def _apply_log_level(cfg: DictConfig) -> None:
                     f"expected one of {', '.join(_LOG_LEVEL_NAMES)} or an "
                     "int.") from None
     logging.getLogger("jcm").setLevel(level)
+
+
+#: Pre-publication name of :func:`apply_log_level`, kept for downstream code
+#: that already calls it.
+_apply_log_level = apply_log_level
 
 
 def resolve_effective_time_step_seconds(
@@ -1762,7 +1771,7 @@ def run(cfg: DictConfig, model: Model | None = None):
     # whereas ``build_model`` is reachable from the documented Python door
     # ``jcm.configurations.load``, where resetting the caller's ``jcm`` level
     # would be the library configuring logging all over again.
-    _apply_log_level(cfg)
+    apply_log_level(cfg)
 
     # Best-effort raise of the CPU device count, looked up from
     # ``grid.host_device_count`` with a top-level ``host_device_count``
@@ -2164,17 +2173,56 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
             )
 
 
-def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
-    if model is None:
-        model = build_model(cfg)
+def build_run_forcing(cfg: DictConfig, model: Model):
+    """Build the run's :class:`~jcm.forcing.ForcingData` and run its guards.
 
-    forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
+    The one sequence every full-mode door shares (:func:`_run_full` and
+    :func:`jcm.configurations.from_config`): the boundary forcing, the ERA5
+    nudging target when ``nudging.enabled`` (host-resident, numpy leaves; see
+    :func:`_maybe_attach_nudging_target`), then the emulator-GHG guard, the
+    run-window coverage check and the config-trap warnings.
+    """
+    dycore = getattr(model, "dycore", None)
+    forcing = build_forcing(cfg, model.coords, dycore=dycore)
     forcing = _maybe_attach_nudging_target(forcing, cfg, model)
     guard_emulator_ghg_forcing(model.physics, forcing)
     validate_run_forcing(model.physics, forcing,
                          run_window=configured_run_window(cfg, model))
     warn_on_config_traps(cfg, model.physics, forcing, coords=model.coords,
-                         dycore=getattr(model, "dycore", None))
+                         dycore=dycore)
+    return forcing
+
+
+def initial_state_kwargs(cfg: DictConfig, model: Model) -> dict:
+    """``Model.run`` keyword arguments that apply ``cfg.init``.
+
+    ``{}`` for ``isothermal`` (the model's own default start); otherwise
+    ``initial_state`` and, for a ``from_state`` warm start, the donor's
+    ``initial_physics_state`` too. Shared by :func:`_run_full` and
+    :func:`jcm.configurations.from_config` so both doors start from the same
+    state.
+    """
+    init = cfg.get("init", {})
+    kind = init.get("kind", "isothermal")
+    if kind == "isothermal":
+        return {}
+    if kind == "jw":
+        return {"initial_state": jw_state(model, rh=float(init.get("rh", 0.6)))}
+    if kind == "balanced_isothermal":
+        return {"initial_state": balanced_isothermal_state(model)}
+    if kind == "from_state":
+        state, carry = _state_from_file(model, cfg)
+        return {"initial_state": state, "initial_physics_state": carry}
+    if kind == "era5":
+        return {"initial_state": _state_from_era5(model, cfg)}
+    raise ValueError(f"Unknown init.kind={kind!r}")
+
+
+def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
+    if model is None:
+        model = build_model(cfg)
+
+    forcing = build_run_forcing(cfg, model)
     # After model + forcing construction: config-selected libraries are
     # imported and the ozone source is decided, so the summary is accurate.
     logger.info("provenance: %s", provenance.summary())
@@ -2206,36 +2254,10 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
 
     progress_bar = bool(cfg.run.get("progress_bar", False))
     output_selection = _output_selection_from_cfg(cfg)
-    if cfg.init.kind == "isothermal":
-        return model.run(
-            forcing=forcing,
-            save_interval=cfg.run.save_interval,
-            total_time=total_time,
-            end_time=end_time,
-            output_averages=cfg.run.output_averages,
-            snapshot_interval=cfg.run.get("snapshot_interval"),
-            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
-            output_keep=output_selection.keep,
-            output_drop=output_selection.drop,
-            progress=progress_bar,
-        )
     # A warm start (from_state) carries the donor's physics carry through to
-    # ``run``; every other init builds a fresh carry (initial_physics_state
-    # stays None).
-    initial_physics_state = None
-    if cfg.init.kind == "jw":
-        initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
-    elif cfg.init.kind == "balanced_isothermal":
-        initial_state = balanced_isothermal_state(model)
-    elif cfg.init.kind == "from_state":
-        initial_state, initial_physics_state = _state_from_file(model, cfg)
-    elif cfg.init.kind == "era5":
-        initial_state = _state_from_era5(model, cfg)
-    else:
-        raise ValueError(f"Unknown init.kind={cfg.init.kind!r}")
+    # ``run``; every other init builds a fresh carry.
     return model.run(
-        initial_state=initial_state,
-        initial_physics_state=initial_physics_state,
+        **initial_state_kwargs(cfg, model),
         forcing=forcing,
         save_interval=cfg.run.save_interval,
         total_time=total_time,
@@ -2927,7 +2949,7 @@ def run_chunked(
 
     from jcm.date import parse_duration_seconds
     from jcm.forcing import _host_epoch_seconds
-    from jcm.nudging import samples_per_span, window_target
+    from jcm.nudging import window_forcing
 
     # All scheduling is in exact integer seconds of the model clock; days are
     # derived only for file names and reports. The save interval is handed to
@@ -3292,14 +3314,10 @@ def run_chunked(
                 # Only the nudging samples that bracket this chunk go to the
                 # device; one window length for every chunk keeps the
                 # compiled program shared.
-                chunk_forcing = forcing
-                nudge = getattr(forcing, "nudging_target", None)
-                n_nudge = (None if nudge is None else samples_per_span(
-                    nudge, max(chunk_seconds, cur_chunk_seconds)))
-                if n_nudge is not None:
-                    start_s = int(_host_epoch_seconds(model.start_time))
-                    chunk_forcing = forcing.copy(nudging_target=window_target(
-                        nudge, start_s + elapsed_seconds, n_nudge))
+                chunk_forcing = window_forcing(
+                    forcing,
+                    int(_host_epoch_seconds(model.start_time)) + elapsed_seconds,
+                    max(chunk_seconds, cur_chunk_seconds))
 
                 t0 = time.perf_counter()
                 first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt

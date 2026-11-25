@@ -7732,6 +7732,44 @@ class TestNetcdfWriteRetry(unittest.TestCase):
 
 
 
+def _nudged_synthetic_setup(tmpdir, *, total_time, chunk_days,
+                            save_interval=1):
+    """Build a tiny Held-Suarez model, its forcing and a synthetic 6-hourly target.
+
+    Returns ``(cfg, model, forcing, times)``; the target is host-resident
+    (numpy leaves), as :func:`jcm.runners.build_run_forcing` hands it back.
+    """
+    import jax_datetime as jdt
+
+    from jcm.forcing import BY_DATE_INTERP, make_time_series
+    from jcm.nudging import NudgingTarget
+    from jcm.runners import _ensure_parent_forcing, build_forcing, build_model
+
+    cfg = _compose([
+        "physics=held_suarez", "grid=held_suarez_t31_l8",
+        "run.time_step=180", f"run.total_time={total_time}",
+        f"run.save_interval={save_interval}",
+        f"run.chunk_days={chunk_days}", "run.start_time=2010-01-01",
+        f"run.output_prefix={tmpdir}/chunk", "nudging.enabled=true"])
+    model = build_model(cfg)
+    shape = (model.coords.vertical.layers,
+             *model.coords.horizontal.nodal_shape)
+    times = jdt.to_datetime(np.arange(
+        np.datetime64("2009-12-31T00"), np.datetime64("2010-01-05T00"),
+        np.timedelta64(6, "h")).astype("datetime64[s]"))
+    ramp = np.arange(times.size, dtype=np.float32)[:, None, None, None]
+
+    def ts(base, amp):
+        vals = (base + amp * np.sin(ramp / 3.0)) * np.ones(shape, np.float32)
+        return make_time_series(vals, times, align_mode=BY_DATE_INTERP)
+
+    target = jax.device_get(NudgingTarget(
+        u_wind=ts(5.0, 10.0), v_wind=ts(0.0, 4.0), temperature=ts(260.0, 5.0)))
+    forcing = _ensure_parent_forcing(build_forcing(cfg, model.coords),
+                                     model.coords).copy(nudging_target=target)
+    return cfg, model, forcing, times
+
+
 class TestChunkedNudgingWindow(unittest.TestCase):
     """Each chunk is handed only its window of the nudging target, and that
     changes nothing a full-target chunk computes.
@@ -7741,36 +7779,13 @@ class TestChunkedNudgingWindow(unittest.TestCase):
         import contextlib
         import glob
 
-        import jax_datetime as jdt
         from unittest import mock
 
-        from jcm.forcing import BY_DATE_INTERP, make_time_series
         from jcm.model import Model
-        from jcm.nudging import NudgingTarget
-        from jcm.runners import (
-            _ensure_parent_forcing, build_forcing, build_model, run_chunked)
+        from jcm.runners import run_chunked
 
-        cfg = _compose([
-            "physics=held_suarez", "grid=held_suarez_t31_l8",
-            "run.time_step=180", "run.total_time=3", "run.save_interval=1",
-            "run.chunk_days=2", "run.start_time=2010-01-01",
-            f"run.output_prefix={tmpdir}/chunk", "nudging.enabled=true"])
-        model = build_model(cfg)
-        shape = (model.coords.vertical.layers,
-                 *model.coords.horizontal.nodal_shape)
-        times = jdt.to_datetime(np.arange(
-            np.datetime64("2009-12-31T00"), np.datetime64("2010-01-05T00"),
-            np.timedelta64(6, "h")).astype("datetime64[s]"))
-        ramp = np.arange(times.size, dtype=np.float32)[:, None, None, None]
-
-        def ts(base, amp):
-            vals = (base + amp * np.sin(ramp / 3.0)) * np.ones(shape, np.float32)
-            return make_time_series(vals, times, align_mode=BY_DATE_INTERP)
-
-        target = NudgingTarget(u_wind=ts(5.0, 10.0), v_wind=ts(0.0, 4.0),
-                               temperature=ts(260.0, 5.0))
-        forcing = _ensure_parent_forcing(build_forcing(cfg, model.coords),
-                                         model.coords).copy(nudging_target=target)
+        cfg, model, forcing, times = _nudged_synthetic_setup(
+            tmpdir, total_time=3, chunk_days=2)
         seen = []
 
         def spy(name):
@@ -7807,6 +7822,77 @@ class TestChunkedNudgingWindow(unittest.TestCase):
         self.assertEqual(len(win), 2)
         for w, f in zip(win, full):
             xr.testing.assert_equal(w, f)
+
+
+class TestSegmentedRunWindowing(unittest.TestCase):
+    """A host that steps ``Model.run`` / ``Model.resume`` itself and windows the
+    nudging target per call gets exactly what the whole target, and
+    ``run_chunked``, give for the same segments.
+    """
+
+    SEG_DAYS = 0.125    # 3 h: segment boundaries fall between 6-hourly samples
+    N_SEG = 3
+
+    def _segments(self, model, cfg, forcing_for):
+        outs = []
+        kw = dict(save_interval=self.SEG_DAYS, total_time=self.SEG_DAYS,
+                  output_averages=bool(cfg.run.output_averages))
+        for k in range(self.N_SEG):
+            fk = forcing_for(k)
+            preds = (model.run(forcing=fk, **kw) if k == 0
+                     else model.resume(forcing=fk, **kw))
+            outs.append(preds.to_xarray())
+        return outs
+
+    def test_windowed_segments_match_whole_target_and_run_chunked(self):
+        import glob
+        import tempfile
+
+        from jcm.nudging import window_forcing
+        from jcm.runners import run_chunked
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, model, forcing, _ = _nudged_synthetic_setup(
+                tmp, total_time=self.SEG_DAYS * self.N_SEG,
+                chunk_days=self.SEG_DAYS, save_interval=self.SEG_DAYS)
+            seg_s = int(self.SEG_DAYS * 86400)
+            t0 = np.datetime64("2010-01-01T00")
+            seen = []
+
+            def windowed(k):
+                f = window_forcing(
+                    forcing, t0 + np.timedelta64(k * seg_s, "s"), seg_s)
+                seen.append(f.nudging_target.u_wind.values.shape[0])
+                return f
+
+            win = self._segments(model, cfg, windowed)
+            whole = self._segments(model, cfg, lambda k: forcing)
+            run_chunked(cfg, chunk_days=self.SEG_DAYS,
+                        output_prefix=f"{tmp}/chunk", model=model,
+                        forcing=forcing)
+            chunks = [xr.load_dataset(f)
+                      for f in sorted(glob.glob(f"{tmp}/chunk_day*.nc"))]
+
+        # One window length for every segment (one compiled program), shorter
+        # than the whole target.
+        self.assertEqual(len(set(seen)), 1)
+        self.assertLess(seen[0], forcing.nudging_target.u_wind.values.shape[0])
+        self.assertEqual(len(chunks), self.N_SEG)
+        compared = 0
+        for w, f, c in zip(win, whole, chunks):
+            for name in w.data_vars:
+                if "time" not in w[name].dims:
+                    continue
+                np.testing.assert_array_equal(w[name].values, f[name].values,
+                                              err_msg=f"{name}: whole target")
+                np.testing.assert_array_equal(w[name].values, c[name].values,
+                                              err_msg=f"{name}: run_chunked")
+                compared += 1
+        self.assertGreater(compared, 0)
+        # The target actually drives the run: segments differ from a
+        # target-free integration, so equality above is not vacuous.
+        self.assertFalse(np.array_equal(win[-1].u_wind.values,
+                                        win[0].u_wind.values))
 
 
 class TestDustVectorFollowsNudging(unittest.TestCase):

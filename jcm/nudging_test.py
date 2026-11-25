@@ -18,7 +18,7 @@ from jcm.forcing import ForcingData
 from jcm.model import Model
 from jcm.nudging import (
     LatTop, NudgingConfig, NudgingTarget, NudgingTerm, reference_pressure_pa,
-    inv_tau_profile, nudging_tendency, with_nudging,
+    inv_tau_profile, nudging_tendency, window_forcing, with_nudging,
 )
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 from jcm.physics.speedy.speedy_terms import speedy_physics
@@ -498,6 +498,92 @@ class WindowTargetTest(unittest.TestCase):
                                temperature=jnp.ones((2, 3)))
         self.assertIsNone(samples_per_span(static, 86400))
         self.assertIs(window_target(static, 0, 4).u_wind, static.u_wind)
+
+
+class WindowForcingTest(unittest.TestCase):
+    """``window_forcing``: the one public call that puts a segment's window of
+    a host-resident target on the device (what ``run_chunked`` uses per chunk).
+    """
+
+    SPAN = 6 * 3600
+
+    def _forcing(self, align, persist="strict"):
+        target = WindowTargetTest()._target(align, persist)
+        # Host-resident, as ``build_run_forcing`` hands it back.
+        target = jax.device_get(target)
+        return ForcingData.zeros((4, 3)).copy(nudging_target=target)
+
+    def _same_selection(self, win, full, start, offsets_h):
+        import jax_datetime as jdt
+
+        from jcm.date import DateData
+        from jcm.forcing import _select_time_series
+        t0 = np.datetime64(start).astype("datetime64[s]")
+        for dt_h in offsets_h:
+            date = DateData.set_date(jdt.to_datetime(
+                t0 + np.timedelta64(int(dt_h * 3600), "s")))
+            for name in ("u_wind", "temperature"):
+                np.testing.assert_array_equal(
+                    np.asarray(_select_time_series(getattr(win, name), date)),
+                    np.asarray(_select_time_series(getattr(full, name), date)),
+                    err_msg=f"{name} start={start} +{dt_h}h")
+
+    def test_window_matches_whole_target_at_start_between_samples_and_end(self):
+        from jcm.forcing import BY_DATE, BY_DATE_INTERP
+        from jcm.nudging import samples_per_span
+        for align in (BY_DATE, BY_DATE_INTERP):
+            full = self._forcing(align)
+            n = samples_per_span(full.nudging_target, self.SPAN)
+            # The series start; a start between two samples (1 h past 06:00);
+            # a start whose window the series end clamps.
+            for start in ("2010-01-01T00", "2010-01-04T07", "2010-01-10T06"):
+                win = window_forcing(
+                    full, np.datetime64(start).astype("datetime64[s]"),
+                    self.SPAN)
+                self.assertEqual(win.nudging_target.u_wind.values.shape[0], n)
+                self._same_selection(win.nudging_target, full.nudging_target,
+                                     start, (0, 1, 2.5, 5.9))
+
+    def test_window_at_the_end_holds_the_last_sample(self):
+        from jcm.forcing import BY_DATE_INTERP
+        full = self._forcing(BY_DATE_INTERP, persist="hold")
+        start = "2010-01-10T12"        # past the last sample (2010-01-10T18 - 6 h)
+        win = window_forcing(full, np.datetime64(start), self.SPAN)
+        self._same_selection(win.nudging_target, full.nudging_target, start,
+                             (0, 6, 12, 23))
+
+    def test_start_accepts_epoch_seconds_datetime_and_model_time(self):
+        import datetime
+
+        import jax_datetime as jdt
+
+        from jcm.forcing import BY_DATE
+        full = self._forcing(BY_DATE)
+        when = datetime.datetime(2010, 1, 3, 7)
+        secs = int(np.datetime64(when, "s").astype(np.int64))
+        want = np.asarray(window_forcing(full, secs, self.SPAN)
+                          .nudging_target.u_wind.values)
+        for start in (when, np.datetime64(when),
+                      jdt.to_datetime(np.datetime64(when, "s"))):
+            np.testing.assert_array_equal(
+                np.asarray(window_forcing(full, start, self.SPAN)
+                           .nudging_target.u_wind.values), want)
+
+    def test_window_is_on_the_device(self):
+        from jcm.forcing import BY_DATE
+        full = self._forcing(BY_DATE)
+        self.assertIsInstance(full.nudging_target.u_wind.values, np.ndarray)
+        win = window_forcing(full, np.datetime64("2010-01-03T00"), self.SPAN)
+        self.assertIsInstance(win.nudging_target.u_wind.values, jax.Array)
+        self.assertIsInstance(win.nudging_target.u_wind.times.delta.days, jax.Array)
+
+    def test_no_target_or_static_target_is_a_no_op(self):
+        bare = ForcingData.zeros((4, 3))
+        self.assertIs(window_forcing(bare, 0, self.SPAN), bare)
+        static = NudgingTarget(u_wind=jnp.ones((2, 3)), v_wind=jnp.ones((2, 3)),
+                               temperature=jnp.ones((2, 3)))
+        held = bare.copy(nudging_target=static)
+        self.assertIs(window_forcing(held, 0, self.SPAN), held)
 
 
 class TestLatTop(unittest.TestCase):
