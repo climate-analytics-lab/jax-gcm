@@ -216,11 +216,13 @@ class OzoneClimatology:
                     "rebuild them with a common epoch.")
             ds = xr.concat(dsets, dim="time")
             path = paths[0]
+            level_sources = list(zip(dsets, paths))
         else:
             path = Path(path)
             # ``decode_times=False`` to read the raw values + units; we
             # decode below only if we end up in the BY_DATE branch.
             ds = xr.open_dataset(path, decode_times=False)
+            level_sources = [(ds, path)]
         if var_name not in ds.data_vars:
             raise ValueError(
                 f"Ozone file {path} missing '{var_name}' variable; have "
@@ -243,7 +245,13 @@ class OzoneClimatology:
             )
 
         if vertical is not None:
-            _check_level_axis(ds, path, vertical, require_vertical_axis)
+            # Each file's own coefficients, not the concatenated dataset's:
+            # the time concatenation stacks these static variables along
+            # ``time``, and every year of a list has to be on the model's
+            # levels, not only the first.
+            for source, source_path in level_sources:
+                _check_level_axis(source, source_path, vertical,
+                                  require_vertical_axis)
 
         # Coord-value validation — shape match alone won't catch a file
         # with the same N points but flipped/shifted lat or lon (e.g.

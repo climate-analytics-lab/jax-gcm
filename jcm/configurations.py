@@ -88,8 +88,15 @@ def _compose(name: str, overrides: list[str], extra_config_dir=None):
     that shares a group/name with one of jcm's does not replace it.
     """
     if extra_config_dir is not None:
-        overrides = [f"hydra.searchpath=[{Path(extra_config_dir).resolve().as_uri()}]",
-                     *overrides]
+        # The path as it is, not ``Path.as_uri()``: Hydra's ``file://`` source
+        # does not percent-decode, so an escaped space or comma would name a
+        # directory that does not exist and the entry would be skipped without
+        # a word. Quoting keeps those characters out of the override grammar.
+        from hydra.core.override_parser.types import Quote, QuotedString
+        entry = QuotedString(
+            text=f"file://{Path(extra_config_dir).resolve()}",
+            quote=Quote.single).with_quotes()
+        overrides = [f"hydra.searchpath=[{entry}]", *overrides]
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
     from hydra.core.singleton import Singleton

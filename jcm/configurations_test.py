@@ -250,7 +250,10 @@ class TestFromConfig(unittest.TestCase):
 
     def test_extra_config_dir_composes_with_jcm_groups(self):
         import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
+
+        # A directory name with a space and a comma: both are ordinary in
+        # paths and both would break a percent-encoded or unquoted entry.
+        with tempfile.TemporaryDirectory(suffix=" my, conf") as tmp:
             (Path(tmp) / "configuration").mkdir()
             (Path(tmp) / "configuration" / "my-overlay.yaml").write_text(
                 "# @package _global_\n"

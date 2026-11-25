@@ -184,7 +184,8 @@ The level-resolved boundary data (ozone, oxidants) are published per
 for level, with no vertical interpolation (the ozone loader checks the level
 count and horizontal grid, the oxidant reader the count and, when the file
 carries them, ``hyam``/``hybm``). A user table that happens to have 47 or 95
-levels therefore must not receive those bundles. Every route (``auto``, an
+levels therefore must not receive those bundles. On the Dinosaur backend,
+which is the one that takes a user table, every route (``auto``, an
 explicit ``hf://bundles/...`` path as the ``ma-*`` configurations set, a
 packaged or local file, ``ForcingData.from_bundles``) ends at one attach
 function per input, which checks the data: a file that carries its vertical
