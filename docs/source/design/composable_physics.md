@@ -154,7 +154,11 @@ dycore's provider: it is re-diagnosed on the saved state in `Model` (snapshot
 frames) and re-aligned to the post-step states in the running mean
 (averaged frames, by the end-point correction `(f(x_N) - f(x_0)) / N`), so it
 matches the `u`, `v`, `T` saved beside it at the cost of two evaluations per
-saved frame. The `omega` the physics terms *read* stays the step-start one.
+saved frame. The `omega` the physics terms *read* stays the step-start one,
+and so do the AeroCom vertical velocities (`aerocom_wap`, `aerocom_w500`,
+`aerocom_w700`): they are interpolated on the physics-input pressures inside
+the step, so they belong to that state together with every other AeroCom
+field.
 
 ## Validation
 
