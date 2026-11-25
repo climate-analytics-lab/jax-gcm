@@ -18,7 +18,10 @@ plus two upper-boundary dissipation terms:
   relative to ECHAM's, where ten levels can reach the stratosphere (~126 hPa).
   Giving both is an error, a pressure outside the launchable range raises with
   that range, and the scheme needs a layer below the launch level, so the
-  lowest full level cannot be selected. The resolved count selects an array slice and
+  lowest full level cannot be selected. On a grid with no more levels than the
+  default count (the idealised 8-layer stacks) that level does not exist: the
+  scheme applies no drag there and warns, and a launch pressure is the way to
+  make it act. The resolved count selects an array slice and
   loop bounds, so it is not a differentiable leaf; the Hines parameters are.
 - **Lott-Miller SSO** (``jcm/physics/gravity_waves/sso/lott_miller.py::LottMillerSso``):
   sub-grid orographic drag with blocked-flow form drag below the blocking level

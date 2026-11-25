@@ -417,6 +417,22 @@ class TestHinesLaunchPressure:
         with pytest.raises(ValueError, match="valid: 1 to 46"):
             term.cache_coords(SimpleNamespace(vertical=_echam_vertical(47)))
 
+    def test_default_on_a_grid_shallower_than_it_warns(self, caplog):
+        """ECHAM's default count on an 8-layer stack runs, and says so."""
+        from types import SimpleNamespace
+        term = HinesGwd()
+        with caplog.at_level("WARNING",
+                             logger="jcm.physics.gravity_waves.hines.hines"):
+            term.cache_coords(SimpleNamespace(
+                vertical=SimpleNamespace(layers=8)))
+        assert "applies no gravity-wave drag" in caplog.text
+        assert term.launch_level == 10
+        caplog.clear()
+        with caplog.at_level("WARNING",
+                             logger="jcm.physics.gravity_waves.hines.hines"):
+            term.cache_coords(SimpleNamespace(vertical=_echam_vertical(47)))
+        assert caplog.text == ""
+
     def test_nonpositive_launch_level_is_rejected(self):
         with pytest.raises(ValueError, match=">= 1"):
             HinesGwd(launch_level=0)

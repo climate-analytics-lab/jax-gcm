@@ -72,6 +72,7 @@ Algorithm (column-mode, executed at each grid column):
   the leftover-loop-variable in ``mair`` indexing at the top-level
   heating term, and the 0-based shift of various 1-based loop bounds.
 """
+import logging
 import math
 from typing import NamedTuple, Tuple
 
@@ -869,16 +870,27 @@ class HinesGwd(PhysicsTerm):
         if self.launch_pressure_hpa is not None:
             self.launch_level = launch_level_from_pressure(
                 coords.vertical, self.launch_pressure_hpa)
-        elif self._launch_level_explicit:
-            # The unset default is left unvalidated: it is ECHAM's count, and
-            # grids shallower than it (the idealised 8-layer stacks) keep
-            # running exactly as they always have.
-            nlev = int(coords.vertical.layers)
-            if self.launch_level >= nlev:
-                raise ValueError(
-                    f"HinesGwd: launch_level={self.launch_level} needs more "
-                    f"than the {nlev} levels of this grid (valid: 1 to "
-                    f"{nlev - 1}).")
+            return
+        nlev = int(coords.vertical.layers)
+        if self.launch_level < nlev:
+            return
+        if self._launch_level_explicit:
+            raise ValueError(
+                f"HinesGwd: launch_level={self.launch_level} needs more "
+                f"than the {nlev} levels of this grid (valid: 1 to "
+                f"{nlev - 1}).")
+        # The unset default is ECHAM's count for ECHAM's grids. A stack
+        # shallower than it (the idealised 8-layer grids) has no such level:
+        # the launch index falls off the top of the column and the scheme
+        # applies no drag. That stays a run, not an error, because those
+        # grids are used to exercise the rest of the package; the warning
+        # says what to set where Hines is meant to act.
+        logging.getLogger(__name__).warning(
+            "HinesGwd: the default launch level (%d levels above the "
+            "surface, ECHAM's emiss_lev) does not exist on this %d-level "
+            "grid, so the scheme applies no gravity-wave drag here. Set "
+            "launch_pressure_hpa (or launch_level) to launch from a level "
+            "this grid has.", self.launch_level, nlev)
 
     def __call__(
         self,
