@@ -2256,8 +2256,9 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     output_selection = _output_selection_from_cfg(cfg)
     # A warm start (from_state) carries the donor's physics carry through to
     # ``run``; every other init builds a fresh carry.
+    init_kwargs = initial_state_kwargs(cfg, model)
     return model.run(
-        **initial_state_kwargs(cfg, model),
+        **init_kwargs,
         forcing=forcing,
         save_interval=cfg.run.save_interval,
         total_time=total_time,
