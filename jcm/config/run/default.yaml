@@ -92,6 +92,40 @@ save_chunks: true
 snapshot_interval: null
 snapshot_variables: []
 
+# Which variables the main, chunk and monthly outputs write. ``output_keep``
+# null (default) writes everything; a list writes only those names.
+# ``output_drop`` (default empty) lists names that are never written, applied
+# after ``output_keep``, so a name in both is dropped. Names are those of the
+# output Dataset (``temperature``, ``tracer_name``, ``radiation.toa_sw_up``,
+# ``surface_exchange.tile_fraction.0``); a name the run cannot write is an
+# error that lists the available ones, raised before the integration starts.
+# Both unset leaves the output exactly as it was.
+#
+# The choice acts before the output is accumulated: an unwritten diagnostic is
+# never summed or stacked on the device, and an unwritten prognostic tracer or
+# 3-D field is not carried into the saved frames. It does not change the
+# simulation: checkpoints hold the model state and carry, never outputs, so
+# restarts are unaffected by what is written. (The selection changes the
+# compiled program, so a selected run agrees with a full-output run to
+# rounding, not bit for bit.)
+#
+# Always written whatever is selected: the coordinates (``lon``, ``lat``,
+# ``time``, ``level``, the hybrid coefficients) and ``time_bounds``. A
+# keep-list does NOT otherwise retain ``pressure_full``/``pressure_half``:
+# list them if the file should carry them. The one exception is
+# ``pressure_levels``, which interpolates with ``pressure_full`` and so keeps
+# it implicitly (and refuses a drop-list that names it).
+#
+# The chunked runner's health gate (jcm.diagnostics.check_health) and aerosol
+# budget report still see the variables they read: the model computes those
+# (jcm.diagnostics.runner_read_fields), the runner reads them, and they are
+# left out of the files unless selected. ``snapshot_variables`` is a separate
+# stream with its own selector and ignores these two keys: a snapshot variable
+# that is also in ``output_drop`` is still written to the snapshot file.
+# Applies to run.mode=full only.
+output_keep: null
+output_drop: []
+
 # Constant pressure-surface output (#258). Null (default) writes every file
 # on the model's native sigma/hybrid levels (the ``level`` dimension),
 # unaffected. A list of pressures in hPa, e.g.

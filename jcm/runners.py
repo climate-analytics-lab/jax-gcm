@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import jax
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from jcm import progress as _progress
 from jcm import provenance, temporal_aggregation
@@ -2199,6 +2199,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         )
 
     progress_bar = bool(cfg.run.get("progress_bar", False))
+    output_selection = _output_selection_from_cfg(cfg)
     if cfg.init.kind == "isothermal":
         return model.run(
             forcing=forcing,
@@ -2208,6 +2209,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             output_averages=cfg.run.output_averages,
             snapshot_interval=cfg.run.get("snapshot_interval"),
             snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+            output_keep=output_selection.keep,
+            output_drop=output_selection.drop,
             progress=progress_bar,
         )
     # A warm start (from_state) carries the donor's physics carry through to
@@ -2234,6 +2237,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         output_averages=cfg.run.output_averages,
         snapshot_interval=cfg.run.get("snapshot_interval"),
         snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+        output_keep=output_selection.keep,
+        output_drop=output_selection.drop,
         progress=progress_bar,
     )
 
@@ -2453,6 +2458,21 @@ def _prescribed_start_time(configured, file_first, source: str):
     return configured
 
 
+def _output_selection_from_cfg(cfg: DictConfig):
+    """Return the ``run.output_keep`` / ``run.output_drop`` selection of a config."""
+    from jcm.output_selection import OutputSelection
+
+    def _plain(value):
+        if value is None:
+            return None
+        return (list(OmegaConf.to_container(value))
+                if OmegaConf.is_config(value) else value)
+
+    return OutputSelection.from_args(
+        _plain(cfg.run.get("output_keep", None)),
+        _plain(cfg.run.get("output_drop", None)))
+
+
 def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
     """Refuse integration-only run knobs in a diagnostic run mode.
 
@@ -2468,6 +2488,11 @@ def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
             f"run.mode={mode!r} has no integration scan to sample, so "
             f"observers ({sorted(cfg.observers)}) apply only to "
             "run.mode=full. Remove them for this mode.")
+    if not _output_selection_from_cfg(cfg).is_default:
+        raise ValueError(
+            f"run.mode={mode!r} writes its own fixed output, so "
+            "run.output_keep / run.output_drop apply only to run.mode=full. "
+            "Unset them for this mode.")
     chunk = float(cfg.run.get("chunk_days", 0) or 0)
     ckpt = cfg.run.get("checkpoint_path", None)
     if chunk > 0 or ckpt not in (None, "", "null"):
@@ -2972,6 +2997,15 @@ def run_chunked(
             cfg, model, chunk_seconds, total_seconds)
         accumulator = MonthlyMeanAccumulator()
 
+    # Which variables are written (``run.output_keep`` / ``run.output_drop``).
+    # ``out_selection`` is what reaches the files. ``model_selection`` is what
+    # the model computes: the same, plus the variables this loop reads back
+    # from each chunk's Dataset (the health gate, the budget report, the
+    # pressure-level conversion), so a user's choice can never blind the gate.
+    # Those are stripped again before anything is written (``process_chunk``).
+    out_selection, model_selection = _chunk_output_selections(
+        cfg, model, pressure_levels_hpa)
+
     reports: list[dict] = []
     elapsed_seconds = 0
     elapsed_sim_days = 0.0
@@ -3043,7 +3077,10 @@ def run_chunked(
         nonlocal last_params
         host_t0 = time.perf_counter()
         elapsed_sim_days = job.elapsed_seconds / 86400.0
-        ds = job.preds.to_xarray()
+        # ``ds_full`` holds what the model computed; the gate and the budget
+        # report read it, and ``ds`` is the selection that is written.
+        ds_full = job.preds.to_xarray()
+        ds = out_selection.filter_dataset(ds_full)
         # Feed the monthly stream before provenance attrs (which carry the
         # per-chunk wall time) are stamped on the chunk dataset.
         closed_months = (accumulator.update(_monthly_input(ds))
@@ -3076,7 +3113,7 @@ def run_chunked(
             dycore.to_physics_state(job.run_state.dynamics)
             if dycore is not None and hasattr(job.run_state, "dynamics")
             else None)
-        ok, report = check_health(ds, job.chunk_idx, elapsed_sim_days,
+        ok, report = check_health(ds_full, job.chunk_idx, elapsed_sim_days,
                                   is_bootstrap_chunk=is_bootstrap_chunk,
                                   max_wind_speed=max_wind_speed,
                                   max_temperature=max_temperature,
@@ -3093,7 +3130,7 @@ def run_chunked(
         # model's actual timestep is authoritative even when a caller passes
         # a separately assembled cfg with a conflicting explicit value.
         dt_seconds = float(model.dt_si.m)
-        for _line in aerosol_budget_report(ds, dt_seconds):
+        for _line in aerosol_budget_report(ds_full, dt_seconds):
             print(_line)
 
         # ``:.12g`` (not the default 6-significant-digit ``:g``): past
@@ -3297,6 +3334,8 @@ def run_chunked(
                         snapshot_interval=cfg.run.get("snapshot_interval"),
                         snapshot_variables=tuple(
                             cfg.run.get("snapshot_variables") or ()),
+                        output_keep=model_selection.keep,
+                        output_drop=model_selection.drop,
                         progress=False,
                     )
                 else:
@@ -3308,6 +3347,8 @@ def run_chunked(
                         snapshot_interval=cfg.run.get("snapshot_interval"),
                         snapshot_variables=tuple(
                             cfg.run.get("snapshot_variables") or ()),
+                        output_keep=model_selection.keep,
+                        output_drop=model_selection.drop,
                         progress=False,
                     )
 
@@ -3368,6 +3409,39 @@ def run_chunked(
         _write_monthly(final, output_prefix, last_params, pressure_levels_hpa)
 
     return reports
+
+
+def _chunk_output_selections(cfg: DictConfig, model, pressure_levels_hpa):
+    """Return the written and the computed output selections of a chunked run.
+
+    Returns ``(written, computed)``. Both are the default selection, with no
+    model call at all, unless ``run.output_keep`` / ``run.output_drop`` is
+    set. Otherwise the names are validated against the model's output
+    variables here, before any integration, and ``computed`` additionally
+    holds the variables the loop reads between chunks
+    (:func:`jcm.diagnostics.runner_read_fields`) that exist in this model.
+
+    ``run.pressure_levels`` interpolates every level field with the model's
+    own ``pressure_full``, so a keep-list keeps it implicitly and a drop-list
+    that names it is refused.
+    """
+    from jcm.diagnostics import runner_read_fields
+
+    written = _output_selection_from_cfg(cfg)
+    if written.is_default:
+        return written, written
+    available = model.output_variable_names()
+    written.validate(available)
+    if pressure_levels_hpa:
+        if "pressure_full" in written.drop:
+            raise ValueError(
+                "run.output_drop lists pressure_full, which run.pressure_levels "
+                "interpolates every level field with. Remove it from "
+                "run.output_drop, or unset run.pressure_levels.")
+        written = written.requiring(["pressure_full"])
+    read_back = runner_read_fields(
+        available, dynamics_needed=getattr(model, "dycore", None) is None)
+    return written, written.requiring(sorted(read_back & set(available)))
 
 
 def check_monthly_schedule(cfg: DictConfig, model, chunk_seconds: int,

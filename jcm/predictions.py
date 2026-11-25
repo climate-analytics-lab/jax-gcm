@@ -19,6 +19,7 @@ import pandas as pd
 
 from jcm import cf_metadata, provenance, temporal_aggregation
 from jcm.dycore.base import Predictions
+from jcm.output_selection import OutputSelection, reference_field
 from jcm.physics_interface import Physics
 from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, data_to_xarray
 
@@ -112,8 +113,15 @@ class ModelPredictions:
                  dycore=None, observations=None, observers=(),
                  observer_start_time=None, obs_dt_seconds=None,
                  snapshots=None, snapshot_variables=(),
-                 snapshot_times=None, params=None):
+                 snapshot_times=None, params=None, output_selection=None):
         self._predictions = predictions
+        # What the run was asked to write (``output_keep``/``output_drop``).
+        # The model has already pruned what it could before accumulating;
+        # ``to_xarray`` applies the same selection to whatever is left, so
+        # the Dataset holds exactly the selected names.
+        self._output_selection = (
+            OutputSelection() if output_selection is None
+            else output_selection)
         self._coords = coords
         self._physics = physics
         self._dycore = dycore
@@ -272,6 +280,7 @@ class ModelPredictions:
             snapshots=self._snapshots,
             snapshot_variables=self._snapshot_variables,
             snapshot_times=self._snapshot_times,
+            output_selection=self._output_selection,
         )
         # This is a timing-only edit: __init__ above re-derives `_params`
         # from whichever physics it was just handed (live-read, no
@@ -376,6 +385,7 @@ class ModelPredictions:
         snapshots=_MISSING,
         snapshot_variables=_MISSING,
         snapshot_times=_MISSING,
+        output_selection=_MISSING,
     ) -> "ModelPredictions":
         """Return a copy with host-side model/output context re-attached.
 
@@ -481,6 +491,9 @@ class ModelPredictions:
             if snapshot_times is _MISSING
             else snapshot_times
         )
+        output_selection = (
+            self._output_selection
+            if output_selection is _MISSING else output_selection)
 
         self._validate_context_shapes(
             coords, observations, observers, snapshots)
@@ -496,6 +509,7 @@ class ModelPredictions:
             snapshots=snapshots,
             snapshot_variables=snapshot_variables,
             snapshot_times=snapshot_times,
+            output_selection=output_selection,
         )
         # ``__init__`` has just captured the live values. Label that record
         # after construction rather than passing it as ``params=``: the latter
@@ -512,7 +526,7 @@ class ModelPredictions:
         """Reject context that is plainly incompatible with retained arrays."""
         expected = getattr(coords, "nodal_shape", None)
         dynamics = getattr(self._predictions, "dynamics", None)
-        u_wind = getattr(dynamics, "u_wind", None)
+        u_wind = _reference_field_or_none(dynamics)
         if expected is not None and u_wind is not None:
             expected = tuple(int(size) for size in expected)
             actual = tuple(int(size) for size in u_wind.shape[1:])
@@ -711,7 +725,7 @@ class ModelPredictions:
         if physics is None or dynamics is None:
             return set()
         fields = physics_output_fields(
-            physics, self._physics, dynamics.u_wind.shape[1:])
+            physics, self._physics, reference_field(dynamics).shape[1:])
         return {
             name for name, leaf in fields.items()
             if np.issubdtype(leaf.dtype, np.integer)
@@ -740,6 +754,11 @@ class ModelPredictions:
         restore) the lat/lon build the dinosaur backend uses is called
         directly on the attached coordinates.
         """
+        ds = self._unselected_trajectory_dataset()
+        return self._output_selection.filter_dataset(ds)
+
+    def _unselected_trajectory_dataset(self):
+        """Build the trajectory Dataset before ``output_keep``/``output_drop``."""
         times = self.time_labels()
         if times.ndim != 1:
             # Every backend lays out one time axis; say how to get one rather
@@ -770,6 +789,16 @@ class ModelPredictions:
         # core prognostics), so stamping term attrs after finalize does not
         # upset the documented CSV < term < cf_metadata precedence.
         return _apply_term_output_attrs(ds, self._physics)
+
+
+def _reference_field_or_none(dynamics):
+    """``reference_field(dynamics)``, or ``None`` when there is none to read."""
+    if dynamics is None:
+        return None
+    try:
+        return reference_field(dynamics)
+    except ValueError:
+        return None
 
 
 def _float0s_to_nans(pytree):
@@ -929,23 +958,26 @@ def gridded_trajectory_dataset(predictions, times, *, coords, physics,
     """
     labels = output_time_labels(times)
     dynamics = _float0s_to_nans(predictions.dynamics)
-    if labels.shape != dynamics.u_wind.shape[:1]:
+    reference = reference_field(dynamics)
+    if labels.shape != reference.shape[:1]:
         # A stacked trajectory (chunks from a scan) has leading stacking axes
         # on every leaf; it is one time axis only after they are merged.
         raise ValueError(
             f"times must hold one label per frame: got shape {labels.shape} "
-            f"for fields with leading shape {dynamics.u_wind.shape[:1]}. A "
+            f"for fields with leading shape {reference.shape[:1]}. A "
             "stacked trajectory must have its stacking axes merged into the "
             "time axis first (see ModelPredictions.is_interval_mean).")
     physics_fields = physics_output_fields(
-        predictions.physics, physics, dynamics.u_wind.shape[1:])
+        predictions.physics, physics, reference.shape[1:])
     coords = jax.device_get(coords)
     extra_coords = _physics_additional_coords(
         physics, physics_fields, coords.vertical.layers)
     extra_coords.update(additional_coords or {})
 
+    # A field a selection removed before accumulation is ``None`` here.
     ds = data_to_xarray(
-        dynamics.asdict() | physics_fields,
+        {k: v for k, v in dynamics.asdict().items() if v is not None}
+        | physics_fields,
         coords=coords, serialize_coords_to_attrs=False,
         times=np.arange(labels.shape[0]),
         additional_coords=extra_coords,

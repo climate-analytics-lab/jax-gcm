@@ -123,6 +123,7 @@ def _run_kwargs(cfg, model) -> dict:
     from jcm.initial_states import balanced_isothermal_state, jw_state
 
     run = cfg.run
+    output_selection = runners._output_selection_from_cfg(cfg)
     # A calendar ``total_time`` ("12 months", run/longrun.yaml) is resolved
     # against the start into the exact end_time, as the CLI does.
     total_time, end_time = runners._run_duration(
@@ -139,6 +140,8 @@ def _run_kwargs(cfg, model) -> dict:
         "output_averages": bool(run.output_averages),
         "snapshot_interval": run.get("snapshot_interval"),
         "snapshot_variables": tuple(run.get("snapshot_variables") or ()),
+        "output_keep": output_selection.keep,
+        "output_drop": output_selection.drop,
     }
     init = cfg.get("init", {})
     kind = init.get("kind", "isothermal")

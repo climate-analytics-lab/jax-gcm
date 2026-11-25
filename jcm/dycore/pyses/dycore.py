@@ -111,6 +111,7 @@ from jcm.initial_states.ussa1976 import ussa_pressure, ussa_temperature
 from jcm.dycore.pyses.interp import interp_grid_to_points
 from jcm.dycore.pyses.physics_grid import FVPhysicsGrid
 from jcm.physics_interface import PhysicsState, PhysicsTendency
+from jcm.output_selection import reference_field
 from jcm.terrain import TerrainData, _SSO_NAMES
 
 logger = logging.getLogger(__name__)
@@ -1201,14 +1202,17 @@ class PysesCamSEDycore(DynamicalCore):
         dyn = predictions.dynamics
         for field in ("u_wind", "v_wind", "temperature", "specific_humidity",
                       "geopotential", "normalized_surface_pressure"):
-            add_field(field, getattr(dyn, field))
+            # ``None`` when the run's output selection dropped the field
+            # before it was accumulated (``jcm.output_selection``).
+            if getattr(dyn, field) is not None:
+                add_field(field, getattr(dyn, field))
         for tracer_name, arr in dyn.tracers.items():
             add_field(tracer_name, arr)
 
         fields = physics_output_fields(
             predictions.physics,
             physics if physics is not None else self.output_physics,
-            np.shape(dyn.u_wind)[1:])
+            np.shape(reference_field(dyn))[1:])
         for name, leaf in fields.items():
             add_field(name, leaf)
 
