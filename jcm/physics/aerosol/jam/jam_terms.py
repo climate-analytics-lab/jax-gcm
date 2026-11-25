@@ -155,17 +155,23 @@ def activation_parameter_class(activation_scheme: str):
 
 
 def _load_mam4_jax() -> type[ModalMicrophysicsTerm]:
-    """Import the MAM4-JAX core lazily (optional GPL-3.0 dependency)."""
-    from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
-        Mam4JaxMicrophysics,
-    )
+    """Import the MAM4-JAX core lazily (optional GPL-3.0 dependency).
+
+    Through the package attribute, so a missing ``mam4_jax`` raises the
+    package's install hint (``microphysics._LAZY_CORES``).
+    """
+    from jcm.physics.aerosol.jam.microphysics import Mam4JaxMicrophysics
 
     return Mam4JaxMicrophysics
 
 
 def _load_m7_jax() -> type[ModalMicrophysicsTerm]:
-    """Import the M7-JAX core lazily (optional ``jcm[m7]`` dependency)."""
-    from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
+    """Import the M7-JAX core lazily (optional ``jcm[m7]`` dependency).
+
+    Through the package attribute, so a missing ``m7_jax`` raises the
+    package's install hint, with the GitHub preinstall line.
+    """
+    from jcm.physics.aerosol.jam.microphysics import M7JaxMicrophysics
 
     return M7JaxMicrophysics
 

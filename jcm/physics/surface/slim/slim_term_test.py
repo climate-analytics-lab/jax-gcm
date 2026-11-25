@@ -232,6 +232,9 @@ def test_a_t21_model_steps_with_the_slim_land():
     ds = pred.to_xarray()
     assert "soil_layer" in ds["slim_land.soil_temperature"].dims
     assert ds.sizes["soil_layer"] == 10
+    # ...and a global mean keeps that profile rather than averaging the depth.
+    from jcm.analysis import global_mean
+    assert set(global_mean(ds["slim_land.soil_temperature"]).dims) == {"time", "soil_layer"}
 
 
 def test_calibration_levers_scale_the_maps():

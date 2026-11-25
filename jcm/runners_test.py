@@ -714,6 +714,53 @@ class TestBuilders(unittest.TestCase):
         terrain = build_terrain(cfg, coords)
         self.assertIsNotNone(terrain.orog)
 
+    def test_build_terrain_takes_the_fmask_threshold_from_the_config(self):
+        """``terrain.fmask_threshold`` reaches the mask the model is built on."""
+        import xarray as xr
+        from importlib import resources
+        from jcm.terrain import DEFAULT_FMASK_THRESHOLD
+        path = str(resources.files('jcm.data.bc.t30.clim') / 'terrain.nc')
+        # ``interpolate=false``: the file is on the model grid, and only
+        # unresampled is its mask reproduced cell for cell.
+        base = ["physics=speedy", "grid=speedy_t31_l8", "terrain=from_file",
+                f"terrain.file={path}", "terrain.interpolate=false"]
+        with xr.open_dataset(path) as ds:
+            raw = ds['lsm'].values
+
+        def small_land(fmask):
+            fmask = np.asarray(fmask)
+            return int(((fmask > 0.0) & (fmask <= DEFAULT_FMASK_THRESHOLD)).sum())
+
+        self.assertGreater(small_land(raw), 0)
+
+        cfg = _compose(base)
+        # The group states the default, so the key is settable without ``+``
+        # and reads the same as the terrain module's.
+        self.assertEqual(cfg.terrain.fmask_threshold, DEFAULT_FMASK_THRESHOLD)
+        coords = build_coords(cfg)
+
+        self.assertEqual(small_land(build_terrain(cfg, coords).fmask), 0)
+        kept = build_terrain(_compose([*base, "terrain.fmask_threshold=0"]), coords)
+        np.testing.assert_array_equal(np.asarray(kept.fmask), raw)
+        # ``null`` is the default, not "no rounding".
+        unset = build_terrain(
+            _compose([*base, "terrain.fmask_threshold=null"]), coords)
+        self.assertEqual(small_land(unset.fmask), 0)
+        # The enveloped loader reads the same key (it always resamples, so
+        # the count is not the file's; that slivers survive at all is the
+        # point).
+        enveloped = [*base, "terrain.kind=from_file_enveloped"]
+        self.assertEqual(
+            small_land(build_terrain(_compose(enveloped), coords).fmask), 0)
+        self.assertGreater(small_land(build_terrain(
+            _compose([*enveloped, "terrain.fmask_threshold=0"]), coords).fmask), 0)
+
+    def test_auto_terrain_declares_the_fmask_threshold(self):
+        """``terrain=auto`` carries the same key at the same default."""
+        from jcm.terrain import DEFAULT_FMASK_THRESHOLD
+        cfg = _compose(["terrain=auto"])
+        self.assertEqual(cfg.terrain.fmask_threshold, DEFAULT_FMASK_THRESHOLD)
+
     def test_build_diffusion_scaled(self):
         cfg = _compose(["diffusion=strong"])
         diffusion = build_diffusion(cfg)

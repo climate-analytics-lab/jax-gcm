@@ -252,15 +252,20 @@ Three kinds live there today:
   starting point for a run of that member's release preset
   (`+configuration=<preset> init=from_state init.file=hf://bundles/<grid>_<levels>/init_states/<member>_v31_warm.msgpack`).
   Each ECHAM member's ends a 365-day year of its release preset on the
-  physics the pin belongs to, started from the member's previous hosted state
+  physics of the revision it was written at, started from the member's previous hosted state
   (the JAM members' second such year or later: the first carries the spin-up
   of the SLIM buckets, which a state written before the SLIM land seeds from
-  the forcing, and of the dust that follows them). A file is overwritten in
-  place when the physics it describes moves, so an earlier pin still reads
-  the earlier state: the seven ECHAM states were last written at mirror
+  the forcing, and of the dust that follows them). A file is replaced in place
+  when its member's year is rerun, so an earlier pin still reads the earlier
+  state: the seven ECHAM states were last written at mirror
   revision `53803a0b` (the SLIM land and the surface, sea-ice and humidity
-  changes of {doc}`jam_aerosol_retune`, "The structural refit"), and before
-  that the three JAM ones at `8f31f1ef` (volcanic SO₂, #1190, and M7's
+  changes of {doc}`jam_aerosol_retune`, "The structural refit"); the four
+  1M and 2M states predate the MACv2 natural aerosol background that the
+  current pin, `d1b5e09e`, adds to those members' presets, and are kept for
+  3.1 by maintainer decision (2026-11-22): the regression bands are drawn
+  from these same states, and rerunning them would move the pin and with it
+  every band. Before that the
+  three JAM ones at `8f31f1ef` (volcanic SO₂, #1190, and M7's
   biogenic-OC and residential/energy channels, #1188). Each
   has a `<state>.provenance.json` beside it (run, length, code, environment,
   ancestry), which is what `generate_stats` requires of an `init_state`, and

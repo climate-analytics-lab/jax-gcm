@@ -35,9 +35,10 @@ Requirements
 ^^^^^^^^^^^^
 
 - Python ≥ 3.11
-- JAX ≥ 0.10 (validated on 0.10.2, which is what Python 3.11 resolves to;
-  0.12 passes the full test suite and runs clean on GPU, but about 15 %
-  slower on an A100, so pin 0.10.2 for throughput)
+- JAX ≥ 0.10 except 0.12.1 (validated on 0.10.2, which is what Python 3.11
+  resolves to; 0.12.0 passes the full test suite and runs clean on GPU, but
+  about 15 % slower on an A100, so pin 0.10.2 for throughput; 0.12.1 fails
+  nine tests and is excluded until #1226 is resolved)
 - Dinosaur ≥ 1.5.0 (the dynamical-core backend)
 - Flax ≥ 0.12.1, except 0.12.9, which imports a ``jax.experimental.hijax``
   symbol no jax ≥ 0.11 provides (#853)
@@ -202,9 +203,10 @@ The initial state the configuration calls for is already applied, so
 invisible.
 
 Configurations that select an optional component need its extra installed —
-``jcm[m7]`` for the default JAM recipe (``t63-echam-jam``, M7; install the pinned
-m7-jax first with ``pip install -r tools/ci/extras_preinstall.txt``, see
-:doc:`advanced_features`), ``jcm[mam4]`` for the MAM4 JAM recipes (``t63-echam-jam-mam4``, ``ma-*``), ``jcm[pyses]`` for the CAM-SE
+``jcm[m7]`` for the default JAM recipe (``t63-echam-jam``, M7; m7-jax is not on
+PyPI yet, so install its pinned commit first with
+``pip install "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e"``,
+see :doc:`advanced_features`), ``jcm[mam4]`` for the MAM4 JAM recipes (``t63-echam-jam-mam4``, ``ma-*``), ``jcm[pyses]`` for the CAM-SE
 backend, ``jcm[cosp]`` for the COSP variant (after
 ``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``,
 since jax-cosp is not on PyPI yet) — and fail with a clear

@@ -93,6 +93,50 @@ sea-ice configuration is out of scope.
 ``turbulent_fluxes_test.py``, ``surface_types_test.py``. The ``pev_vdiff``
 delivered-equals-reported identity is exercised through the vdiff column tests.
 
+## Land and sea fractions
+
+**What we do.** Every surface scheme weights its land and sea parts by the
+terrain's land fraction ``fmask`` (``TerrainData.fmask``, the file's ``lsm``).
+When the terrain is built, a cell whose land fraction is at or below
+``terrain.fmask_threshold`` is made all sea and one whose sea fraction is at
+or below it is made all land (``jcm/terrain.py::get_terrain``); the default,
+``DEFAULT_FMASK_THRESHOLD`` = 0.1, means neither surface is resolved below a
+tenth of a cell. The threshold is a configuration key of every terrain that
+reads a mask (``terrain=auto``, ``from_file``, ``from_file_enveloped``) and an
+argument of ``TerrainData.from_coords``/``from_file``; it must lie in
+[0, 0.5]. At 0 every fraction is kept and the mask is only clipped to [0, 1].
+
+**Why it is adjustable.** `science` — the rounding changes the sea area the
+atmosphere exchanges with: cells with a sliver of sea have no sea tile, and
+cells with a sliver of land are all sea. An uncoupled run with prescribed SSTs
+does not notice. A coupled ocean on another grid does: its wet cells under an
+atmosphere cell rounded to land receive no sea flux, so a conservative map of
+the atmosphere's sea-tile fluxes cannot both close the budget and give every
+wet cell a flux. With the threshold at 0 and a land fraction derived from the
+ocean's wet mask, the atmosphere's sea area in each cell is the wet area
+under it and the plain conservative map does both.
+
+**Status & known limitations.** Resampling a mask onto the model grid
+(``terrain.interpolate: true``, and always in ``from_file_enveloped``) is not
+the identity on the file's own grid: it moves the mask by up to about 1e-4
+and leaves traces of land in open-ocean cells. The default threshold removes
+them; at 0 they survive, so a mask that must be reproduced exactly needs
+``terrain.interpolate: false`` as well. SPEEDY's slab land has its own lower
+bound, ``LandModelParameters.flandmin``, below which the land temperature
+stays the climatology whatever the threshold. The pySES backend builds its
+columns' mask from ``dycore.terrain_file`` itself
+(``jcm/dycore/pyses/dycore.py``), clipped to [0, 1] and never rounded, so the
+key does not apply there.
+
+**Code pointers.** ``jcm/terrain.py::get_terrain``,
+``jcm/runners.py::build_terrain``, ``jcm/config/terrain/from_file.yaml``.
+
+**Validation evidence.** ``jcm/terrain_test.py::TestGetTerrain`` (0 keeps
+every fraction, 0.5 is binary, out-of-range raises) and
+``TestTerrainDataFromFile`` (the packaged T30 mask is reproduced exactly with
+no resampling); ``jcm/runners_test.py::TestBuilders`` (the key reaches the
+built terrain under each kind).
+
 ## Two-metre temperature and humidity
 
 The tile diagnostics use the stability-corrected surface-layer profile of

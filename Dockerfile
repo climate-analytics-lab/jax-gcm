@@ -57,12 +57,13 @@ RUN pip install --no-cache-dir -e .
 
 # Replace the CPU JAX pulled in by requirements.txt with the CUDA 12
 # build. The cuda12 extra bundles the NVIDIA wheels JAX needs at runtime.
-# The version range MUST match the `jax` bound in requirements.txt (#853):
+# The version range MUST lie inside the `jax` bound in requirements.txt:
 # this is a separate `--upgrade` transaction, so an unconstrained spec here
-# would replace the constrained jax with the newest release — and the jax
-# 0.11 line breaks `import flax` (flax subclasses
-# `jax.experimental.hijax.HiPrimitive`, removed in 0.11), so the published
-# GPU image would fail `import jcm` despite the requirements bound.
+# would replace the constrained jax with the newest release, whatever
+# requirements.txt excludes. It is narrower than that bound on purpose: the
+# image ships the validated line, jax 0.10 (what this Python 3.11 resolves to
+# anyway), which also runs the T63 presets about 15 % faster on an A100 than
+# jax 0.12 (release notes, "The jax upper bound is gone").
 RUN pip install --no-cache-dir --upgrade "jax[cuda12]>=0.10,<0.11"
 
 # Run the JCM Hydra CLI by default. Anything passed after the image name on
