@@ -2,7 +2,7 @@
 # release notes and the design docs, not here.
 dinosaur>=1.5.0  # SL tracer core (#521) and the hybrid-level temperature fix
 flax>=0.12.1,!=0.12.9  # get_value() (#655); 0.12.9 imports a symbol no jax >= 0.11 has (#853)
-jax>=0.10  # validated on 0.10.2; 0.12 passes but runs ~15 % slower on A100
+jax>=0.10,!=0.12.1.*  # validated on 0.10.2; 0.12.1 fails 9 tests, excluded with its hotfixes as a stopgap (#1226)
 jax-datetime>=0.1.0
 tree-math
 hydra-core
@@ -21,5 +21,5 @@ myst-parser
 
 # Radiation
 jax-solar
-jax-rrtmgp>=0.7.0  # aerosol_free_fluxes, see the library's release notes
+jax-rrtmgp>=0.8.0  # compute_heating_rate_zc, the column-minor solve the radiation term calls; the 3.1 release-matrix bands are drawn on it
 huggingface_hub

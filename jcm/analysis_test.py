@@ -72,11 +72,25 @@ def test_global_mean_of_constant_is_the_constant_both_branches():
     np.testing.assert_allclose(float(global_mean(uni)), const)
 
 
-def test_global_mean_without_lat_is_unweighted():
-    # No lat coordinate -> plain unweighted mean over the horizontal dims.
+def test_global_mean_of_another_layout_names_its_dims():
+    # A layout that is neither CF-marked nor lat/lon is reduced over the dims
+    # the caller names; without lat the mean is unweighted.
     da = xr.DataArray(np.array([[1.0, 2.0], [3.0, 4.0]]),
                       dims=("x", "y"))
-    np.testing.assert_allclose(float(global_mean(da)), 2.5)
+    np.testing.assert_allclose(float(global_mean(da, dims=("x", "y"))), 2.5)
+    np.testing.assert_allclose(global_mean(da, dims="y").values, [1.5, 3.5])
+
+
+def test_global_mean_refuses_a_field_with_no_horizontal_dim():
+    # Unknown dims are never assumed horizontal: an x/y field, or a profile,
+    # raises instead of coming back unreduced or averaged over its depth.
+    with pytest.raises(ValueError, match="no horizontal dimension"):
+        global_mean(xr.DataArray(np.ones((2, 2)), dims=("x", "y")))
+    with pytest.raises(ValueError, match="no horizontal dimension"):
+        global_mean(xr.DataArray(np.ones((3,)), dims=("soil_layer",)))
+    with pytest.raises(ValueError, match="not dimensions of the field"):
+        global_mean(xr.DataArray(np.ones((2, 2)), dims=("lat", "lon")),
+                    dims=("x",))
 
 
 def test_global_mean_keeps_nonhorizontal_dims():
@@ -88,6 +102,70 @@ def test_global_mean_keeps_nonhorizontal_dims():
     gm = global_mean(da)
     assert gm.dims == ("time", "level")
     assert gm.shape == (2, 3)
+
+
+@pytest.mark.parametrize("axis", ["mode", "sw_band", "lw_band", "soil_layer",
+                                  "bounds", "surface", "sample", "column"])
+def test_global_mean_keeps_every_dim_that_is_not_lat_or_lon(axis):
+    # Only lat/lon are reduced: any other axis -- the physics output axes
+    # (aerosol modes, the per-band optics' bands, the SLIM soil column), the
+    # CF bounds axis, or one jcm has never written -- is kept and reduced
+    # slice by slice, so a soil profile stays a profile and a band spectrum a
+    # spectrum.
+    lats = _gauss_lats(8)
+    values = np.random.default_rng(0).normal(size=(2, 3, 8, 4))
+    da = xr.DataArray(values, dims=("time", axis, "lat", "lon"),
+                      coords={"lat": lats,
+                              "lon": np.linspace(0, 360, 4, endpoint=False)})
+    gm = global_mean(da)
+    assert gm.dims == ("time", axis)
+    _, gauss_w = np.polynomial.legendre.leggauss(8)
+    w = np.empty_like(gauss_w)
+    w[np.argsort(np.sin(np.deg2rad(lats)))] = gauss_w
+    expected = (values * w[:, None]).sum(axis=(2, 3)) / (w.sum() * 4)
+    np.testing.assert_allclose(gm.values, expected, rtol=1e-12)
+
+
+def test_global_mean_reads_the_cf_axis_attributes():
+    # The CF axis attribute decides, as finalize_output writes it on every
+    # backend's output: X/Y coordinates are reduced whatever they are called,
+    # and a coordinate that declares another axis is kept even if it is named
+    # like a horizontal one.
+    values = np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4)
+    da = xr.DataArray(
+        values, dims=("time", "yc", "xc"),
+        coords={"time": ("time", [0, 1], {"axis": "T"}),
+                "yc": ("yc", [0.0, 1.0, 2.0], {"axis": "Y"}),
+                "xc": ("xc", [0.0, 1.0, 2.0, 3.0], {"axis": "X"})})
+    gm = global_mean(da)
+    assert gm.dims == ("time",)
+    np.testing.assert_allclose(gm.values, values.mean(axis=(1, 2)))
+    lon_named_level = da.rename(xc="lon").assign_coords(
+        lon=("lon", [0.0, 1.0, 2.0, 3.0], {"axis": "Z"}))
+    assert global_mean(lon_named_level).dims == ("time", "lon")
+
+
+def test_global_mean_finds_the_horizontal_axes_of_model_output():
+    # finalize_output is the single entry point of every backend's to_xarray,
+    # so a dataset through it carries the CF axes global_mean reads: lon/lat
+    # are reduced (here under names global_mean would not guess), soil_layer
+    # and the per-band axis are kept.
+    from jcm.cf_metadata import finalize_output
+    lats = _gauss_lats(6)
+    rng = np.random.default_rng(1)
+    ds = finalize_output(xr.Dataset(
+        {"soil": (("time", "soil_layer", "lon", "lat"),
+                  rng.normal(size=(2, 3, 4, 6))),
+         "ext": (("time", "sw_band", "lon", "lat"),
+                 rng.normal(size=(2, 14, 4, 6)))},
+        coords={"time": np.array(["2000-01-01", "2000-01-02"],
+                                 dtype="datetime64[ns]"),
+                "lon": np.linspace(0, 360, 4, endpoint=False),
+                "lat": lats, "soil_layer": [1, 2, 3]}))
+    assert global_mean(ds["soil"]).dims == ("time", "soil_layer")
+    assert global_mean(ds["ext"]).dims == ("time", "sw_band")
+    renamed = ds["soil"].rename(lon="x", lat="y")
+    assert global_mean(renamed).dims == ("time", "soil_layer")
 
 
 def test_global_mean_keeps_plev_too():

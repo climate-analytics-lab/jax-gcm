@@ -151,8 +151,10 @@ The microphysics lives upstream in `reflective-org/M7-JAX` (BSD-3, alongside the
 HAMMOZ Consortium's BSD-3 M7 Fortran it is validated against) and is the
 `jcm[m7]` extra, pinned by version as `jcm[mam4]` pins `mam4-jax`. Until m7-jax
 0.2.0 is released every M7-JAX#1 build reports 0.2.0.dev0, so the version
-cannot select one: CI and the install instructions take the validated commit
-from `tools/ci/extras_preinstall.txt`. Version 0.2 widens the
+cannot select one: CI installs the validated commit from
+`tools/ci/extras_preinstall.txt`, and the install instructions and the error a
+missing core raises spell out the same commit (a test holds the copies equal).
+Version 0.2 widens the
 package from pure sulfate to the full HAM M7 state.
 
 ### Native state (per cell)
@@ -227,7 +229,7 @@ scheme's diagnostics) work unchanged on the M7 population.
 ### Precision
 
 `m7-jax` passes its full test suite on jax 0.10.2, the line jcm validates
-on (`jax>=0.10`), so the extra does not need a newer jax. The core runs in
+on, so the extra does not need a newer jax. The core runs in
 float64 by default, as `mam4-jax` does; a `core_dtype="float32"` forward-only
 option runs it in float32 under a scoped `jax.enable_x64(False)` with boundary
 casts.

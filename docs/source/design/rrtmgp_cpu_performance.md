@@ -28,8 +28,17 @@ does not transfer.
 
 ## What the code is
 
-`RRTMGPRadiation(column_block=...)` selects the column loop (static, no effect
-on the physics; Hydra `physics.terms.rrtmgp_radiation.column_block`, or
+Which program solves the columns comes first. With the default library
+placement the term solves all columns at once column-minor
+({ref}`column-minor-solve`), which on a single CPU
+device is fastest unblocked, so `"auto"` does not block it. The per-column
+vmap this page is about is the solver on a column axis sharded over several
+CPU devices, where its blocks below are the measured optimum and the
+column-minor solve has not been measured, and for any non-default placement.
+
+For the per-column solver, `RRTMGPRadiation(column_block=...)` selects the
+column loop (static, no effect on the physics; Hydra
+`physics.terms.rrtmgp_radiation.column_block`, or
 `physics.radiation_column_block` on the factory-built presets):
 
 - an integer B: `lax.map` over scan steps that each solve B columns per device;
