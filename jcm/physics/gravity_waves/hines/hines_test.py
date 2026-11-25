@@ -20,6 +20,10 @@ import pytest
 from jcm.physics.gravity_waves.hines import (
     HinesParameters, hines_gwd,
 )
+from jcm.physics.gravity_waves.hines.hines import (
+    _hines_integral_slope1, _rms_total_and_per_azimuth_8,
+    _trial_cutoff_wavenumber,
+)
 from jcm.testing import check_gradients
 
 
@@ -223,10 +227,12 @@ class TestHinesGradients:
     """AD against a central difference through the Hines column (#820).
 
     The scheme comes out clean wherever a wind spectrum exists. What it does
-    not survive is a column with *no* wind at all: the azimuthal sums at
-    ``hines.py:253-258`` take the square root of a quantity that is identically
-    0 when ``u = v = 0`` everywhere, so the launch spectrum is degenerate and
-    the response to a displacement is a jump rather than a slope. The
+    not survive is a column with *no* wind at all:
+    ``_project_winds_eight_azimuths`` floors each projected wind at 1 mm/s
+    with the wind's own sign (``copysign``), so where every relative wind is
+    0 any displacement flips the floors' signs, and the response is a jump of
+    the same size for a displacement of 1e-9 as of 1e-4 rather than a slope.
+    The
     gradients stay finite there — which is what matters for a model that can
     pass through a calm column — but no secant can be taken, and that is
     recorded rather than tuned away.
@@ -284,9 +290,9 @@ class TestHinesGradients:
 
     @pytest.mark.xfail(
         strict=True, raises=AssertionError,
-        reason="an identically calm column has no launch spectrum: the "
-               "azimuthal root-mean-square winds at hines.py:253-258 are "
-               "sqrt of a sum that is exactly 0 there, so displacing the "
+        reason="in an identically calm column every projected wind sits on "
+               "its 1 mm/s floor, whose sign (copysign) any displacement "
+               "flips, so displacing the "
                "column produces a jump and the secant grows as jump/eps at "
                "every rung (measured D doubling from 4.6e6 to 1.8e7 over the "
                "last two rungs). The gradients themselves stay finite. (#843)")
@@ -295,3 +301,91 @@ class TestHinesGradients:
         column = _make_column(nlev=30, u_scale=0.0, v_scale=0.0)
         check_gradients(self._scheme_fn(column, HinesParameters.default()),
                         self._args(column), rtol=1e-2)
+
+
+class TestHinesReverseModeGuards:
+    """Finite reverse-mode gradients where a branch's slope is unbounded.
+
+    Each site below discards, with a ``where`` or ``minimum``, a branch whose
+    derivative is infinite on the discarded lanes. The discarded value never
+    reaches the output, but its derivative does: the zero cotangent times the
+    infinite slope is NaN. The guards form each branch on a safe operand where
+    it is not selected and leave the selected values unchanged.
+    """
+
+    def test_dead_spectrum_root_has_zero_derivative(self):
+        """``sqrt`` of a squared amplitude that is exactly 0 (a dead level)."""
+        jac = jax.jacrev(_rms_total_and_per_azimuth_8)(jnp.zeros(8))
+        for leaf in jax.tree.leaves(jac):
+            np.testing.assert_array_equal(np.asarray(leaf), 0.0)
+
+        s = jnp.asarray(np.random.default_rng(0).exponential(size=8))
+        sigma_t, _ = _rms_total_and_per_azimuth_8(s)
+        assert float(sigma_t) == float(jnp.sqrt(jnp.sum(s)))
+
+        # A NaN reaching the scheme stays NaN, as through a plain sqrt.
+        sigma_t, sigma_alpha = _rms_total_and_per_azimuth_8(
+            jnp.full(8, jnp.nan))
+        assert jnp.isnan(sigma_t) and jnp.all(jnp.isnan(sigma_alpha))
+
+    def test_integral_differentiates_on_a_zeroed_strong_wind_lane(self):
+        """Cutoff floored at ``min_wavenumber`` under a 300 m/s projected wind.
+
+        ``q * min_wavenumber = 1.5`` puts the analytic branch's
+        ``1 - q * min_wavenumber`` below 0, on a lane whose integral is 0.
+        """
+        bv_freq, m_min = 0.02, 1e-4
+
+        def integral(wind):
+            return _hines_integral_slope1(wind, m_min, bv_freq, m_min)
+
+        value, slope = jax.value_and_grad(integral)(jnp.asarray(300.0))
+        assert float(value) == 0.0
+        assert float(slope) == 0.0
+
+    def test_trial_cutoff_matches_the_reference_selection(self):
+        """Same value as quotient -> where(<= 0) -> minimum; finite slope at D = 0."""
+        bv_freq, running_min = jnp.asarray(0.02), jnp.asarray(0.012)
+        rng = np.random.default_rng(1)
+        denominator = jnp.asarray(np.concatenate([
+            [0.0, -0.0, 1e-38, -1e-38, 1e-30, np.nan,
+             float(bv_freq / running_min), 1.6667, 1.6666],
+            rng.normal(0.0, 5.0, 500)]))
+
+        quotient = bv_freq / denominator
+        reference = jnp.minimum(
+            jnp.where(quotient <= 0.0, running_min, quotient), running_min)
+        np.testing.assert_array_equal(
+            np.asarray(_trial_cutoff_wavenumber(
+                bv_freq, denominator, running_min)),
+            np.asarray(reference))
+
+        finite = denominator[jnp.isfinite(denominator)]
+        slope = jax.vmap(jax.grad(_trial_cutoff_wavenumber, argnums=(0, 1, 2)),
+                         in_axes=(None, 0, None))(
+            bv_freq, finite, running_min)
+        for leaf in slope:
+            assert jnp.all(jnp.isfinite(leaf))
+
+    def test_column_with_a_dying_spectrum_has_finite_gradients(self):
+        """A 240 m/s jet at 50 km floors cutoffs at ``min_wavenumber``.
+
+        Where it does, the projected wind exceeds ``N / min_wavenumber``, so
+        ``1 - q * min_wavenumber <= 0`` on lanes the integral then zeroes, and
+        the analytic branch's log floor (``1e-300``, which is 0 in float32) is
+        ``log(0)`` there. Without the guard the temperature, zonal-wind and
+        density gradients of this column contain NaN. The failure is
+        float32's (the suite's precision): in float64 the floor is a finite
+        ``log(1e-300)``.
+        """
+        column = _make_column(nlev=47, u_scale=8.0, v_scale=0.0,
+                              jet_z=50000.0)
+        f = TestHinesGradients._scheme_fn(column, HinesParameters.default())
+        args = TestHinesGradients._args(column)
+        grads = jax.grad(
+            lambda *a: sum(jnp.sum(x ** 2) for x in f(*a)),
+            argnums=tuple(range(len(args))),
+        )(*args)
+        for name, grad in zip(("temperature", "u_wind", "v_wind", "density"),
+                              grads):
+            assert jnp.all(jnp.isfinite(grad)), f"d/d{name} is not finite"

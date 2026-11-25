@@ -97,8 +97,8 @@ frontogenesis source (ESCOMP/CAM ``cam_cesm2_2_rel``: ``gw_common.F90`` +
 - `differentiability` — a heating-bounded stability limiter (``limit_tendency_sum``,
   default on) caps ``Σ_l |gwut_l|`` rather than only the net, because ECHAM/CAM
   never operate this scheme with a lid layer as thin as ECHAM L47 (``ρ→0`` drives
-  ~123 K/day heating there); every masked division/sqrt keeps its safe operand
-  inside ``jnp.where`` for finite reverse-mode gradients.
+  ~123 K/day heating there); every masked division, square root and logarithm
+  keeps its safe operand inside ``jnp.where`` for finite reverse-mode gradients.
 - `compute` — the upper sponge is applied as a physics tendency in grid-point
   space on the zonal anomalies, after the physics rather than after the
   dynamics as ``uspnge`` is; the tendency is chosen so that one step reproduces
