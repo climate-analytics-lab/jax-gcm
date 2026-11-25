@@ -120,6 +120,27 @@ scheme does (`speedy_vdiff._pbl_moisture_flux`).
 The cloud cover and the one-moment microphysics use it as recorded in their
 science pages.
 
+The COSP satellite simulators (`jcm.physics.diagnostics.cosp_cloudsat`, the
+optional `cosp` extra) follow the same convention inside `jax-cosp`, whose
+`docs/gradients.md` lists the sites and widths. Every simulated cover,
+histogram and occurrence frequency is a count of subcolumns passing hard
+tests, with the reference value and a derivative of two kinds. A threshold on
+a continuous retrieved quantity (a detection limit, a reflectivity class, a
+histogram bin edge) has a logistic step's derivative. The SCOPS subcolumn
+sampler is not smoothed, because a subcolumn turning cloudy changes its
+optical depth by a finite amount: it returns a weight per subcolumn, exactly
+one in value, whose derivative is that of the log-probability of the
+subcolumn's cloud profile, and every count over subcolumns is weighted by it.
+That weight is the only route by which a simulated cover responds to the
+model cloud fraction. The radar, MODIS and ISCCP receive it from `jax-cosp`'s
+joint driver; the CALIPSO path calls the column stage itself and passes
+`subcolumn_weight` on, to `distribute_hydrometeors`, to `lidar_column` and to
+the valid-subcolumn count it forms for the pooled GOCCP cover. A statistic
+added there from per-subcolumn output has to be weighted the same way, or it
+keeps its value and has no derivative in the cloud fraction. The derivative
+estimates that of the expected diagnostic over SCOPS draws, not of the sampled
+one, with sampling noise that averages down over gridpoints and time steps.
+
 SPEEDY's switches use it through the helpers of
 `jcm.physics.speedy.smoothing` (`surrogate_gate`, `surrogate_pos`,
 `surrogate_min`, `surrogate_max`, `surrogate_clip01`, `surrogate_sqrt`), each
