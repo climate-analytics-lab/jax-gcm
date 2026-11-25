@@ -44,7 +44,7 @@ import pathlib
 import re
 import sys
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 
 import numpy as np
 import xarray as xr
@@ -54,11 +54,9 @@ from jcm.cmor_converter import (
     CMOR_META,
     FX_VARS,
     PLEV_VARS,
-    compute_areacella,
     date_ymd,
     extract_direct_variable,
     extract_plev_variable,
-    extract_sftlf,
     extract_tas,
     get_time_bounds,
     median_step_days,
@@ -277,9 +275,21 @@ def convert_dataset(
     written: list[str] = []
     missing: list[str] = []
 
-    # Stream one variable at a time to keep peak memory low on long runs.
+    # Stream one variable at a time (time-varying first, then fx) to keep peak
+    # memory low on long runs.
     non_fx_targets = sorted(v for v in target_vars if v not in FX_VARS)
-    for cmor in non_fx_targets:
+    fx_targets: list[str] = []
+    if write_fx:
+        if fx_vars_filter is not None:
+            fx_targets = sorted(v for v in fx_vars_filter if v in FX_VARS)
+        elif explicit_vars:
+            fx_targets = sorted(v for v in target_vars if v in FX_VARS)
+        else:
+            fx_targets = sorted(FX_VARS)
+
+    work_items = [(v, table) for v in non_fx_targets] + [(v, "fx") for v in fx_targets]
+    for cmor, tbl in work_items:
+        is_fx = tbl == "fx"
         if cmor in PLEV_VARS:
             da = extract_plev_variable(
                 ds, cmor, effective_plevs, subset_preinterp=explicit_plevs
@@ -289,48 +299,21 @@ def convert_dataset(
         if da is None:
             missing.append(cmor)
             continue
-        fname = cmor_filename(cmor, table, model, experiment, member, grid_label, date_stamp)
+        fname = cmor_filename(
+            cmor, tbl, model, experiment, member, grid_label,
+            None if is_fx else date_stamp,
+        )
         written.append(
             write_cmor_variable(
                 da,
                 cmor=cmor,
                 target=outdir / fname,
-                global_attrs=_global_attrs(cmor, table, frequency),
-                table=table,
-                time_bounds=time_bounds,
+                global_attrs=_global_attrs(cmor, tbl, "fx" if is_fx else frequency),
+                table=tbl,
+                time_bounds=None if is_fx else time_bounds,
                 dry_run=dry_run,
             )
         )
-
-    if write_fx:
-        if fx_vars_filter is not None:
-            fx_targets = sorted(v for v in fx_vars_filter if v in FX_VARS)
-        elif explicit_vars:
-            fx_targets = sorted(v for v in target_vars if v in FX_VARS)
-        else:
-            fx_targets = sorted(FX_VARS)
-
-        fx_extractors: dict[str, Callable[[xr.Dataset], xr.DataArray | None]] = {
-            "sftlf": extract_sftlf,
-            "areacella": compute_areacella,
-        }
-        for cmor in fx_targets:
-            da = fx_extractors[cmor](ds)
-            if da is None:
-                missing.append(cmor)
-                continue
-            fname = cmor_filename(cmor, "fx", model, experiment, member, grid_label)
-            written.append(
-                write_cmor_variable(
-                    da,
-                    cmor=cmor,
-                    target=outdir / fname,
-                    global_attrs=_global_attrs(cmor, "fx", "fx"),
-                    table="fx",
-                    time_bounds=None,
-                    dry_run=dry_run,
-                )
-            )
 
     if missing_out is not None:
         missing_out.extend(sorted(missing))

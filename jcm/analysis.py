@@ -39,6 +39,7 @@ import numpy as np
 import xarray as xr
 
 import jcm.constants as c
+from jcm.cf_metadata import PLEV_COORD_ATTRS
 from jcm.physics.clouds.cloud_overlap import max_random_cover
 
 #: Dimensions that are never horizontal. The horizontal dims of a field are
@@ -95,6 +96,42 @@ def area_weights(lat) -> xr.DataArray:
     else:
         weights = np.cos(np.deg2rad(lat_deg))
     return xr.DataArray(weights, dims=("lat",))
+
+
+def cell_area(ds: xr.Dataset) -> xr.DataArray:
+    """Grid-cell horizontal area [m²] on a ``(lat, lon)`` spherical grid.
+
+    Dimensional counterpart to :func:`area_weights`: distributes the model
+    sphere ``4π·rearth²`` (:data:`jcm.constants.rearth`, read live so
+    :func:`jcm.constants.set_constants` overrides are honoured) across latitude
+    bands by :func:`area_weights` and uniformly across ``lon``. Returns a
+    float64 DataArray with dims ``("lat", "lon")``, CF ``standard_name="cell_area"``
+    and ``units="m2"``, whose sum equals ``4π·rearth²`` to floating-point rounding.
+    """
+    if "lat" not in ds.coords or "lon" not in ds.coords:
+        raise ValueError(
+            "cell_area requires both 'lat' and 'lon' coordinates on ds."
+        )
+    lat = ds.coords["lat"]
+    lon = ds.coords["lon"]
+    w = area_weights(lat)
+    w_norm = w / w.sum()
+    total_area_m2 = 4.0 * np.pi * c.rearth**2
+    cell_area_by_lat = w_norm.values * (total_area_m2 / lon.size)
+    area_2d = np.broadcast_to(
+        cell_area_by_lat[:, None], (lat.size, lon.size)
+    ).astype(np.float64)
+    return xr.DataArray(
+        area_2d,
+        coords={"lat": lat, "lon": lon},
+        dims=("lat", "lon"),
+        name="areacella",
+        attrs={
+            "standard_name": "cell_area",
+            "long_name": "Grid-Cell Area for Atmospheric Grid Variables",
+            "units": "m2",
+        },
+    )
 
 
 def global_mean(da: xr.DataArray, weights: xr.DataArray | None = None,
@@ -583,13 +620,7 @@ def to_pressure_levels(ds: xr.Dataset, levels_hpa) -> xr.Dataset:
 
     out = xr.Dataset(data_vars, attrs=dict(ds.attrs))
     out = out.assign_coords(plev=("plev", target_pa))
-    out["plev"].attrs = {
-        "standard_name": "air_pressure",
-        "long_name": "pressure",
-        "units": "Pa",
-        "positive": "down",
-        "axis": "Z",
-    }
+    out["plev"].attrs = dict(PLEV_COORD_ATTRS)
     return out
 
 

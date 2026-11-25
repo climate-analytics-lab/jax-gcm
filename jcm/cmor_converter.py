@@ -18,8 +18,8 @@ Design choices
   ``areacella``, ``prw``, and ``zg`` stay consistent with the model's sphere
   and honour :func:`jcm.constants.set_constants`.
 * **CF coordinates from :mod:`jcm.cf_metadata`:** Standard ``lat``/``lon``/
-  ``time`` coordinate attributes come from :func:`jcm.cf_metadata.apply_cf_attributes`
-  rather than being re-tabled here.
+  ``time``/``plev`` coordinate attributes come from
+  :func:`jcm.cf_metadata.apply_cf_attributes` rather than being re-tabled here.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ import numpy as np
 import xarray as xr
 
 import jcm.constants as c
-from jcm.analysis import area_weights, column_burden, to_pressure_levels
+from jcm.analysis import cell_area, column_burden, to_pressure_levels
 from jcm.cf_metadata import apply_cf_attributes
 from jcm.physics.surface.echam.surface_types import DIAG_TILE_NAMES
 
@@ -206,15 +206,10 @@ CLT_SOURCES: tuple[str, ...] = (
     "shortwave_rad.cloudc",
 )
 
-#: Canonical direct 2 m air-temperature sources (highest priority first).
-TAS_SOURCES: tuple[str, ...] = (
-    "surface.temperature_2m",
-    "aerocom_tas",
-)
-
 #: Direct JCM -> CMOR source mappings with fallback priority (first present wins):
 #: ``cmor_name -> ((jcm_name, scale), ...)``.
 DIRECT_SOURCES: dict[str, tuple[tuple[str, float], ...]] = {
+    "tas": (("surface.temperature_2m", 1.0), ("aerocom_tas", 1.0)),
     "ts": (("surface.surface_temperature", 1.0), ("surface.skin_temperature", 1.0)),
     "evspsbl": (
         ("surface.evaporation", 1.0),
@@ -236,6 +231,7 @@ DIRECT_SOURCES: dict[str, tuple[tuple[str, float], ...]] = {
     "rsus": (("radiation.surface_sw_up", 1.0),),
     "rlds": (("radiation.surface_lw_down", 1.0), ("surface_exchange.downward_longwave_flux", 1.0)),
     "rlus": (("radiation.surface_lw_up", 1.0),),
+    "prw": (("aerocom_prw", 1.0),),
     "ps": (("surface_pressure", 1.0), ("surface_exchange.surface_pressure", 1.0)),
     "psl": (("aerocom_psl", 1.0),),
     "huss": (("surface.humidity_2m", 1.0),),
@@ -276,15 +272,53 @@ def is_percent_units(da: xr.DataArray) -> bool:
     return units in ("%", "percent")
 
 
+def source_scale(cmor: str, src: str, base_scale: float = 1.0) -> float:
+    """Return the multiplicative JCM->CMOR scale factor for ``(cmor, src)``.
+
+    Reads ``jcm.constants.grav`` live on every call so overrides applied via
+    :func:`jcm.constants.set_constants` after module import are honoured.
+    """
+    if src == "geopotential":
+        return 1.0 / c.grav
+    if cmor == "hur":
+        return 100.0
+    return base_scale
+
+
+def scale_source_dataarray(
+    da: xr.DataArray,
+    cmor: str,
+    src: str,
+    base_scale: float = 1.0,
+    offset: float = 0.0,
+) -> xr.DataArray:
+    """Apply live unit scaling (avoiding double ``%`` scaling) and offset to ``da``."""
+    scale = source_scale(cmor, src, base_scale)
+    if scale == 100.0 and is_percent_units(da):
+        scale = 1.0
+    if scale != 1.0:
+        da = da * scale
+    if offset != 0.0:
+        da = da + offset
+    return da
+
+
+def _lookup_direct(ds: xr.Dataset, cmor: str) -> xr.DataArray | None:
+    for src, scale in DIRECT_SOURCES.get(cmor, ()):
+        if src in ds.data_vars:
+            return scale_source_dataarray(ds[src], cmor, src, scale)
+    return None
+
+
 def extract_tas(
     ds: xr.Dataset,
     *,
     allow_lowest_level_fallback: bool = True,
 ) -> xr.DataArray | None:
     """Extract 2 m air temperature ``tas``, optionally falling back to lowest model level."""
-    for key in TAS_SOURCES:
-        if key in ds.data_vars:
-            return ds[key]
+    direct = _lookup_direct(ds, "tas")
+    if direct is not None:
+        return direct
     if (
         allow_lowest_level_fallback
         and "temperature" in ds.data_vars
@@ -361,8 +395,9 @@ def extract_pr(ds: xr.Dataset) -> xr.DataArray | None:
 
 def extract_prw(ds: xr.Dataset) -> xr.DataArray | None:
     """Extract column water vapor path ``prw`` [kg m-2]."""
-    if "aerocom_prw" in ds.data_vars:
-        return ds["aerocom_prw"]
+    direct = _lookup_direct(ds, "prw")
+    if direct is not None:
+        return direct
     if "specific_humidity" not in ds.data_vars or "level" not in ds["specific_humidity"].dims:
         return None
     if "pressure_thickness" not in ds.data_vars and "pressure_half" not in ds.data_vars:
@@ -392,23 +427,14 @@ def extract_sftlf(ds: xr.Dataset) -> xr.DataArray | None:
         return None
     if "time" in da.dims:
         da = da.isel(time=0, drop=True)
-    if not is_percent_units(da):
-        da = da * 100.0
-    return da.clip(0.0, 100.0)
+    return scale_source_dataarray(da, "sftlf", "sftlf", 100.0).clip(0.0, 100.0)
 
 
 def compute_areacella(ds: xr.Dataset) -> xr.DataArray | None:
-    """Compute exact spherical grid-cell areas ``areacella`` [m2] using ``jcm.constants.rearth``."""
+    """Compute spherical grid-cell areas ``areacella`` [m2] via :func:`jcm.analysis.cell_area`."""
     if "lat" not in ds.coords or "lon" not in ds.coords:
         return None
-    lat = ds.coords["lat"]
-    lon = ds.coords["lon"]
-    w = area_weights(lat)
-    w_norm = w / w.sum()
-    total_area_m2 = 4.0 * np.pi * c.rearth**2
-    cell_area_by_lat = w_norm.values * (total_area_m2 / lon.size)
-    area_2d = np.broadcast_to(cell_area_by_lat[:, None], (lat.size, lon.size)).astype(np.float64)
-    return xr.DataArray(area_2d, coords={"lat": lat, "lon": lon}, dims=("lat", "lon"))
+    return cell_area(ds)
 
 
 DERIVED_EXTRACTORS: dict[str, Callable[[xr.Dataset], xr.DataArray | None]] = {
@@ -416,6 +442,8 @@ DERIVED_EXTRACTORS: dict[str, Callable[[xr.Dataset], xr.DataArray | None]] = {
     "clt": extract_clt,
     "pr": extract_pr,
     "prw": extract_prw,
+    "sftlf": extract_sftlf,
+    "areacella": compute_areacella,
 }
 
 
@@ -427,9 +455,9 @@ def shared_source_entries(
     """Build a first-present-wins ``jcm_src -> (cmor, units, vert, scale, offset)`` table.
 
     Covers every CMOR variable in ``vert_by_cmor`` using the canonical fallback
-    priority in :data:`DIRECT_SOURCES`, :data:`PLEV_SOURCE_CANDIDATES`,
-    :data:`CLT_SOURCES`, and :data:`TAS_SOURCES` so downstream exporters share
-    the exact same source priority without duplicating mappings.
+    priority in :data:`DIRECT_SOURCES`, :data:`PLEV_SOURCE_CANDIDATES`, and
+    :data:`CLT_SOURCES` so downstream exporters share the exact same source
+    priority without duplicating mappings.
     """
     overrides = units_overrides or {}
     out: dict[str, tuple[str, str, str, float, float]] = {}
@@ -443,20 +471,9 @@ def shared_source_entries(
             scale = 1.0 if overrides.get("clt") == "1" else 100.0
             for src in CLT_SOURCES:
                 _add(cmor, src, scale)
-        elif cmor == "tas":
-            for src in TAS_SOURCES:
-                _add(cmor, src, 1.0)
-        elif cmor == "prw":
-            _add(cmor, "aerocom_prw", 1.0)
         elif cmor in PLEV_SOURCE_CANDIDATES:
             for src in PLEV_SOURCE_CANDIDATES[cmor]:
-                if cmor == "hur":
-                    scale = 100.0
-                elif src == "geopotential":
-                    scale = 1.0 / c.grav
-                else:
-                    scale = 1.0
-                _add(cmor, src, scale)
+                _add(cmor, src, source_scale(cmor, src))
         elif cmor in DIRECT_SOURCES:
             for src, scale in DIRECT_SOURCES[cmor]:
                 _add(cmor, src, scale)
@@ -464,14 +481,10 @@ def shared_source_entries(
 
 
 def extract_direct_variable(ds: xr.Dataset, cmor: str) -> xr.DataArray | None:
-    """Extract a 2D/derived CMOR variable from ``ds`` using the shared mappings."""
+    """Extract a 2D, derived, or fixed (``fx``) CMOR variable from ``ds``."""
     if cmor in DERIVED_EXTRACTORS:
         return DERIVED_EXTRACTORS[cmor](ds)
-    for src, scale in DIRECT_SOURCES.get(cmor, ()):
-        if src in ds.data_vars:
-            da = ds[src]
-            return da * scale if scale != 1.0 else da
-    return None
+    return _lookup_direct(ds, cmor)
 
 
 def extract_plev_variable(
@@ -527,11 +540,7 @@ def extract_plev_variable(
     else:
         return None
 
-    if cmor == "hur" and not is_percent_units(da):
-        da = da * 100.0
-    elif src == "geopotential":
-        da = da / c.grav
-    return da
+    return scale_source_dataarray(da, cmor, src)
 
 
 def date_ymd(val) -> tuple[int, int, int]:
@@ -664,12 +673,6 @@ def apply_cmor_coord_attrs(out: xr.Dataset) -> None:
             out["time"].attrs["bounds"] = "time_bounds"
             out["time_bounds"].attrs.pop("units", None)
             out["time_bounds"].attrs.pop("calendar", None)
-    if "plev" in out.coords:
-        out["plev"].attrs.setdefault("standard_name", "air_pressure")
-        out["plev"].attrs.setdefault("long_name", "pressure")
-        out["plev"].attrs["units"] = "Pa"
-        out["plev"].attrs.setdefault("positive", "down")
-        out["plev"].attrs.setdefault("axis", "Z")
 
 
 def time_encoding(out: xr.Dataset) -> dict[str, dict]:

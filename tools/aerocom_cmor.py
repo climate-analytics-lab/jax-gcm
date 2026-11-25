@@ -35,9 +35,9 @@ import sys
 
 import xarray as xr
 
-import jcm.constants as c
 from jcm.cmor_converter import (
     CF_STANDARD_NAMES,
+    scale_source_dataarray,
     shared_source_entries,
     validate_token,
     write_cmor_variable,
@@ -570,11 +570,8 @@ def convert(
             continue
         # First-present wins (matching ``jcm.cmor_converter``), so a preferred
         # field (e.g. height_full for zg, dry sensible heat for hfss, exact-
-        # wavelength od550aer) beats lower-priority fallbacks. Read live
-        # ``c.grav`` on call so ``jcm.constants.set_constants`` overrides
-        # after import are honoured.
-        scale_val = (1.0 / c.grav) if src == "geopotential" else scale
-        da = ds[src] * scale_val + offset
+        # wavelength od550aer) beats lower-priority fallbacks.
+        da = scale_source_dataarray(ds[src], cmor, src, scale, offset)
         candidates[cmor] = (da, units, vert)
     for name, da in _collect_burdens(ds).items():
         candidates[name] = (da, "kg m-2", "Column")
