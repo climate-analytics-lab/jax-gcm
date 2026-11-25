@@ -165,7 +165,7 @@ level *index* for ECHAM's grids, and those tables remain the answer for the
 built-in L47/L95 (the transition levels sit at the pressures ``sudif``
 annotates, which a test pins). A user table has no index table of its own, so
 each of its levels takes the order of the ECHAM level nearest it in log
-reference pressure (mid-level ``a_c + b_c·101325 Pa``;
+reference pressure (mid-level ``a_c + b_c·p0s1_bg``, 101325 Pa by default;
 ``jcm/diffusion.py::_orders_by_reference_pressure``). The orders are a property
 of where in the column the damping is needed rather than of an index, so a
 thinned troposphere or a coarsened mesosphere keeps the damping each

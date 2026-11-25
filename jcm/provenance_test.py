@@ -136,6 +136,14 @@ class GitProbeRobustnessTest(unittest.TestCase):
                 entry = self._probe(repo)
         self.assertEqual(entry["dirty"], "unknown")
 
+    def test_summary_marks_an_unknown_tree_as_neither_clean_nor_dirty(self):
+        sha = "0123456789abcdef"
+        for dirty, tail in ((True, "+dirty"), (False, ""), ("unknown", "+dirty?")):
+            code = {"jcm": {"sha": sha, "dirty": dirty}}
+            with mock.patch.object(provenance, "probe_code", return_value=code):
+                self.assertTrue(provenance.summary().startswith(
+                    f"jcm={sha[:8]}{tail};"), dirty)
+
     def test_failed_diff_is_recorded_in_the_fingerprint(self):
         with tempfile.TemporaryDirectory() as d:
             repo = _git_repo(Path(d) / "repo", tracked={

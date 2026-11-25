@@ -39,7 +39,7 @@ from jcm.forcing import (
     ForcingData, BY_DATE, WRAP_YEAR, TimeSeries, _host_epoch_seconds,
     make_time_series)
 from jcm.physics.composable_physics import ComposablePhysics
-from jcm.physics.coords_util import column_lat_lon
+from jcm.physics.coords_util import column_lat_lon, reference_pressure_pa
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
@@ -278,21 +278,6 @@ class NudgingConfig:
         )
 
 
-def reference_pressure_pa(vertical):
-    """Return the reference mid-level pressure (Pa), ``(nlev,)``, TOA first.
-
-    Hybrid coordinates (``a_centers``/``b_centers``) and sigma coordinates
-    (``centers``) are both evaluated at a standard surface pressure of
-    101325 Pa. This is the one definition of "the level's pressure" shared by
-    the per-level ``min_pressure_hpa`` mask and the latitude-dependent top
-    (:class:`LatTop`), so the two can never disagree about which level is which.
-    """
-    if hasattr(vertical, "a_centers"):
-        return (np.asarray(vertical.a_centers)
-                + np.asarray(vertical.b_centers) * 101325.0)
-    return np.asarray(vertical.centers) * 101325.0
-
-
 def inv_tau_profile(vertical, *, tau_hours: float = 6.0,
                     min_pressure_hpa: float = 60.0,
                     pbl_levels: int = 0):
@@ -305,8 +290,8 @@ def inv_tau_profile(vertical, *, tau_hours: float = 6.0,
 
     ``vertical`` is a dycore vertical-coordinate object; hybrid coordinates
     (``a_centers``/``b_centers``) and sigma coordinates (``centers``) are
-    both handled by evaluating reference mid-level pressures at a standard
-    surface pressure of 101325 Pa.
+    both handled by evaluating reference mid-level pressures at the standard
+    surface pressure (:func:`jcm.physics.coords_util.reference_pressure_pa`).
 
     Returns the ``(nlev,)`` inverse-timescale array (per second).
     """

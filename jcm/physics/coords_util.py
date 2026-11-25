@@ -13,6 +13,9 @@ reproduces the exact legacy meshgrid convention otherwise.
 """
 
 import jax.numpy as jnp
+import numpy as np
+
+import jcm.constants as c
 
 
 def column_lat_lon(horizontal):
@@ -45,3 +48,25 @@ def column_lat_lon(horizontal):
 
     lat_2d, lon_2d = jnp.meshgrid(lat, lon)
     return lat_2d.reshape(-1), lon_2d.reshape(-1)
+
+
+def reference_pressure_pa(vertical) -> np.ndarray:
+    """Return each full level's reference pressure (Pa), ``(nlev,)``, top first.
+
+    The pressure of the level's mid-point under the standard surface pressure
+    ``constants.p0s1_bg``: ``a_centers + b_centers * p0`` on a hybrid
+    coordinate, ``centers * p0`` on a sigma one. This is the one definition
+    of "the pressure of a level" for every static, build-time choice keyed on
+    it (the nudging profile's masks and latitude-dependent top, the Hines
+    launch level given as a pressure, the hyperdiffusion orders mapped onto a
+    user level table), so they cannot disagree about which level is which. It
+    is not the pressure of any simulated column.
+
+    Evaluated in float64: the callers compare and rank these pressures, and
+    the built-in tables are stored in float32.
+    """
+    p0 = float(c.p0s1_bg)
+    if hasattr(vertical, "a_centers"):
+        return (np.asarray(vertical.a_centers, dtype=np.float64)
+                + np.asarray(vertical.b_centers, dtype=np.float64) * p0)
+    return np.asarray(vertical.centers, dtype=np.float64) * p0

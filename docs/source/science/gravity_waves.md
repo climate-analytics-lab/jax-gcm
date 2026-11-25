@@ -13,7 +13,7 @@ plus two upper-boundary dissipation terms:
   (ECHAM's ``emiss_lev``, ``mo_gw_hines`` namelist; default 10, which is
   ~634 hPa on L95), or ``launch_pressure_hpa``, resolved once in ``cache_coords``
   to the nearest full level at the reference surface pressure
-  (``constants.p0s1_bg``, the convention of the nudging profile). The pressure form
+  (``constants.p0s1_bg``, the one definition the nudging profile shares). The pressure form
   keeps the launch height fixed on vertical tables whose troposphere is thinned
   relative to ECHAM's, where ten levels can reach the stratosphere (~126 hPa).
   Giving both is an error, a pressure outside the launchable range raises with

@@ -753,8 +753,9 @@ def launch_level_from_pressure(vertical, launch_pressure_hpa: float) -> int:
     in). The reference pressure of a level is
     ``a_centers + b_centers * p0s1_bg`` for a hybrid coordinate and
     ``centers * p0s1_bg`` for a sigma coordinate, i.e. the level's pressure
-    at the standard surface pressure ``constants.p0s1_bg``, as in
-    :func:`jcm.nudging.inv_tau_profile`.
+    at the standard surface pressure ``constants.p0s1_bg``
+    (:func:`jcm.physics.coords_util.reference_pressure_pa`, the definition
+    the nudging profile and the hyperdiffusion mapping share).
 
     Args:
         vertical: dycore vertical-coordinate object (``a_centers`` /
@@ -772,13 +773,9 @@ def launch_level_from_pressure(vertical, launch_pressure_hpa: float) -> int:
 
     """
     import numpy as np
-    p0 = float(_physical_constants.p0s1_bg)
-    if hasattr(vertical, "a_centers"):
-        p_ref = (np.asarray(vertical.a_centers)
-                 + np.asarray(vertical.b_centers) * p0)
-    else:
-        p_ref = np.asarray(vertical.centers) * p0
-    p_hpa = p_ref / 100.0
+
+    from jcm.physics.coords_util import reference_pressure_pa
+    p_hpa = reference_pressure_pa(vertical) / 100.0
     nlev = p_hpa.size
     lo, hi = float(p_hpa[0]), float(p_hpa[nlev - 2])
     p = float(launch_pressure_hpa)
@@ -788,7 +785,7 @@ def launch_level_from_pressure(vertical, launch_pressure_hpa: float) -> int:
             f"this vertical grid can launch from: {lo:.4g} hPa (top full "
             f"level) to {hi:.4g} hPa (second-lowest full level; the scheme "
             f"needs a layer below the launch level), at the reference "
-            f"surface pressure {p0 / 100.0:g} hPa."
+            f"surface pressure {float(_physical_constants.p0s1_bg) / 100.0:g} hPa."
         )
     idx = int(np.argmin(np.abs(p_hpa - p)))
     return nlev - idx - 1

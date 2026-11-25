@@ -16,7 +16,9 @@ The inverse timescale `inv_tau` is a per-level array. Three things shape it:
   responds freely.
 - `min_pressure_hpa` sets it to zero for every level whose *reference* pressure
   is below it. The reference pressure of a level is its mid-level pressure at a
-  standard surface pressure of 101325 Pa (`jcm.nudging.reference_pressure_pa`),
+  standard surface pressure of `constants.p0s1_bg`, 101325 Pa by default
+  (`jcm.physics.coords_util.reference_pressure_pa`, which the Hines launch
+  pressure and the hyperdiffusion mapping onto a user level table also use),
   for hybrid and sigma coordinates alike. The WeatherBench2 13-level ERA5 stores
   stop at 50 hPa and clamp above it, so relaxing the stratosphere toward them
   would drag it to the 50 hPa values; this is the hard floor.

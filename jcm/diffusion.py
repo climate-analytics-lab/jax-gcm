@@ -136,8 +136,9 @@ def _orders_by_reference_pressure(truncation: int, levels) -> jnp.ndarray:
     (:data:`_ECHAM_LMIDATM_ORDERS`), so a table that is not one of those grids
     has no entry of its own. Its levels are given the order of the ECHAM level
     that lies at the same pressure: each level's mid-point pressure at the
-    reference surface pressure (``a_centers + b_centers * p_ref``, the pressure
-    jcm assigns a full level everywhere) is matched to the nearest ECHAM
+    reference surface pressure
+    (:func:`jcm.physics.coords_util.reference_pressure_pa`, the pressure jcm
+    assigns a full level everywhere) is matched to the nearest ECHAM
     mid-level in log pressure. The orders are properties of height in the
     atmosphere (the strongest damping where the modes of the top levels need
     it), which a level index only stands for on ECHAM's own grid, so a
@@ -157,8 +158,8 @@ def _orders_by_reference_pressure(truncation: int, levels) -> jnp.ndarray:
     """
     import numpy as np
 
-    from jcm.physics.echam.echam_levels import (
-        REFERENCE_SURFACE_PRESSURE_PA, get_echam_levels)
+    from jcm.physics.coords_util import reference_pressure_pa
+    from jcm.physics.echam.echam_levels import get_echam_levels
 
     nearest = _nearest_tabulated_truncation(
         truncation, {nn for nn, _ in _ECHAM_LMIDATM_ORDERS})
@@ -166,13 +167,8 @@ def _orders_by_reference_pressure(truncation: int, levels) -> jnp.ndarray:
     source_orders = np.asarray(_expand_orders(
         _ECHAM_LMIDATM_ORDERS[(nearest, source_layers)]), dtype=np.int32)
 
-    def mid_pressure(hybrid):
-        return (np.asarray(hybrid.a_centers, dtype=np.float64)
-                + np.asarray(hybrid.b_centers, dtype=np.float64)
-                * REFERENCE_SURFACE_PRESSURE_PA)
-
-    p_source = mid_pressure(get_echam_levels(source_layers))
-    p_user = mid_pressure(levels)
+    p_source = reference_pressure_pa(get_echam_levels(source_layers))
+    p_user = reference_pressure_pa(levels)
     distance = np.abs(np.log(p_user[:, None]) - np.log(p_source[None, :]))
     return jnp.asarray(source_orders[np.argmin(distance, axis=1)], dtype=jnp.int32)
 

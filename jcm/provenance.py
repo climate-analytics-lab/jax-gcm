@@ -107,6 +107,10 @@ _PARAM_MAX_DEPTH = 6
 _PROBE_ERRORS = (OSError, ValueError, RuntimeError, KeyError,
                  subprocess.SubprocessError)
 
+#: How :func:`summary` marks a tree's ``dirty`` value: ``"unknown"`` (git
+#: status failed) is neither clean nor dirty, and the log line says so.
+_DIRTY_SUFFIX = {True: "+dirty", "unknown": "+dirty?"}
+
 _state: dict = {"base": None, "inputs": {}, "facts": {}}
 
 
@@ -655,7 +659,7 @@ def summary() -> str:
     code = probe_code()
     env = probe_environment()
     shas = ", ".join(
-        f"{k}={v['sha'][:8]}{'+dirty' if v.get('dirty') else ''}"
+        f"{k}={v['sha'][:8]}{_DIRTY_SUFFIX.get(v.get('dirty'), '')}"
         for k, v in code.items() if v.get("sha"))
     ozone = _state["facts"].get("ozone_source", "?")
     return (f"{shas or 'no git trees'}; "
