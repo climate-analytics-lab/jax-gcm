@@ -155,6 +155,15 @@ imports the core's process modules and its structure-of-arrays entry points,
 which upstream does not version as public API. Version 0.2 widens the package
 from pure sulfate to the full HAM M7 state.
 
+The adapter calls `m7_jax.model.step_all_soa`, the cell-minor form of the
+`m7` call: the 18 mass, 7 number and gas fields go in and come back as
+separate `(nlev, *horiz)` arrays, so no trailing component axis is packed,
+sliced or (on TPU) padded to the minor tile. The κ and Kazil–Lovejoy tables
+are transposed and flattened once, at construction, into the core's working
+dtype for 1-D gathers. Optional cell chunking is the shared JAM mechanism
+({doc}`jam`, "Core execution"). The per-cell tables below describe one
+cell's slice of those fields.
+
 ### Native state (per cell)
 
 | field | shape | units | content |

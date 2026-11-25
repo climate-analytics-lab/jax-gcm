@@ -55,6 +55,21 @@ swappable microphysics core, expressed in JCM's composable architecture:
     equilibrium radii/density with **zero tendency** on the MAM4 / M7
     population: the bare `echam_physics()` default and test vehicle, keeping
     the Apache-2.0 harness importable with no optional dependency.
+- **Core execution** (`microphysics/base.py`, `ModalMicrophysicsTerm`): the
+  two package cores share how they run, as distinct from what they compute.
+  `enable_x64` sets the global precision and `core_dtype` the core's own
+  (a forward-only float32 path under a scoped `jax.enable_x64(False)`).
+  `chunk_size` (a `jam_microphysics_options` key, else the
+  `M7_JAX_CHUNK_SIZE`/`MAM4_JAX_CHUNK_SIZE` or `JAM_MICROPHYSICS_CHUNK_SIZE`
+  environment variable) tiles the grid's cells into fixed blocks integrated
+  under `jax.lax.scan` with `jax.checkpoint`, so a reverse pass holds one
+  block's intermediates instead of the whole grid's: an order of magnitude
+  less temporary device memory for a gradient, for a slower forward step.
+  Neither core couples cells, so chunking changes results only by
+  floating-point reassociation. It is off by default, the fastest forward
+  configuration; turn it on for gradients that would not otherwise fit. A
+  core fetches and clamps only its own tracers (`working_tracers(names=...)`),
+  not the whole tracer set.
 - **Tracers** (`tracer_layout.py`): interstitial aerosol mass and number are
   ordinary `state.tracers` entries (`m_`/`n_`, keyed by aerosol class), so the
   dynamical core transports them and existing diagnostics work. The

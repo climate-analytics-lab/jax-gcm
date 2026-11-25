@@ -22,6 +22,23 @@ Bug fixes
   whatever it has. The release gates and regression bands average only
   ``lat``/``lon`` fields and are unchanged.
 
+Performance
+^^^^^^^^^^^
+
+- **The JAM microphysics cores share one execution layer, with optional cell
+  chunking.** ``M7JaxMicrophysics`` and ``Mam4JaxMicrophysics`` now run
+  through ``ModalMicrophysicsTerm``'s shared precision scope, tracer fetch
+  and ``_jam_state`` assembly. A new ``chunk_size`` option
+  (``physics.jam_microphysics_options.chunk_size``, or the
+  ``M7_JAX_CHUNK_SIZE``/``MAM4_JAX_CHUNK_SIZE``/``JAM_MICROPHYSICS_CHUNK_SIZE``
+  environment variable) integrates the cells in fixed blocks under
+  ``jax.lax.scan`` with ``jax.checkpoint``. That cuts a gradient's temporary
+  device memory by roughly an order of magnitude, for a slower forward step,
+  so it is off by default. The M7 core calls m7-jax's structure-of-arrays
+  ``step_all_soa`` on separate per-component fields, and the MAM4 core builds
+  its state in one stack instead of 45 full-grid scatters. Results change only
+  by floating-point reassociation (:doc:`design/jam`, "Core execution").
+
 Dependencies
 ^^^^^^^^^^^^
 
