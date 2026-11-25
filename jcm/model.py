@@ -38,6 +38,10 @@ from jcm.date import (
     to_datetime,
 )
 from jcm.forcing import ForcingData, default_forcing
+from jcm.output_selection import (
+    OutputSelection, dynamics_output_names, make_physics_pruner,
+    physics_output_names, select_dynamics,
+)
 from jcm.predictions import ModelPredictions
 from jcm.physics_interface import (
     POST_PHYSICS_STATE_KEY, PhysicsState, Physics,
@@ -265,6 +269,8 @@ def _op_split_trajectory(
     initial_time: jdt.Datetime | None = None,
     initial_step: Any = None,
     dt_seconds: int = 0,
+    saved_state_fields_fn: Callable[[Any], dict] | None = None,
+    select_physics: Callable[[Any], Any] | None = None,
 ) -> Callable[[Any], tuple[Any, Any, Any, Any]]:
     """Trajectory builder for the operator-split path.
 
@@ -307,6 +313,22 @@ def _op_split_trajectory(
         observer_xs: Pytree of per-step sampling tables whose leaves have a
             leading axis of ``outer_steps * inner_steps``; sliced per ``dt``
             and fed to ``observe_fn``. Required when ``observe_fn`` is set.
+        saved_state_fields_fn: Optional ``state -> {name: array}`` giving
+            diagnostics that are pure functions of the dynamics state (the
+            dycore's omega). The per-step physics dict holds each of them
+            diagnosed from the state the step STARTED from, so the running
+            mean of that entry would average ``x_0 .. x_{N-1}`` while every
+            dynamics field averages ``x_1 .. x_N``. The two sums differ only
+            by the end points, so the mean is re-aligned with
+            ``(f(x_N) - f(x_0)) / N`` — two evaluations per saved frame
+            rather than one per ``dt``, and nothing added to the scan carry.
+            Each name must also be an entry of the per-step physics dict.
+        select_physics: Optional ``output_keep``/``output_drop`` pruner
+            (:func:`jcm.output_selection.make_physics_pruner`), applied to the
+            diagnostics before they are accumulated, so an unwritten
+            diagnostic is never summed or stacked. It acts on the saved copy
+            only; the carry, the snapshot stream and the observers still see
+            every field.
 
     Returns:
         A function ``initial_state -> (final_state, final_physics_state,
@@ -327,6 +349,8 @@ def _op_split_trajectory(
     # ``(x_final, ps_final, preds)`` return are identical, so define them
     # once.
     have_observers = observe_fn is not None
+    if select_physics is None:
+        select_physics = lambda diagnostics: diagnostics  # noqa: E731
     # Interval-instantaneous snapshots of selected 2-D diagnostics
     # (AeroCom 3-hourly output, jax-gcm#586): a strided buffer rides the
     # inner-scan carry — the scan's ys are structurally one-per-step, so a
@@ -403,7 +427,8 @@ def _op_split_trajectory(
                     if jnp.issubdtype(new.dtype, jnp.inexact)
                     else new
                 ),
-                diag_sum, _without_unsaved_carry_slots(physics_state_next),
+                diag_sum,
+                select_physics(_without_unsaved_carry_slots(physics_state_next)),
             )
             obs = observe_fn(physics_state_next, obs_x) if have_observers else None
             if have_snapshots:
@@ -435,6 +460,30 @@ def _op_split_trajectory(
                 inner_step, init, inner_xs, length=inner_steps,
             )
             averaged_dynamics = tree_map(lambda s: s / inner_steps, x_sum)
+            if saved_state_fields_fn is not None:
+                # Re-align state-diagnosed entries with the post-step
+                # states the dynamics average uses (see the argument's
+                # docstring): sum_{k=1..N} f(x_k) = sum_{k=0..N-1} f(x_k)
+                # + f(x_N) - f(x_0).
+                #
+                # Only a ``dict`` payload that publishes one of them is
+                # touched. A raw ``Physics`` may return any pytree (``None``,
+                # an array, another ``Mapping`` type), which the accumulator
+                # carries as it is and which has no such entry to re-align.
+                f_end = saved_state_fields_fn(x_next)
+                realigned = (
+                    [name for name in f_end if name in diag_sum]
+                    if isinstance(diag_sum, dict) else [])
+                if realigned:
+                    f_start = saved_state_fields_fn(x)
+                    diag_sum = {
+                        **diag_sum,
+                        **{name: diag_sum[name]
+                           + ((f_end[name] - f_start[name]) / inner_steps
+                              ).reshape(diag_sum[name].shape
+                                        ).astype(diag_sum[name].dtype)
+                           for name in realigned},
+                    }
             preds = post_process_fn(x_next, ps_next).replace(
                 dynamics=averaged_dynamics,
                 physics=diag_sum,
@@ -500,7 +549,7 @@ def _op_split_trajectory(
                 lambda x: (jnp.zeros_like(x, dtype=float)
                            if jnp.issubdtype(x.dtype, jnp.inexact)
                            else jnp.zeros_like(x)),
-                _without_unsaved_carry_slots(empty_diagnostics),
+                select_physics(_without_unsaved_carry_slots(empty_diagnostics)),
             )
             outer_step_fn = _averaged_outer_step()
             outer_step = lambda c, xs: outer_step_fn(
@@ -1244,6 +1293,8 @@ class Model:
         state,
         physics_state: Any,
         output_averages: bool,
+        select_physics: Callable[[Any], Any] | None = None,
+        selection: OutputSelection | None = None,
     ) -> Predictions:
         """Post-process a single saved state from the op-split trajectory.
 
@@ -1272,11 +1323,60 @@ class Model:
         # for the next step's physics; saving either would duplicate the
         # dynamics fields in every frame. Both stay in the carry.
         physics_state = _without_unsaved_carry_slots(physics_state)
+        if not output_averages:
+            # Averaged mode discards this payload (the running mean replaces
+            # it), so only the snapshot frame is re-diagnosed.
+            physics_state = self._saved_state_diagnostics(state, physics_state)
+        dynamics = verify_state(self.dycore.to_physics_state(state))
+        if selection is not None:
+            # Before the dynamics are accumulated and stacked (and, in
+            # snapshot mode, before the diagnostics are stacked).
+            dynamics = select_dynamics(dynamics, selection)
+            if select_physics is not None:
+                physics_state = select_physics(physics_state)
         return Predictions(
-            dynamics=verify_state(self.dycore.to_physics_state(state)),
+            dynamics=dynamics,
             physics=physics_state if not output_averages else None,
             times=None,
         )
+
+    #: Output diagnostics that are pure functions of the dynamics state and are
+    #: published by a term from a dycore field (``OmegaDiagnostic``).
+    _STATE_DIAGNOSED_OUTPUTS = ("omega",)
+
+    def _saved_state_fields(self, state) -> dict:
+        """State-diagnosed outputs evaluated on ``state`` (dycore layout).
+
+        The physics call diagnoses these from the state its step STARTED from
+        (the physics input, which is what a term such as Tiedtke needs), so
+        the entry in the physics dict is one ``dt`` older than the
+        post-step ``u``/``v``/``T`` saved beside it. Re-evaluating the
+        dycore's provider on the saved state gives the value that belongs to
+        that state. Callers apply it only to entries the physics dict
+        actually publishes; the rest is dead code XLA removes.
+        """
+        names = tuple(
+            n for n in self._STATE_DIAGNOSED_OUTPUTS
+            if n in self._dycore_field_names)
+        if not names:
+            return {}
+        fields = self.dycore.physics_fields(
+            state, self.dycore.to_physics_state(state))
+        return {n: fields[n] for n in names}
+
+    def _saved_state_diagnostics(self, state, physics_state):
+        """Replace state-diagnosed entries of a saved physics dict."""
+        fresh = self._saved_state_fields(state)
+        if not fresh or not isinstance(physics_state, dict):
+            return physics_state
+        out = dict(physics_state)
+        for name, value in fresh.items():
+            if name in out:
+                # Same lon-major flattening ``ComposablePhysics`` applies to
+                # injected dycore fields on the column-vectorized layout.
+                out[name] = value.reshape(out[name].shape).astype(
+                    out[name].dtype)
+        return out
 
     def initial_physics_carry(self) -> Any:
         """Build and return a fresh cross-step physics carry.
@@ -1319,6 +1419,7 @@ class Model:
         snapshot_fields=(),
         initial_time=None,
         initial_step=None,
+        select_physics=None,
     ):
         """Integrate-fn builder for the operator-split path.
 
@@ -1368,6 +1469,8 @@ class Model:
                 initial_time=initial_time,
                 initial_step=initial_step,
                 dt_seconds=int(self.dt_si.m),
+                saved_state_fields_fn=self._saved_state_fields,
+                select_physics=select_physics,
             )
             return trajectory(state)
 
@@ -1443,7 +1546,7 @@ class Model:
             "(e.g. speedy_physics(parameters=...)) and a new Model from it.",
             UserWarning, stacklevel=_outside_jcm_stacklevel())
 
-    @partial(jax.jit, static_argnums=(0, 6, 7, 8, 10, 11))
+    @partial(jax.jit, static_argnums=(0, 6, 7, 8, 10, 11, 12))
     def _run_from_state(self,
                         initial_state,
                         initial_physics_state: Any,
@@ -1456,6 +1559,7 @@ class Model:
                         observer_xs=(),
                         snapshot_stride=0,
                         snapshot_fields=(),
+                        output_selection=OutputSelection(),
     ):
         """JIT-compiled simulation loop. Returns raw :class:`Predictions` pytree.
 
@@ -1500,12 +1604,27 @@ class Model:
         # ``arange(outer_steps) + 1`` to label frames at the times they
         # actually correspond to.
         op_split_step = self._get_op_split_step_fn(forcing)
+        # ``run.output_keep`` / ``output_drop``: decided once here, from the
+        # structure of the initial state and carry, and applied wherever the
+        # saved copy is built (``_post_process`` for the dynamics, the
+        # integrate function for the diagnostics accumulator).
+        select_physics = None
+        if not output_selection.is_default:
+            nodal_shape = tuple(jax.eval_shape(
+                self.dycore.to_physics_state, initial_state).u_wind.shape)
+            select_physics = make_physics_pruner(
+                self.physics, output_selection,
+                _without_unsaved_carry_slots(initial_physics_state),
+                nodal_shape)
         integrate = self._get_op_split_integrate_fn(
             op_split_step,
             outer_steps=outer_steps,
             inner_steps=inner_steps,
             post_process_fn=lambda state, physics_state: self._post_process(
                 state, physics_state, output_averages,
+                select_physics=select_physics,
+                selection=None if output_selection.is_default
+                else output_selection,
             ),
             output_averages=output_averages,
             observer_xs=observer_xs,
@@ -1513,6 +1632,7 @@ class Model:
             snapshot_fields=snapshot_fields,
             initial_time=initial_time,
             initial_step=initial_step,
+            select_physics=select_physics,
         )
         (final_dycore_state, final_physics_state, final_time, final_step,
          predictions, observations, snapshots, times,
@@ -1565,6 +1685,8 @@ class Model:
                        output_averages=False,
                        observer_t0_days=None,
                        observer_xs=None,
+                       output_keep=None,
+                       output_drop=None,
     ):
         """Run the simulation forward from a given dycore-native initial state.
 
@@ -1587,6 +1709,9 @@ class Model:
                 (float) or a fixed duration string like ``'1D'``.
             total_time: Total time to run. Same units as ``save_interval``.
             output_averages: Whether to output time-averaged quantities.
+            output_keep: ``None`` (write everything) or the names of the only
+                variables to write; see :meth:`run_from_state_with_carry`.
+            output_drop: Names never written, applied after ``output_keep``.
             observer_t0_days: Optional absolute start time of the window,
                 in days since 1970, for the observers' sampling tables.
             observer_xs: Optional sampling tables from
@@ -1608,6 +1733,8 @@ class Model:
             observer_xs=observer_xs,
             initial_time=self.start_time,
             initial_step=jnp.int32(0),
+            output_keep=output_keep,
+            output_drop=output_drop,
         )
         return run_state, predictions
 
@@ -1761,6 +1888,8 @@ class Model:
                                   initial_physics_state: Any = None,
                                   snapshot_interval=None,
                                   snapshot_variables=(),
+                                  output_keep=None,
+                                  output_drop=None,
                                   observer_t0_days=None,
                                   observer_xs=None,
                                   initial_time: jdt.Datetime | None = None,
@@ -1777,6 +1906,21 @@ class Model:
         top-level diagnostics keys or dotted struct fields
         (``"radiation.toa_sw_up"``); retrieve the stream with
         :meth:`ModelPredictions.snapshot_dataset`.
+
+        ``output_keep`` / ``output_drop`` choose which variables the
+        trajectory holds (see :mod:`jcm.output_selection`): ``output_keep``
+        is ``None`` (everything) or the names to write, ``output_drop`` the
+        names never written, applied after ``output_keep``. Names are those
+        of the output Dataset (:meth:`ModelPredictions.to_xarray`). The
+        selection is applied before the output is accumulated, so an
+        unwritten diagnostic costs no device time or memory. It acts on the
+        saved copy only: the simulation, the returned carry and the snapshot
+        stream (which has its own ``snapshot_variables``) are computed from
+        the same fields. Removing outputs does change the compiled program,
+        so a selected run agrees with an unselected one to round-off, not
+        bit for bit; with both arguments unset the program is the unselected
+        one. An unknown name raises ``ValueError`` before the integration
+        starts.
 
         Two optional observer arguments, both ignored without observers.
         ``observer_t0_days`` is an optional consistency assertion of the
@@ -1851,6 +1995,14 @@ class Model:
                     f"multiple of the model timestep ({self.dt_si.m} s).")
         if initial_physics_state is None:
             initial_physics_state = self.initial_physics_carry()
+        output_selection = OutputSelection.from_args(output_keep, output_drop)
+        if not output_selection.is_default:
+            # The names are known now: the dynamics' from the state, the
+            # diagnostics' from the carry, which has the structure of the
+            # diagnostics the scan produces. Checking here fails a typo
+            # before the integration is compiled or run.
+            output_selection.validate(self.output_variable_names(
+                initial_state, initial_physics_state))
 
         # Build the observers' per-step sampling tables for this window
         # (offline numpy; horizontal weights are resolved here once and only
@@ -1891,6 +2043,7 @@ class Model:
                     save_interval, total_time,
                     output_averages, observer_xs,
                     snapshot_stride, tuple(snapshot_variables),
+                    output_selection,
             )
             if progress:
                 # Opt-in only, so the default (progress=False) path keeps
@@ -1936,8 +2089,42 @@ class Model:
                 snapshots=snapshots,
                 snapshot_variables=tuple(snapshot_variables),
                 snapshot_times=snapshot_times,
+                output_selection=output_selection,
             ),
         )
+
+    def output_variable_names(self, initial_state=None,
+                              physics_carry=None) -> set[str]:
+        """Return the variable names this model's trajectory output can carry.
+
+        The names of the output Dataset's data variables, which is what
+        ``output_keep`` / ``output_drop`` take: the prognostics, the tracers
+        and every diagnostic the physics publishes. Nothing is integrated;
+        the names come from the structure of the state and the carry.
+
+        Args:
+            initial_state: A dycore-native state; defaults to the model's
+                current one.
+            physics_carry: A physics carry; defaults to the model's current
+                one, or a freshly built one before the first run.
+
+        Returns:
+            The set of names (``time_bounds``, which every output carries, is
+            not listed).
+
+        """
+        if initial_state is None:
+            initial_state = self.dycore_state
+        if initial_state is None:
+            initial_state = self.initial_state()
+        if physics_carry is None:
+            physics_carry = self.physics_carry
+        if physics_carry is None:
+            physics_carry = self.initial_physics_carry()
+        dynamics = jax.eval_shape(self.dycore.to_physics_state, initial_state)
+        return dynamics_output_names(dynamics) | physics_output_names(
+            self.physics, _without_unsaved_carry_slots(physics_carry),
+            tuple(dynamics.u_wind.shape))
 
     @staticmethod
     def _resolve_run_duration(total_time, end_time, current_time) -> str | float:
@@ -1962,6 +2149,8 @@ class Model:
                output_averages=False,
                snapshot_interval=None,
                snapshot_variables=(),
+               output_keep=None,
+               output_drop=None,
                observer_t0_days=None,
                observer_xs=None,
                progress: bool = False,
@@ -1977,6 +2166,12 @@ class Model:
 
         ``progress`` (#320): opt-in progress bar, off by default; see
         :meth:`run_from_state_with_carry` and :mod:`jcm.progress`.
+
+        ``output_keep`` / ``output_drop`` select the written variables, as in
+        :meth:`run_from_state_with_carry`. The selection is not part of the
+        carry, so a run resumes the same way under any selection; pass the
+        same one to every segment of a run that must reproduce bit for bit
+        (see :mod:`jcm.output_selection` on round-off).
         """
         if self._carry_was_traced:
             raise ValueError(
@@ -2005,6 +2200,8 @@ class Model:
             initial_physics_state=self.physics_carry,
             snapshot_interval=snapshot_interval,
             snapshot_variables=snapshot_variables,
+            output_keep=output_keep,
+            output_drop=output_drop,
             observer_t0_days=observer_t0_days,
             observer_xs=observer_xs,
             initial_time=self._final_time,
@@ -2034,6 +2231,8 @@ class Model:
             output_averages=False,
             snapshot_interval=None,
             snapshot_variables=(),
+            output_keep=None,
+            output_drop=None,
             initial_physics_state: Any = None,
             observer_t0_days=None,
             observer_xs=None,
@@ -2065,6 +2264,9 @@ class Model:
 
         ``progress`` (#320): opt-in progress bar, off by default; see
         :meth:`resume` and :mod:`jcm.progress`.
+
+        ``output_keep`` / ``output_drop`` select the written variables; see
+        :meth:`run_from_state_with_carry`.
         """
         dycore_state, physics_carry = self.bootstrap_state(initial_state)
         if initial_physics_state is not None:
@@ -2083,6 +2285,8 @@ class Model:
             output_averages=output_averages,
             snapshot_interval=snapshot_interval,
             snapshot_variables=snapshot_variables,
+            output_keep=output_keep,
+            output_drop=output_drop,
             observer_t0_days=observer_t0_days,
             observer_xs=observer_xs,
             progress=progress,

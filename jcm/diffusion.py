@@ -48,6 +48,10 @@ _ECHAM_DAMPTH_HOURS = {31: 12.0, 63: 7.0, 127: 1.5, 255: 0.5}
 # 0.1503/0.7680/1.5001 hPa vs "~0.15/0.77/1.50"). A pressure-based rule would
 # be *less* faithful, not more — ECHAM does not place these transitions at the
 # same pressures on L47 and L95, so no single pressure rule reproduces both.
+# For a table that is NOT one of ECHAM's grids there is no index table to
+# transfer, so :func:`echam_lmidatm_orders` maps ECHAM's profile onto it by
+# reference pressure instead (:func:`_orders_by_reference_pressure`); these
+# tables stay the exact answer for the two built-in grids.
 #
 # Note that the profile depends on truncation as well as level count: on L95
 # ECHAM stops at del⁶ for nn >= 127 but goes to del⁸ at nn = 63. Higher
@@ -112,7 +116,64 @@ def echam_dampth_hours(truncation: int) -> float:
     return _ECHAM_DAMPTH_HOURS[lo] * (truncation / lo) ** exponent
 
 
-def echam_lmidatm_orders(truncation: int, layers: int) -> jnp.ndarray:
+def _nearest_tabulated_truncation(truncation: int, candidates) -> int:
+    """Return the tabulated truncation nearest ``truncation`` in log space."""
+    return min(candidates, key=lambda nn: abs(math.log(truncation / nn)))
+
+
+def _expand_orders(runs) -> list:
+    """``(count, order)`` runs, top first, as a flat per-level list."""
+    orders: list = []
+    for count, order in runs:
+        orders.extend([order] * count)
+    return orders
+
+
+def _orders_by_reference_pressure(truncation: int, levels) -> jnp.ndarray:
+    """Per-level orders for a user hybrid table, mapped from ECHAM by pressure.
+
+    ECHAM tabulates the ``lmidatm`` orders per *level index* of its own grids
+    (:data:`_ECHAM_LMIDATM_ORDERS`), so a table that is not one of those grids
+    has no entry of its own. Its levels are given the order of the ECHAM level
+    that lies at the same pressure: each level's mid-point pressure at the
+    reference surface pressure
+    (:func:`jcm.physics.coords_util.reference_pressure_pa`, the pressure jcm
+    assigns a full level everywhere) is matched to the nearest ECHAM
+    mid-level in log pressure. The orders are properties of height in the
+    atmosphere (the strongest damping where the modes of the top levels need
+    it), which a level index only stands for on ECHAM's own grid, so a
+    thinned or re-spaced table keeps the damping each part of the column
+    would have had in ECHAM. A table made of a subset of ECHAM's interfaces
+    gets, level by level, the order of the ECHAM level it spans the middle of.
+
+    The source profile is the tabulated truncation nearest ``truncation`` in
+    log space, as for the built-in grids; where ECHAM tabulates both L47 and
+    L95 at that truncation (T63) the L95 profile is the source, because its 95
+    mid-levels sample the pressure axis (and so the order transitions at 0.15,
+    0.77 and 1.5 hPa) at finer resolution than the 47 do. The transitions of
+    the two profiles lie within a factor of two in pressure of each other
+    (``mo_hdiff.f90::sudif``'s own annotations: L47 ~0.23/1.22/2.96 hPa, L95
+    ~0.15/0.77/1.50 hPa), so the choice moves a boundary by at most a few
+    levels. Ties in log pressure resolve to the upper (lower-order) level.
+    """
+    import numpy as np
+
+    from jcm.physics.coords_util import reference_pressure_pa
+    from jcm.physics.echam.echam_levels import get_echam_levels
+
+    nearest = _nearest_tabulated_truncation(
+        truncation, {nn for nn, _ in _ECHAM_LMIDATM_ORDERS})
+    source_layers = max(nlev for nn, nlev in _ECHAM_LMIDATM_ORDERS if nn == nearest)
+    source_orders = np.asarray(_expand_orders(
+        _ECHAM_LMIDATM_ORDERS[(nearest, source_layers)]), dtype=np.int32)
+
+    p_source = reference_pressure_pa(get_echam_levels(source_layers))
+    p_user = reference_pressure_pa(levels)
+    distance = np.abs(np.log(p_user[:, None]) - np.log(p_source[None, :]))
+    return jnp.asarray(source_orders[np.argmin(distance, axis=1)], dtype=jnp.int32)
+
+
+def echam_lmidatm_orders(truncation: int, layers: int, levels=None) -> jnp.ndarray:
     """Per-level hyperdiffusion orders for ``(truncation, layers)``.
 
     Truncations ECHAM does not tabulate borrow the profile of the nearest
@@ -121,12 +182,27 @@ def echam_lmidatm_orders(truncation: int, layers: int) -> jnp.ndarray:
     T63L47 profile (as before this function existed) and puts T106L95 and
     T119L95 on the T127L95 profile.
 
+    ``levels`` (optional ``HybridCoordinates``) is the vertical grid the
+    orders are for. When it is one of the built-in tables, or omitted, the
+    ``(truncation, layers)`` tables above are the answer. When it is any
+    other table, each level takes the order of the ECHAM level nearest it in
+    reference pressure (:func:`_orders_by_reference_pressure`), whatever its
+    level count.
+
     Raises:
-        ValueError: if ``truncation`` is not positive, or no ECHAM profile
-            exists for ``layers`` at all.
+        ValueError: if ``truncation`` is not positive, if ``levels`` has a
+            different layer count than ``layers``, or (no ``levels``, or the
+            built-in table) no ECHAM profile exists for ``layers`` at all.
 
     """
     _check_truncation(truncation)
+    if levels is not None:
+        from jcm.physics.echam.echam_levels import is_builtin_table
+        if int(levels.layers) != int(layers):
+            raise ValueError(
+                f"layers={layers} but the hybrid levels have {levels.layers}.")
+        if not is_builtin_table(levels):
+            return _orders_by_reference_pressure(truncation, levels)
     candidates = [nn for nn, nlev in _ECHAM_LMIDATM_ORDERS if nlev == layers]
     if not candidates:
         raise ValueError(
@@ -134,10 +210,8 @@ def echam_lmidatm_orders(truncation: int, layers: int) -> jnp.ndarray:
             f"mo_hdiff.f90::sudif defines profiles for "
             f"{sorted(ECHAM_LMIDATM_LAYERS)} levels only."
         )
-    nearest = min(candidates, key=lambda nn: abs(math.log(truncation / nn)))
-    orders = []
-    for count, order in _ECHAM_LMIDATM_ORDERS[(nearest, layers)]:
-        orders.extend([order] * count)
+    nearest = _nearest_tabulated_truncation(truncation, candidates)
+    orders = _expand_orders(_ECHAM_LMIDATM_ORDERS[(nearest, layers)])
     return jnp.asarray(orders, dtype=jnp.int32)
 
 
@@ -211,7 +285,7 @@ class DiffusionFilter:
         return cls.echam_lmidatm(truncation=63, layers=47)
 
     @classmethod
-    def echam_lmidatm(cls, truncation: int, layers: int):
+    def echam_lmidatm(cls, truncation: int, layers: int, levels=None):
         """ECHAM6.3 ``lmidatm`` level-dependent hyperdiffusion for a grid.
 
         Combines the ``setdyn.f90`` base timescale (:func:`echam_dampth_hours`)
@@ -231,13 +305,18 @@ class DiffusionFilter:
         Args:
             truncation: spectral truncation (``nn``).
             layers: number of vertical levels (``nlev``). Must be one of
-                :data:`ECHAM_LMIDATM_LAYERS`.
+                :data:`ECHAM_LMIDATM_LAYERS` unless ``levels`` is given.
+            levels: optional ``HybridCoordinates`` of the grid. A user table
+                (anything but the built-in L47/L95) takes each level's order
+                from the ECHAM level nearest it in reference pressure, so any
+                level count is accepted (:func:`echam_lmidatm_orders`).
 
         Raises:
-            ValueError: if ECHAM defines no profile for ``layers``.
+            ValueError: if ECHAM defines no profile for ``layers`` and no
+                ``levels`` table was given.
 
         """
-        level_orders = echam_lmidatm_orders(truncation, layers)
+        level_orders = echam_lmidatm_orders(truncation, layers, levels)
         base_tau = echam_dampth_hours(truncation) * 3600.0
         return cls(
             # Effective timescale for each variable is ``base_tau * factor``;
@@ -256,7 +335,7 @@ class DiffusionFilter:
         )
 
     @classmethod
-    def auto(cls, truncation: int, layers: int, vertical: str):
+    def auto(cls, truncation: int, layers: int, vertical: str, levels=None):
         """Resolution-aware default filter for a grid.
 
         When the grid is a hybrid grid with a level count ECHAM tabulates
@@ -264,17 +343,22 @@ class DiffusionFilter:
         for that ``(truncation, layers)`` — del² near the model top grading
         to del⁶/del⁸ below, with the ``setdyn.f90`` base timescale. That's
         the stability stack these grids were tuned for in ECHAM, and it is
-        what the L95 middle-atmosphere grids exist to exploit. Any other grid
-        — SPEEDY T31L8, Held-Suarez, a hybrid grid at an untabulated level
-        count — gets the uniform SPEEDY del² profile, with a warning in the
-        hybrid case since that is unlikely to be what was intended (#579).
+        what the L95 middle-atmosphere grids exist to exploit. A hybrid grid
+        given as a user table (``levels``) gets the same profile mapped onto
+        its levels by reference pressure (:func:`echam_lmidatm_orders`), at
+        any level count. Any other grid — SPEEDY T31L8, Held-Suarez, a hybrid
+        grid at an untabulated level count and no table — gets the uniform
+        SPEEDY del² profile, with a warning in the hybrid case since that is
+        unlikely to be what was intended (#579).
 
         ``vertical`` is the grid's vertical-coordinate kind (``"hybrid"`` or
-        ``"sigma"``).
+        ``"sigma"``); ``levels`` the hybrid table when one is known.
         """
         # Match on the (vertical=hybrid, layers) pair so this fires for every
         # ECHAM-family grid at any truncation — and stays inert for SPEEDY
         # T31L8 / Held-Suarez, which have their own tuned uniform damping.
+        if vertical == "hybrid" and levels is not None:
+            return cls.echam_lmidatm(truncation, layers, levels)
         if vertical == "hybrid" and layers in ECHAM_LMIDATM_LAYERS:
             return cls.echam_lmidatm(truncation, layers)
         if vertical == "hybrid":

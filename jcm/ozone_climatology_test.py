@@ -300,8 +300,14 @@ class TestOzoneClimatology(unittest.TestCase):
 def _write_yearly_ozone(path: Path, year: int, nlon: int, nlat: int,
                         nlev: int, value: float,
                         units: str = "days since 1850-01-01",
-                        calendar: str = "standard") -> None:
-    """Write a 12-step transient ozone year with an explicit raw time axis."""
+                        calendar: str = "standard",
+                        level_coefficients=None) -> None:
+    """Write a 12-step transient ozone year with an explicit raw time axis.
+
+    ``level_coefficients`` is an optional ``(a_pa, b)`` pair of mid-level
+    hybrid coefficients, written as the static ``level_a_pa`` / ``level_b``
+    data variables the published bundles carry.
+    """
     import pandas as pd
     lat = np.linspace(-88.0, 88.0, nlat).astype(np.float64)
     lon = np.linspace(0.0, 360.0, nlon, endpoint=False).astype(np.float64)
@@ -321,6 +327,10 @@ def _write_yearly_ozone(path: Path, year: int, nlon: int, nlat: int,
             "lon": ("lon", lon, {"units": "degrees_east"}),
         },
     )
+    if level_coefficients is not None:
+        a_pa, b = level_coefficients
+        ds["level_a_pa"] = ("level", np.asarray(a_pa, np.float64))
+        ds["level_b"] = ("level", np.asarray(b, np.float64))
     ds.to_netcdf(path)
 
 
@@ -379,6 +389,34 @@ class TestYearlyOzoneFiles(unittest.TestCase):
         self.assertAlmostEqual(float(ts.values[12:].max()), 8.0, delta=0.1)
         # Time axis is strictly increasing across the file boundary.
         self.assertTrue(np.all(np.diff(np.asarray(ts.times.delta.days)) >= 0))
+
+    def test_yearly_list_is_checked_against_the_model_levels_per_file(self):
+        """Each year's own level coefficients are compared with the model's.
+
+        The published yearly bundles carry ``level_a_pa`` / ``level_b`` as
+        static data variables, which the time concatenation stacks along
+        ``time``; the check reads them from each file.
+        """
+        from types import SimpleNamespace
+        a = np.linspace(100.0, 0.0, 16)
+        b = np.linspace(0.0, 1.0, 16)
+        model = SimpleNamespace(a_centers=a, b_centers=b)
+        kwargs = dict(nlon=8, nlat=4, nlev=16, align_mode="by_date_interp")
+        with tempfile.TemporaryDirectory() as tmp:
+            p79 = Path(tmp) / "1979.nc"
+            p80 = Path(tmp) / "1980.nc"
+            _write_yearly_ozone(p79, 1979, 8, 4, 16, 4.0e-6,
+                                level_coefficients=(a, b))
+            _write_yearly_ozone(p80, 1980, 8, 4, 16, 8.0e-6,
+                                level_coefficients=(a, b))
+            for files in ([p79], [p79, p80]):
+                clim = OzoneClimatology.from_file(files, vertical=model, **kwargs)
+                self.assertEqual(clim.o3_ppmv.values.shape[0], 12 * len(files))
+            # A later year on other levels is caught, not only the first.
+            _write_yearly_ozone(p80, 1980, 8, 4, 16, 8.0e-6,
+                                level_coefficients=(a + 50.0, b))
+            with self.assertRaisesRegex(ValueError, "1980.nc.*not the model"):
+                OzoneClimatology.from_file([p79, p80], vertical=model, **kwargs)
 
     def test_yearly_interp_blends_across_the_year_boundary(self):
         # 1980-01-01 sits between 1979-12-15 (4 ppmv) and 1980-01-15

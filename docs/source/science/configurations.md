@@ -169,9 +169,13 @@ scientific gap, so treat results with care:
   T127, ≈5 min at T255) as a starting point. No named configuration composes
   them and they are not in the release matrix.
 - **Untabulated hybrid level counts with ``diffusion=auto``** — the ECHAM
-  ``lmidatm`` hyperdiffusion profiles exist only for L47/L95; any other hybrid
-  level count falls back to the uniform SPEEDY del² profile with a warning, which
-  is not the ECHAM stability stack such a grid may need (see {doc}`dynamical_core`).
+  ``lmidatm`` index tables exist only for L47/L95. A grid that names its own
+  half-level table (``grid.level_table``) gets the ECHAM orders mapped onto it
+  by pressure; a hybrid grid of any other level count *without* a table falls
+  back to the uniform SPEEDY del² profile with a warning, which is not the ECHAM
+  stability stack such a grid may need (see {doc}`dynamical_core`). A user table
+  is not validated as a configuration: nothing is tuned for it, and the
+  level-resolved ozone and oxidant inputs must be supplied on its levels.
 - **The SLIM land** (``physics.land_model=slim``, the T63 default) — 30-day
   A/Bs and a 120-day spin-up on ``t63-echam-jam`` (M7); nothing is calibrated
   with it yet (see {doc}`surface`).

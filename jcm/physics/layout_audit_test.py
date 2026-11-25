@@ -89,6 +89,7 @@ def _all_terms():
 #: sets it True, so anything usable with both families qualifies.
 LAYOUT_AGNOSTIC = frozenset({
     "AerocomDiagnostics",
+    "HeldSuarez",
     "MoistAirColumnState",
     "NudgingTerm",
     "UpperSponge",
@@ -163,7 +164,7 @@ NOT_AUDITED = frozenset({
     # The HAM siblings of ArgActivation/JamOpticsTerm (#1017) need the same
     # rich upstream ``_jam_state`` carry.
     "HamActivation", "HamLutOpticsTerm",
-    "HeldSuarez", "HinesGwd", "JamOpticsTerm", "Lohmann2MMicrophysics",
+    "HinesGwd", "JamOpticsTerm", "Lohmann2MMicrophysics",
     "Macv2SpAerosol", "ModalMicrophysicsTerm", "NNEmulatorRadiation",
     "PreSpeciatedEmissions", "PrescribedOxidants",
     "PrescribedSurfaceFlux", "RRTMGPRadiation",

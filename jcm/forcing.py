@@ -891,6 +891,9 @@ class ForcingData:
         from jcm.data import input_resolution as ir
         from jcm.data import mirror_manifest as mm
 
+        # Every product composed here is a mirror bundle on the built-in
+        # tables; none of the level-resolved ones is vertically interpolated.
+        fa.reject_user_hybrid_for_mirror_data(coords, "ForcingData.from_bundles")
         manifest = mm.load_manifest()
         grid_token = fa._grid_token(coords)
         nlev = int(coords.nodal_shape[0])

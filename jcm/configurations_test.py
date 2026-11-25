@@ -182,6 +182,107 @@ class TestConfigurationsDoor(unittest.TestCase):
                          f"top-level imports leak hydra/omegaconf: {top_level}")
 
 
+_TINY = {"terrain": "aquaplanet", "forcing": "default",
+         "run.total_time": 1.0, "run.save_interval": 1.0}
+
+
+class TestFromConfig(unittest.TestCase):
+    """``from_config``: the engine ``load`` is a thin adapter over."""
+
+    def test_load_is_compose_then_from_config(self):
+        exp = configurations.load("speedy-t31", **_TINY)
+        cfg = configurations._compose(
+            "speedy-t31", [configurations._override_str(k, v)
+                           for k, v in _TINY.items()])
+        for source in (cfg, exp.config):          # DictConfig and plain dict
+            again = configurations.from_config(source, name="speedy-t31")
+            self.assertEqual(again.name, exp.name)
+            self.assertEqual(again.config, exp.config)
+            self.assertEqual(_term_names(again.model), _term_names(exp.model))
+            self.assertEqual(
+                {k: v for k, v in again.run_kwargs.items() if k != "forcing"},
+                {k: v for k, v in exp.run_kwargs.items() if k != "forcing"})
+            jax.tree_util.tree_map(np.testing.assert_array_equal,
+                                   again.forcing, exp.forcing)
+
+    def test_input_config_is_not_modified(self):
+        import copy
+        cfg = copy.deepcopy(configurations.load("speedy-t31", **_TINY).config)
+        before = copy.deepcopy(cfg)
+        configurations.from_config(cfg)
+        self.assertEqual(cfg, before)
+
+    def test_default_name_and_extra_sections_are_kept(self):
+        cfg = dict(configurations.load("speedy-t31", **_TINY).config)
+        cfg["coupler"] = {"anything": [1, 2]}      # a downstream's own group
+        exp = configurations.from_config(cfg)
+        self.assertEqual(exp.name, "custom")
+        self.assertEqual(exp.config["coupler"], {"anything": [1, 2]})
+
+    def test_missing_required_keys_fail_clearly(self):
+        cfg = dict(configurations.load("speedy-t31", **_TINY).config)
+        cfg.pop("terrain")
+        cfg["run"] = {k: v for k, v in cfg["run"].items() if k != "total_time"}
+        with self.assertRaisesRegex(ValueError, "terrain.*run.total_time \\(or run.end_time\\)"):
+            configurations.from_config(cfg)
+
+    def test_process_global_steps_are_opt_in(self):
+        import logging
+        cfg = dict(configurations.load("speedy-t31", **_TINY).config)
+        cfg["run"] = {**cfg["run"], "log_level": "ERROR"}
+        logger = logging.getLogger("jcm")
+        saved = logger.level
+        try:
+            logger.setLevel(logging.DEBUG)
+            with mock.patch.object(runners, "maybe_enable_compilation_cache") as cache:
+                configurations.from_config(cfg)
+                self.assertEqual(logger.level, logging.DEBUG)
+                cache.assert_not_called()
+                configurations.from_config(
+                    cfg, apply_log_level=True, enable_compilation_cache=True)
+                self.assertEqual(logger.level, logging.ERROR)
+                cache.assert_called_once_with()
+        finally:
+            logger.setLevel(saved)
+
+    def test_private_names_remain_aliases(self):
+        self.assertIs(runners._apply_log_level, runners.apply_log_level)
+
+    def test_extra_config_dir_composes_with_jcm_groups(self):
+        import tempfile
+
+        # A directory name with a space and a comma: both are ordinary in
+        # paths and both would break a percent-encoded or unquoted entry.
+        with tempfile.TemporaryDirectory(suffix=" my, conf") as tmp:
+            (Path(tmp) / "configuration").mkdir()
+            (Path(tmp) / "configuration" / "my-overlay.yaml").write_text(
+                "# @package _global_\n"
+                "defaults:\n"
+                "  - override /physics: speedy\n"
+                "  - override /grid: speedy_t31_l8\n"
+                "  - override /terrain: aquaplanet\n"
+                "  - override /forcing: default\n"
+                "coupler: {tag: mine}\n")
+            exp = configurations.load("my-overlay", extra_config_dir=tmp,
+                                      **{"run.total_time": 1.0,
+                                         "run.save_interval": 1.0})
+        self.assertEqual(exp.name, "my-overlay")
+        self.assertEqual(exp.config["coupler"], {"tag": "mine"})
+        self.assertEqual(exp.config["grid"]["spectral_truncation"], 31)
+
+    def test_nudging_target_comes_back_host_resident(self):
+        # The door hands ``Model.run`` the whole target as numpy leaves (the
+        # device only ever sees a ``window_forcing`` window); a synthetic
+        # target stands in for the ERA5 download.
+        from jcm.nudging import NudgingTarget
+        dev = jnp.ones((8, 96, 48), jnp.float32)
+        target = NudgingTarget(u_wind=dev, v_wind=dev, temperature=dev)
+        with mock.patch("jcm.data.era5.nudging_target", return_value=target):
+            exp = configurations.load("speedy-t31", nudging="era5", **_TINY)
+        self.assertIsInstance(exp.forcing.nudging_target.u_wind, np.ndarray)
+        self.assertIs(exp.run_kwargs["forcing"], exp.forcing)
+
+
 # The coupler config a downstream Hydra app writes: it reaches jcm's groups
 # through ``pkg://jcm.config`` and mounts them under its own ``atmosphere`` node
 # (selecting each jcm group by name), so a re-rooted recipe has targets to

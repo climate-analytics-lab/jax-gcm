@@ -8,7 +8,13 @@
 #   python -m jcm.main nudging=era5 run.start_time=2010-01-01 \
 #       run.total_time=30 grid=echam_t63_l47_hybrid physics=echam
 #
-# Memory: the run's target (~15 GB per 6-hourly year at T63L47) is held
+# Prefetch memory: the regrid (prefetch or cache miss) runs over the time
+# axis in chunks sized to a ~4 GiB working set and writes each chunk into the
+# cache file as it is produced, so a prefetch's peak is one chunk, not the
+# window. The cache file is the same for any chunk size; on a small node pass
+# --time-chunk N (samples per chunk) to the prefetch command.
+#
+# Run memory: the run's target (~15 GB per 6-hourly year at T63L47) is held
 # in host memory; a chunked run (run.chunk_days) moves only each chunk's
 # window of it to the device. A single-window run puts all of it there.
 enabled: true
@@ -31,3 +37,25 @@ min_pressure_hpa: 60.0
 
 # Target sampling: 6h (native), 12h, or 1d.
 freq: 6h
+
+# Optional latitude-dependent top of the nudged region (docs: design/era5_nudging).
+# null (default) = the single global step at min_pressure_hpa above. When a
+# mapping, the top of the nudged region follows it instead: one global
+# pressure cannot both leave the extratropical lowermost stratosphere free
+# and keep nudging the tropical upper troposphere, because the tropopause
+# sits near 100 hPa in the tropics and near 300 hPa at the poles. The top is p_tropical_hpa equatorward of
+# lat_tropical_deg, p_polar_hpa poleward of lat_polar_deg and a log-p blend
+# (cos^2 in latitude) between, symmetric about the equator; the weight ramps
+# 0 -> 1 over taper_decades of log10 p below the top instead of a step. It is
+# a function of each level's reference pressure and the column latitude, not of
+# the instantaneous tropopause. min_pressure_hpa stays a hard floor on top of
+# it (levels above it are never nudged) and must be <= min(p_tropical_hpa,
+# p_polar_hpa), else it would silently override the profile and is rejected.
+# Example (the tropopause-following profile):
+#   lat_top:
+#     p_tropical_hpa: 150.0
+#     p_polar_hpa: 400.0
+#     lat_tropical_deg: 20.0
+#     lat_polar_deg: 35.0
+#     taper_decades: 0.1
+lat_top: null

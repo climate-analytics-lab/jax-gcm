@@ -7,6 +7,11 @@
 
 checkpoint_terms: true
 
+# The term is layout-agnostic, so ``++physics.vectorize_columns=true`` gives
+# the same tendencies on the flattened (nlev, ncols) layout; the default keeps
+# the (nlev, nlon, nlat) grid. Switch it on when composing with column-only
+# terms (gravity-wave drag, tracer terms).
+
 terms:
   held_suarez:
     _target_: jcm.physics.held_suarez.held_suarez_physics.HeldSuarez

@@ -13,6 +13,64 @@ import numpy as np
 from jcm.analysis import area_weights
 
 
+#: Output variables :func:`check_health` reads from the chunk Dataset by name.
+#: ``wind_10m_model_level`` is the one fatal criterion that has no
+#: instantaneous source (the emission-wind fallback fraction); the rest feed
+#: the report only.
+_HEALTH_VARIABLES = (
+    "wind_10m_model_level",
+    "radiation.toa_lw_up", "radiation.surface_lw_down",
+    "radiation.toa_sw_down", "radiation.toa_sw_up",
+    "convection.precip_conv",
+)
+
+#: The prognostics :func:`check_health` falls back to reading from the
+#: Dataset when no ``boundary_state`` is given.
+_HEALTH_PROGNOSTICS = (
+    "temperature", "u_wind", "v_wind", "specific_humidity")
+
+#: Name prefixes of the aerosol budget gauges
+#: :func:`aerosol_budget_report` discovers species from and reads.
+_BUDGET_PREFIXES = ("budget_", "emi_", "wet_", "dry_")
+
+
+def _is_surface_temperature(name: str) -> bool:
+    """Say whether ``name`` is what :func:`check_health` takes as surface temperature."""
+    return "surface_temperature" in name and "tendency" not in name
+
+
+def runner_read_fields(available, *, dynamics_needed: bool = False) -> set[str]:
+    """Output variables the chunked runner reads back from a chunk Dataset.
+
+    ``run_chunked`` hands each chunk's Dataset to :func:`check_health` and
+    :func:`aerosol_budget_report`. A run that selects its output
+    (``run.output_keep`` / ``run.output_drop``) must not blind them, so the
+    runner has the model compute every variable listed here that the model
+    has, and strips the ones the user did not select before writing. Keeping
+    this beside the functions that read the names keeps the two in step.
+
+    The fatal temperature, wind and humidity criteria are evaluated on the
+    chunk-boundary state the runner passes as ``boundary_state``, not on the
+    Dataset, so a dropped prognostic never reaches the gate through here;
+    ``dynamics_needed`` adds them for a caller that has no such state.
+
+    Args:
+        available: The output variable names of the model.
+        dynamics_needed: Whether the prognostics are read from the Dataset.
+
+    Returns:
+        The subset of ``available`` the runner reads.
+
+    """
+    names = set(_HEALTH_VARIABLES)
+    if dynamics_needed:
+        names |= set(_HEALTH_PROGNOSTICS)
+    found = {n for n in available
+             if n in names or _is_surface_temperature(n)
+             or n.startswith(_BUDGET_PREFIXES)}
+    return found
+
+
 def aerosol_budget_report(ds, dt_seconds: float) -> list[str]:
     """One greppable aerosol-budget line per species, plus an f32 caveat note.
 
@@ -84,6 +142,7 @@ def check_health(ds, chunk_idx: int, elapsed_days: float, *,
                  is_bootstrap_chunk: bool | None = None,
                  max_wind_speed: float | None = 250.0,
                  max_temperature: float | None = 400.0,
+                 max_q_gkg: float | None = 100.0,
                  boundary_state=None) -> tuple[bool, dict]:
     """Inspect ``ds`` for atmosphere-blowup signatures.
 
@@ -132,8 +191,8 @@ def check_health(ds, chunk_idx: int, elapsed_days: float, *,
     0``, i.e. the pre-#903 meaning, for a caller using ``chunk_idx`` as a
     plain ordinal with no better signal to give.
 
-    ``max_wind_speed`` (m/s) and ``max_temperature`` (K) are the two
-    configurable ceilings from #1145: an unforced dry core (no physics, or
+    ``max_wind_speed`` (m/s), ``max_temperature`` (K) and ``max_q_gkg``
+    (g/kg) are the configurable ceilings (#1145 and its humidity sibling): an unforced dry core (no physics, or
     physics that only ever removes energy/momentum such as SSO drag) has no
     equilibrium to relax to and can drift to an arbitrarily extreme state
     without ever producing a NaN or crossing the much larger absolute-blowup
@@ -145,8 +204,12 @@ def check_health(ds, chunk_idx: int, elapsed_days: float, *,
     the T21 smoke configurations and the release-matrix bands are all far
     cooler/calmer) but below that drift, so a healthy run never trips them.
     Either may be set to ``None`` to disable it for a deliberately hot/windy
-    experiment. Configured via ``run.health.max_wind_speed`` /
-    ``run.health.max_temperature`` (see ``jcm/config/run/default.yaml``).
+    experiment. ``max_q_gkg`` (default 100) exists because in a dry
+    configuration humidity is a near-passive tracer, so a single spike is
+    not a blow-up signature; the maximum is still reported (and printed by
+    ``print_report``) when the criterion is raised or disabled. Configured
+    via ``run.health.max_wind_speed`` / ``run.health.max_temperature`` /
+    ``run.health.max_q_gkg`` (see ``jcm/config/run/default.yaml``).
 
     Returns
     -------
@@ -210,10 +273,7 @@ def check_health(ds, chunk_idx: int, elapsed_days: float, *,
             report[f"{short}_mean"] = float(np.nanmean(vals))
 
     sfc_t_key = next(
-        (v for v in ds.data_vars
-         if "surface_temperature" in v and "tendency" not in v),
-        None,
-    )
+        (v for v in ds.data_vars if _is_surface_temperature(v)), None)
     if sfc_t_key:
         sfc = ds[sfc_t_key].isel(time=-1).values
         report["sfc_T_min"] = float(np.nanmin(sfc))
@@ -249,9 +309,11 @@ def check_health(ds, chunk_idx: int, elapsed_days: float, *,
     if report.get("T_max", 300) > 500:
         ok = False
         reasons.append(f"T_max={report['T_max']:.0f}K (> 500K)")
-    if report.get("q_max_gkg", 0) > 100:
+    if (max_q_gkg is not None
+            and report.get("q_max_gkg", 0) > max_q_gkg):
         ok = False
-        reasons.append(f"q_max={report['q_max_gkg']:.1f} g/kg (> 100)")
+        reasons.append(
+            f"q_max={report['q_max_gkg']:.1f} g/kg (> {max_q_gkg:g})")
 
     # #1145: configurable ceilings that catch an unforced/underdamped core
     # drifting far outside any physical regime well before it reaches the

@@ -17,10 +17,12 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/tte_tke_closure
    design/land_skin_energy_balance
    design/forcing_time_semantics
+   design/era5_nudging
    design/parallelization
    design/output_vertical_conventions
    design/checkpoint_compatibility
    design/chunked_run_io_overlap
+   design/output_selection
    design/pyses_cam_se_dycore
    design/dinosaur_sl_jam_configuration
    design/dinosaur_transport_selection
@@ -48,6 +50,7 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/jam_aerosol_retune
    design/cloud_cover_gate
    design/data_mirror
+   design/run_provenance
    design/packaged_config_tree
    design/science_register_enforcement
    design/test_suite_memory

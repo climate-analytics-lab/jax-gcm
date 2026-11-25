@@ -101,5 +101,13 @@ terms:
     ncolumns: 20  # trial value; Muelmenstaedt et al. (2020) production used 100
   hines_gwd:
     _target_: jcm.physics.gravity_waves.hines.HinesGwd
+    # Hines launch level: ``launch_level`` counts levels above the surface
+    # (ECHAM ``emiss_lev``; 10 = ~634 hPa on L95, but a different height on a
+    # table with a thinned troposphere). ``launch_pressure_hpa`` is the
+    # alternative, resolved once from the vertical grid to the nearest full
+    # level at the reference surface pressure. Set at most one; both null
+    # gives ECHAM's 10. The resolved count is static, not a gradient leaf.
+    # launch_level: null
+    # launch_pressure_hpa: null
   lott_miller_sso:
     _target_: jcm.physics.gravity_waves.sso.LottMillerSso

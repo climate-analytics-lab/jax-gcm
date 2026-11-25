@@ -91,6 +91,24 @@ class TestCheckHealth(unittest.TestCase):
         ok, _ = check_health(ds, 0, 10.0, max_temperature=None)
         self.assertTrue(ok)
 
+    def test_humidity_ceiling_default_and_reason_carries_value(self):
+        ds = _make_dataset(T_min=240.0, T_max=300.0, q_max_gkg=200.0)
+        ok, report = check_health(ds, 0, 10.0)
+        self.assertFalse(ok)
+        self.assertTrue(any("q_max" in r and "> 100" in r
+                            for r in report["reasons"]))
+        ok, report = check_health(ds, 0, 10.0, max_q_gkg=150.0)
+        self.assertFalse(ok)
+        self.assertTrue(any("> 150" in r for r in report["reasons"]))
+
+    def test_humidity_ceiling_raised_or_none_passes_and_still_reports(self):
+        ds = _make_dataset(T_min=240.0, T_max=300.0, q_max_gkg=200.0)
+        for ceiling in (500.0, None):
+            ok, report = check_health(ds, 0, 10.0, max_q_gkg=ceiling)
+            self.assertTrue(ok)
+            self.assertGreater(report["q_max_gkg"], 100.0)
+            print_report(report)
+
     def test_healthy_dataset_under_1145_defaults(self):
         # The gate's defaults must not trip a normal run with no u_wind/v_wind
         # at all (e.g. a Held-Suarez or single-column dataset).

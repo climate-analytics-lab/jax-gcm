@@ -234,6 +234,8 @@ def echam_physics(
         TracerDiffusionParameters | Mapping[str, Any] | None) = None,
     conv_transport: ConvTransportParameters | Mapping[str, Any] | None = None,
     gw_scheme: str = "hines",
+    hines_launch_level: int | None = None,
+    hines_launch_pressure_hpa: float | None = None,
     checkpoint_terms: bool = True,
     radiation_scheme: str | PhysicsTerm = "rrtmgp",
     emulator_weights_file: str | None = "auto",
@@ -453,6 +455,16 @@ def echam_physics(
             (Hines background + frontal storm-track deposition; some
             double-counting near strong fronts — retune ``taubgnd`` and
             the Hines source strength jointly if it shows), or ``"none"``.
+        hines_launch_level: Hines launch level as a count of levels above
+            the surface (ECHAM ``emiss_lev``); ``None`` with
+            ``hines_launch_pressure_hpa`` also ``None`` gives 10. Static (it
+            selects an array slice), unlike the ``hines`` parameters.
+        hines_launch_pressure_hpa: Hines launch level as a pressure (hPa),
+            resolved to the nearest full level at the reference surface
+            pressure; the alternative to ``hines_launch_level`` (giving both
+            raises ``ValueError``) for vertical tables whose troposphere
+            differs from ECHAM's. Used by ``gw_scheme`` ``"hines"`` and
+            ``"both"``.
         checkpoint_terms: Whether to checkpoint each term's compute
             (memory-saving for long backward passes).
         radiation_scheme: ``"rrtmgp"`` (default; the RRTMGP correlated-k
@@ -1389,7 +1401,9 @@ def echam_physics(
     # nothing that convection/cloud read same-step, and moving it is an
     # independent change we keep out of this reordering.
     if gw_scheme == "hines":
-        nonoro_gw_terms: list[PhysicsTerm] = [HinesGwd(params=hines_p)]
+        nonoro_gw_terms: list[PhysicsTerm] = [
+            HinesGwd(params=hines_p, launch_level=hines_launch_level,
+                     launch_pressure_hpa=hines_launch_pressure_hpa)]
     elif gw_scheme == "frontal":
         from jcm.physics.gravity_waves.spectral.term import (
             FrontalGravityWaveDrag,
@@ -1407,7 +1421,8 @@ def echam_physics(
         from jcm.physics.gravity_waves.spectral.term import (
             FrontalGravityWaveDrag,
         )
-        nonoro_gw_terms = [HinesGwd(params=hines_p),
+        nonoro_gw_terms = [HinesGwd(params=hines_p, launch_level=hines_launch_level,
+                     launch_pressure_hpa=hines_launch_pressure_hpa),
                            FrontalGravityWaveDrag()]
     elif gw_scheme == "none":
         nonoro_gw_terms = []

@@ -19,6 +19,14 @@
 # ``conv_transport``; see ``echam_physics``.) Unset fields keep their
 # defaults.
 #
+# The Hines launch level is the factory argument ``hines_launch_level`` (levels
+# above the surface, ECHAM ``emiss_lev``) or, alternatively,
+# ``hines_launch_pressure_hpa`` (resolved from the vertical grid to the nearest
+# full level; for tables whose troposphere differs from ECHAM's). Both null
+# (the default) gives ECHAM's 10. Set at most one:
+#
+#     python -m jcm.main physics=echam-jam +physics.hines_launch_pressure_hpa=634
+#
 # The wet-removal scalings are ``incloud_scale`` (stratiform in-cloud
 # removal) and ``impact_scale`` (below-cloud inertial impaction, stratiform
 # and convective); the convective in-plume scavenging ``incloud_scale`` does

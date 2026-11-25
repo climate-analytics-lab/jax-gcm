@@ -333,6 +333,21 @@ class TestSlTransportOptions(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._dycore(["dycore.sl_vertical_interpolation=quintic"])
 
+    def test_departure_iterations_default_is_dinosaurs(self):
+        dycore = self._dycore()
+        self.assertEqual(dycore.primitive.departure_iterations, 1)
+        self.assertEqual(dycore._sl_options["departure_iterations"], 1)
+
+    def test_departure_iterations_reaches_the_primitive(self):
+        dycore = self._dycore(["dycore.sl_departure_iterations=3"])
+        self.assertEqual(dycore.primitive.departure_iterations, 3)
+
+    def test_invalid_departure_iterations_are_rejected(self):
+        for bad in ("0", "-2", "1.5", "true", "abc"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(
+                    ValueError, "sl_departure_iterations"):
+                self._dycore([f"dycore.sl_departure_iterations={bad}"])
+
 
 class TestConfigComposition(unittest.TestCase):
     def test_default_compose(self):
@@ -403,10 +418,13 @@ class TestConfigComposition(unittest.TestCase):
         cfg = _compose(["run=default"])
         self.assertEqual(cfg.run.health.max_wind_speed, 250.0)
         self.assertEqual(cfg.run.health.max_temperature, 400.0)
+        self.assertEqual(cfg.run.health.max_q_gkg, 100.0)
         cfg = _compose([
             "run.health.max_wind_speed=300.0",
             "run.health.max_temperature=null",
+            "run.health.max_q_gkg=null",
         ])
+        self.assertIsNone(cfg.run.health.max_q_gkg)
         self.assertEqual(cfg.run.health.max_wind_speed, 300.0)
         self.assertIsNone(cfg.run.health.max_temperature)
 
@@ -1882,6 +1900,7 @@ class TestModeDispatch(unittest.TestCase):
             "run.total_time=1", "run.save_interval=1",
             "run.health.max_wind_speed=99.0",
             "run.health.max_temperature=null",
+            "run.health.max_q_gkg=250.0",
         ])
         with tempfile.TemporaryDirectory() as tmpdir, \
                 mock.patch("jcm.diagnostics.check_health",
@@ -1895,6 +1914,7 @@ class TestModeDispatch(unittest.TestCase):
                         model=model, forcing=object())
         self.assertEqual(health.call_args.kwargs["max_wind_speed"], 99.0)
         self.assertIsNone(health.call_args.kwargs["max_temperature"])
+        self.assertEqual(health.call_args.kwargs["max_q_gkg"], 250.0)
 
     def test_chunked_schedule_is_exact_seconds_to_a_sub_day_endpoint(self):
         """365 d + 1 h in 30-day chunks lands exactly on the end_time.
@@ -2822,6 +2842,167 @@ class TestBuilderErrorAndSelectorPaths(unittest.TestCase):
         from jcm.runners import build_model
         cfg = _compose(["dycore=pyses_ne30l47", "run.sponge.levels=1"])
         with self.assertRaisesRegex(ValueError, "lid_sponge"):
+            build_model(cfg)
+
+
+class TestUserLevelTableGrid(unittest.TestCase):
+    """``grid.level_table``: a hybrid grid that names its own half-level table."""
+
+    _OFFLINE = ["terrain=aquaplanet", "forcing=default",
+                "forcing.ozone_file=analytic", "physics.land_model=prescribed"]
+
+    @staticmethod
+    def _l95_subset_table(indices=(0, 10, 20, 30, 40, 55, 70, 80, 90, 95)):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        full = get_echam_levels(95)
+        idx = list(indices)
+        return {"a": np.asarray(full.a_boundaries, np.float64)[idx].tolist(),
+                "b": np.asarray(full.b_boundaries, np.float64)[idx].tolist()}
+
+    def _cfg(self, table, layers=None, extra=()):
+        cfg = _compose(["grid=echam_t63_l47_hybrid", "grid.spectral_truncation=21",
+                        *extra])
+        cfg.grid.layers = layers
+        cfg.grid.level_table = table
+        return cfg
+
+    def test_default_is_null_and_keeps_the_builtin_table(self):
+        cfg = _compose(["grid=echam_t63_l47_hybrid", "grid.spectral_truncation=21"])
+        self.assertIsNone(cfg.grid.level_table)
+        self.assertEqual(build_coords(cfg).vertical.layers, 47)
+
+    def test_inline_table_sets_the_vertical_and_the_layer_count(self):
+        table = self._l95_subset_table()
+        coords = build_coords(self._cfg(table))
+        self.assertEqual(coords.nodal_shape[0], 9)
+        np.testing.assert_allclose(np.asarray(coords.vertical.a_boundaries),
+                                   table["a"], rtol=1e-6)
+
+    def test_builtin_values_as_a_table_equal_layers_47(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        built_in = get_echam_levels(47)
+        table = {"a": np.asarray(built_in.a_boundaries, np.float64).tolist(),
+                 "b": np.asarray(built_in.b_boundaries, np.float64).tolist()}
+        user = build_coords(self._cfg(table, layers=47)).vertical
+        ref = build_coords(_compose(["grid=echam_t63_l47_hybrid",
+                                     "grid.spectral_truncation=21"])).vertical
+        np.testing.assert_array_equal(np.asarray(user.a_boundaries),
+                                      np.asarray(ref.a_boundaries))
+        np.testing.assert_array_equal(np.asarray(user.b_boundaries),
+                                      np.asarray(ref.b_boundaries))
+        # ... and the identical hyperdiffusion profile, the built-in index table
+        d_user = build_diffusion(self._cfg(table, layers=47))
+        d_ref = build_diffusion(_compose(["grid=echam_t63_l47_hybrid",
+                                          "grid.spectral_truncation=21"]))
+        np.testing.assert_array_equal(d_user.level_orders_temp,
+                                      d_ref.level_orders_temp)
+
+    def test_file_table_resolves_like_the_inline_one(self):
+        import tempfile
+        table = self._l95_subset_table()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "vct.nc")
+            xr.Dataset({"vct_a": ("nvclev", table["a"]),
+                        "vct_b": ("nvclev", table["b"])}).to_netcdf(path)
+            from_file = build_coords(self._cfg(path)).vertical
+        inline = build_coords(self._cfg(table)).vertical
+        np.testing.assert_array_equal(np.asarray(from_file.a_boundaries),
+                                      np.asarray(inline.a_boundaries))
+
+    def test_layers_must_agree_with_the_table(self):
+        with self.assertRaisesRegex(ValueError, "grid.layers=47 .* 9 layers"):
+            build_coords(self._cfg(self._l95_subset_table(), layers=47))
+
+    def test_level_table_needs_a_hybrid_grid(self):
+        from omegaconf import open_dict
+        cfg = _compose(["grid=speedy_t31_l8"])
+        with open_dict(cfg.grid):   # only the hybrid grid configs declare the key
+            cfg.grid.level_table = self._l95_subset_table()
+        with self.assertRaisesRegex(ValueError, "set grid.vertical=hybrid"):
+            build_coords(cfg)
+
+    def test_surface_first_table_is_rejected_not_flipped(self):
+        table = self._l95_subset_table()
+        reversed_table = {"a": table["a"][::-1], "b": table["b"][::-1]}
+        with self.assertRaisesRegex(ValueError, "SURFACE-FIRST"):
+            build_coords(self._cfg(reversed_table))
+
+    def test_auto_diffusion_maps_the_profile_by_pressure(self):
+        cfg = self._cfg(self._l95_subset_table())
+        cfg.grid.spectral_truncation = 63   # tabulated for L95 (T31 only for L47)
+        cfg.diffusion = {"kind": "auto"}
+        import logging
+        with self.assertNoLogs("jcm.diffusion", level=logging.WARNING):
+            diffusion = build_diffusion(cfg)
+        self.assertEqual(len(diffusion.level_orders_temp), 9)
+        self.assertEqual(int(diffusion.level_orders_temp[0]), 1)
+        self.assertEqual(int(diffusion.level_orders_temp[-1]), 4)
+
+    def test_build_model_constructs_on_the_user_table(self):
+        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid",
+                        "grid.spectral_truncation=21", *self._OFFLINE,
+                        "run.time_step=10", "init=jw"])
+        cfg.grid.layers = None
+        cfg.grid.level_table = self._l95_subset_table()
+        model = build_model(cfg)
+        self.assertEqual(model.coords.vertical.layers, 9)
+
+    @pytest.mark.slow
+    def test_user_table_model_takes_a_finite_step(self):
+        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid",
+                        "grid.spectral_truncation=21", *self._OFFLINE,
+                        "run.time_step=10", "init=jw"])
+        cfg.grid.layers = None
+        cfg.grid.level_table = self._l95_subset_table()
+        model = build_model(cfg)
+        preds = model.run(save_interval=10 / 1440, total_time=10 / 1440)
+        temperature = np.asarray(preds.dynamics.temperature)
+        self.assertEqual(temperature.shape[1], 9)
+        self.assertTrue(np.all(np.isfinite(temperature)))
+
+    def test_prefetch_enumerator_skips_bundles_for_a_user_table(self):
+        # tools/benchmark.py must not warm the built-in-table bundle for a grid
+        # that names its own levels, even at a published (grid, nlev).
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_bench", Path(__file__).parent.parent / "tools" / "benchmark.py")
+        bench = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bench)
+        from omegaconf import OmegaConf
+        base = {"grid": {"spectral_truncation": 63, "layers": 47,
+                         "vertical": "hybrid"}, "forcing": {"ozone_file": "auto"}}
+        plain = bench._auto_ozone_files(OmegaConf.create(base))
+        self.assertEqual(len(plain), 1)
+        base["grid"]["level_table"] = self._l95_subset_table()
+        self.assertEqual(bench._auto_ozone_files(OmegaConf.create(base)), [])
+
+    def test_prefetch_keeps_level_free_bundles_when_layers_is_null(self):
+        # ``layers: null`` is the table's own count; only the level-RESOLVED
+        # bundles are suppressed, an offline node still needs the others.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_bench2", Path(__file__).parent.parent / "tools" / "benchmark.py")
+        bench = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bench)
+        from omegaconf import OmegaConf
+        base = {"physics": {"aerosol_module": "jam"},
+                "grid": {"spectral_truncation": 63, "layers": 47,
+                         "vertical": "hybrid"}}
+        plain = bench._auto_emission_files(OmegaConf.create(base))
+        self.assertTrue(any("oxidants" in f for f in plain))
+        base["grid"]["layers"] = None
+        base["grid"]["level_table"] = self._l95_subset_table()
+        table = bench._auto_emission_files(OmegaConf.create(base))
+        self.assertFalse(any("oxidants" in f for f in table))
+        self.assertTrue(any("emissions" in f for f in table))
+        self.assertEqual(set(table), {f for f in plain if "oxidants" not in f})
+
+    def test_pyses_backend_rejects_a_level_table(self):
+        cfg = _compose(["dycore=pyses_ne30l47"])
+        from omegaconf import open_dict
+        with open_dict(cfg.grid):
+            cfg.grid.level_table = self._l95_subset_table()
+        with self.assertRaisesRegex(ValueError, "pySES"):
             build_model(cfg)
 
 
@@ -7551,6 +7732,44 @@ class TestNetcdfWriteRetry(unittest.TestCase):
 
 
 
+def _nudged_synthetic_setup(tmpdir, *, total_time, chunk_days,
+                            save_interval=1):
+    """Build a tiny Held-Suarez model, its forcing and a synthetic 6-hourly target.
+
+    Returns ``(cfg, model, forcing, times)``; the target is host-resident
+    (numpy leaves), as :func:`jcm.runners.build_run_forcing` hands it back.
+    """
+    import jax_datetime as jdt
+
+    from jcm.forcing import BY_DATE_INTERP, make_time_series
+    from jcm.nudging import NudgingTarget
+    from jcm.runners import _ensure_parent_forcing, build_forcing, build_model
+
+    cfg = _compose([
+        "physics=held_suarez", "grid=held_suarez_t31_l8",
+        "run.time_step=180", f"run.total_time={total_time}",
+        f"run.save_interval={save_interval}",
+        f"run.chunk_days={chunk_days}", "run.start_time=2010-01-01",
+        f"run.output_prefix={tmpdir}/chunk", "nudging.enabled=true"])
+    model = build_model(cfg)
+    shape = (model.coords.vertical.layers,
+             *model.coords.horizontal.nodal_shape)
+    times = jdt.to_datetime(np.arange(
+        np.datetime64("2009-12-31T00"), np.datetime64("2010-01-05T00"),
+        np.timedelta64(6, "h")).astype("datetime64[s]"))
+    ramp = np.arange(times.size, dtype=np.float32)[:, None, None, None]
+
+    def ts(base, amp):
+        vals = (base + amp * np.sin(ramp / 3.0)) * np.ones(shape, np.float32)
+        return make_time_series(vals, times, align_mode=BY_DATE_INTERP)
+
+    target = jax.device_get(NudgingTarget(
+        u_wind=ts(5.0, 10.0), v_wind=ts(0.0, 4.0), temperature=ts(260.0, 5.0)))
+    forcing = _ensure_parent_forcing(build_forcing(cfg, model.coords),
+                                     model.coords).copy(nudging_target=target)
+    return cfg, model, forcing, times
+
+
 class TestChunkedNudgingWindow(unittest.TestCase):
     """Each chunk is handed only its window of the nudging target, and that
     changes nothing a full-target chunk computes.
@@ -7560,36 +7779,13 @@ class TestChunkedNudgingWindow(unittest.TestCase):
         import contextlib
         import glob
 
-        import jax_datetime as jdt
         from unittest import mock
 
-        from jcm.forcing import BY_DATE_INTERP, make_time_series
         from jcm.model import Model
-        from jcm.nudging import NudgingTarget
-        from jcm.runners import (
-            _ensure_parent_forcing, build_forcing, build_model, run_chunked)
+        from jcm.runners import run_chunked
 
-        cfg = _compose([
-            "physics=held_suarez", "grid=held_suarez_t31_l8",
-            "run.time_step=180", "run.total_time=3", "run.save_interval=1",
-            "run.chunk_days=2", "run.start_time=2010-01-01",
-            f"run.output_prefix={tmpdir}/chunk", "nudging.enabled=true"])
-        model = build_model(cfg)
-        shape = (model.coords.vertical.layers,
-                 *model.coords.horizontal.nodal_shape)
-        times = jdt.to_datetime(np.arange(
-            np.datetime64("2009-12-31T00"), np.datetime64("2010-01-05T00"),
-            np.timedelta64(6, "h")).astype("datetime64[s]"))
-        ramp = np.arange(times.size, dtype=np.float32)[:, None, None, None]
-
-        def ts(base, amp):
-            vals = (base + amp * np.sin(ramp / 3.0)) * np.ones(shape, np.float32)
-            return make_time_series(vals, times, align_mode=BY_DATE_INTERP)
-
-        target = NudgingTarget(u_wind=ts(5.0, 10.0), v_wind=ts(0.0, 4.0),
-                               temperature=ts(260.0, 5.0))
-        forcing = _ensure_parent_forcing(build_forcing(cfg, model.coords),
-                                         model.coords).copy(nudging_target=target)
+        cfg, model, forcing, times = _nudged_synthetic_setup(
+            tmpdir, total_time=3, chunk_days=2)
         seen = []
 
         def spy(name):
@@ -7628,6 +7824,77 @@ class TestChunkedNudgingWindow(unittest.TestCase):
             xr.testing.assert_equal(w, f)
 
 
+class TestSegmentedRunWindowing(unittest.TestCase):
+    """A host that steps ``Model.run`` / ``Model.resume`` itself and windows the
+    nudging target per call gets exactly what the whole target, and
+    ``run_chunked``, give for the same segments.
+    """
+
+    SEG_DAYS = 0.125    # 3 h: segment boundaries fall between 6-hourly samples
+    N_SEG = 3
+
+    def _segments(self, model, cfg, forcing_for):
+        outs = []
+        kw = dict(save_interval=self.SEG_DAYS, total_time=self.SEG_DAYS,
+                  output_averages=bool(cfg.run.output_averages))
+        for k in range(self.N_SEG):
+            fk = forcing_for(k)
+            preds = (model.run(forcing=fk, **kw) if k == 0
+                     else model.resume(forcing=fk, **kw))
+            outs.append(preds.to_xarray())
+        return outs
+
+    def test_windowed_segments_match_whole_target_and_run_chunked(self):
+        import glob
+        import tempfile
+
+        from jcm.nudging import window_forcing
+        from jcm.runners import run_chunked
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, model, forcing, _ = _nudged_synthetic_setup(
+                tmp, total_time=self.SEG_DAYS * self.N_SEG,
+                chunk_days=self.SEG_DAYS, save_interval=self.SEG_DAYS)
+            seg_s = int(self.SEG_DAYS * 86400)
+            t0 = np.datetime64("2010-01-01T00")
+            seen = []
+
+            def windowed(k):
+                f = window_forcing(
+                    forcing, t0 + np.timedelta64(k * seg_s, "s"), seg_s)
+                seen.append(f.nudging_target.u_wind.values.shape[0])
+                return f
+
+            win = self._segments(model, cfg, windowed)
+            whole = self._segments(model, cfg, lambda k: forcing)
+            run_chunked(cfg, chunk_days=self.SEG_DAYS,
+                        output_prefix=f"{tmp}/chunk", model=model,
+                        forcing=forcing)
+            chunks = [xr.load_dataset(f)
+                      for f in sorted(glob.glob(f"{tmp}/chunk_day*.nc"))]
+
+        # One window length for every segment (one compiled program), shorter
+        # than the whole target.
+        self.assertEqual(len(set(seen)), 1)
+        self.assertLess(seen[0], forcing.nudging_target.u_wind.values.shape[0])
+        self.assertEqual(len(chunks), self.N_SEG)
+        compared = 0
+        for w, f, c in zip(win, whole, chunks):
+            for name in w.data_vars:
+                if "time" not in w[name].dims:
+                    continue
+                np.testing.assert_array_equal(w[name].values, f[name].values,
+                                              err_msg=f"{name}: whole target")
+                np.testing.assert_array_equal(w[name].values, c[name].values,
+                                              err_msg=f"{name}: run_chunked")
+                compared += 1
+        self.assertGreater(compared, 0)
+        # The target actually drives the run: segments differ from a
+        # target-free integration, so equality above is not vacuous.
+        self.assertFalse(np.array_equal(win[-1].u_wind.values,
+                                        win[0].u_wind.values))
+
+
 class TestDustVectorFollowsNudging(unittest.TestCase):
     """Every JAM preset picks HAM's nudged dust-threshold vector when nudged."""
 
@@ -7639,3 +7906,35 @@ class TestDustVectorFollowsNudging(unittest.TestCase):
                 physics = _resolve_nudging_dependent_physics(cfg, cfg.physics)
                 self.assertIs(physics.jam_dust_nudged, expected,
                               msg=f"{preset} nudging={nudging}")
+
+
+class TestMaybeAddNudgingLatTop(unittest.TestCase):
+    """``nudging.lat_top`` reaches the term; null keeps the global step."""
+
+    def _term(self, nudging):
+        from omegaconf import OmegaConf
+        from jcm import runners
+        from jcm.nudging import NudgingTerm
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        cfg = OmegaConf.create({"nudging": {"enabled": True, **nudging}})
+        physics = runners.maybe_add_nudging(speedy_physics(), cfg, coords)
+        return [t for t in physics.terms if isinstance(t, NudgingTerm)][0]
+
+    def test_default_has_no_lat_top(self):
+        self.assertIsNone(self._term({"lat_top": None}).lat_top)
+        self.assertIsNone(self._term({}).lat_top)
+
+    def test_lat_top_is_read(self):
+        term = self._term({"min_pressure_hpa": 60.0, "lat_top": {
+            "p_tropical_hpa": 150.0, "p_polar_hpa": 400.0,
+            "lat_tropical_deg": 20.0, "lat_polar_deg": 35.0,
+            "taper_decades": 0.1}})
+        self.assertEqual(float(term.lat_top.p_polar_hpa), 400.0)
+        self.assertEqual(float(term.lat_top.taper_decades), 0.1)
+
+    def test_floor_below_the_top_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._term({"min_pressure_hpa": 200.0, "lat_top": {
+                "p_tropical_hpa": 150.0, "p_polar_hpa": 400.0}})

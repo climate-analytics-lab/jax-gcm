@@ -10,6 +10,7 @@ from .hines import (
     HinesState,
     HinesTendencies,
     hines_gwd,
+    launch_level_from_pressure,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "HinesState",
     "HinesTendencies",
     "hines_gwd",
+    "launch_level_from_pressure",
 ]

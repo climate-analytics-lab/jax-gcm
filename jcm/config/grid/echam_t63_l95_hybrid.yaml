@@ -5,5 +5,10 @@
 # aux forcing (oxidants, ozone) must be regenerated for L95.
 vertical: hybrid
 layers: 95
+# Optional own hybrid table instead of the built-in one that `layers` names:
+# {a: [...], b: [...]} half-level coefficients (Pa / dimensionless, top first)
+# or the path of a netCDF file with ECHAM vct_a/vct_b; layers must then equal
+# len(a) - 1 (or be null). null keeps the built-in L47/L95 table.
+level_table: null
 spectral_truncation: 63
 spmd_mesh: null

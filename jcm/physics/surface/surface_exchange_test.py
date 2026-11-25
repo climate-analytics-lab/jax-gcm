@@ -2225,13 +2225,19 @@ def test_every_entry_point_calls_the_shared_contract_helper():
     from jcm.prescribed_state_model import PrescribedStateModel
     from jcm.single_column_model import SingleColumnModel
     for fn in (Model.run_from_state_with_carry, SingleColumnModel.run,
-               PrescribedStateModel.run, runners._run_full,
-               runners._run_prescribed, configurations.load):
+               PrescribedStateModel.run, runners.build_run_forcing,
+               runners._run_prescribed):
         assert "validate_run_forcing(" in inspect.getsource(fn), fn
-    # The CLI doors that know the run window pass it (#900): the configured
-    # one for a full run, the states' span for prescribed mode.
-    for fn in (runners._run_full, configurations.load):
-        assert "configured_run_window(" in inspect.getsource(fn), fn
+    # The full-run doors (the CLI's single integration and the Python door
+    # behind ``configurations.load``) build their forcing through the one
+    # function that checks it, so neither carries its own copy of the call.
+    for fn in (runners._run_full, configurations.from_config):
+        assert "build_run_forcing(" in inspect.getsource(fn), fn
+    assert "from_config(" in inspect.getsource(configurations.load)
+    # The doors that know the run window pass it (#900): the configured one
+    # for a full run, the states' span for prescribed mode.
+    assert "configured_run_window(" in inspect.getsource(
+        runners.build_run_forcing)
     assert "_run_window_seconds(times)" in inspect.getsource(
         runners._run_prescribed)
     for fn in (Model.run_from_state, Model.resume):

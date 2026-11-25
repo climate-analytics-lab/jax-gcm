@@ -25,7 +25,11 @@ cells; ``dycore.sl_vertical_interpolation``). The trajectories are solved in
 the reference σ; the vertical interpolation is done in its logarithm on hybrid
 grids (log-pressure at the pure-pressure top) and in σ itself on sigma grids
 (``dycore.sl_vertical_coordinate``; see
-{doc}`../design/sl_vertical_interpolation`). The Eulerian core is meant for
+{doc}`../design/sl_vertical_interpolation`). The departure points are the
+fixed point of an iteration (dinosaur's `departure_points_3d`) whose error
+grows with the step; ``dycore.sl_departure_iterations`` (default 1, dinosaur's
+warm-started single iteration) sets the count, to be raised when sweeping to
+long time steps. The Eulerian core is meant for
 physics that carries no extra tracers.
 Every jcm extra tracer (aerosol mass/number, gases, cloud condensate) rides as
 a *nodal* (gridpoint) tracer, and so does ``specific_humidity``
@@ -61,8 +65,16 @@ after the local Bermejo–Conde correction (``dycore.local_mass_fixer``); a
 modal humidity (``nodal_humidity: false``) gets the same proportional factor
 on its coefficients (``dycore.humidity_mass_fixer``). The global water
 budget therefore closes, ``P − E = −dPW/dt``. The Eulerian core is
-flux-consistent and runs no fixer. What each fixer conserves, and the measured
-budgets, are in {doc}`../design/tracer_mass_conservation`.
+flux-consistent and runs no fixer. A tracer declared
+``TracerSpec(conserved=False)`` — one whose physics imposes a *value* (an
+age-of-air clock, a tracer relaxed to a profile) rather than a mass budget — is
+exempt from both stages: it is transported and quasi-monotone-limited like any
+other nodal tracer, but neither the Bermejo–Conde correction nor the global
+factor rescales it, since restoring its pre-transport mass would fight the
+imposed value. Humidity is not a declared tracer and is always fixed. The
+pySES backend runs no mass fixer, so the flag has no effect there. What each
+fixer conserves, and the measured budgets, are in
+{doc}`../design/tracer_mass_conservation`.
 
 **The post-physics state.** ``DynamicalCore.after_physics_state`` returns the
 gridpoint state the dynamics starts from, after the physics tendency is
@@ -128,10 +140,65 @@ ECHAM ``lmidatm`` level-dependent order profile (∇² near the model top gradin
 and temperature undiffused at every level. Humidity, as a nodal tracer, is not
 hyperdiffused at all, as in ECHAM, whose ``hdiff`` acts on vorticity,
 divergence and temperature only; any other grid gets the uniform SPEEDY ∇²/∇⁴ profile on every wavenumber
-(``DiffusionFilter.default``), with a warning for unrecognised hybrid grids. ECHAM's upper sponge (``uspnge``: implicit damping of
+(``DiffusionFilter.default``), with a warning for unrecognised hybrid grids
+that name no level table (below). ECHAM's upper sponge (``uspnge``: implicit damping of
 the zonal anomalies of u, v and T, the zonal mean untouched) is enabled via the
 ``run`` group (``jcm/config/run/longrun.yaml``: the top level, 3 h, as ECHAM's
 lmidatm default; see {doc}`gravity_waves`). Resolutions T21–T425 are supported.
+
+**Vertical coordinate: built-in and user hybrid tables.** A ``hybrid`` grid is
+ECHAM's own L47 or L95 half-level table (``jcm/physics/echam/echam_levels.py::
+get_echam_levels``, transcribed from the ``vct_a``/``vct_b`` of ECHAM initial
+files: top of atmosphere first, ``a`` in Pa, ``b`` dimensionless, pressure
+``a + b·ps``) unless the grid config names its own with ``grid.level_table``:
+inline ``{a: [...], b: [...]}`` or a netCDF file carrying ``vct_a``/``vct_b``.
+``hybrid_levels_from_table`` builds the coordinate through the same top-pressure
+guard as the built-in tables and refuses what it cannot interpret without
+guessing: unequal or too-short arrays, a table that is not top-first (rejected,
+never flipped), one that does not end at ``a = 0, b = 1``, a normalised or
+negative ``a``, a decreasing ``b``, and any table whose interface pressure fails
+to increase downward at the reference surface pressure or anywhere in
+50–110 kPa. ``grid.layers``, when also given, must equal ``len(a) - 1``.
+
+The per-level ``lmidatm`` orders of ``mo_hdiff.f90::sudif`` are tabulated by
+level *index* for ECHAM's grids, and those tables remain the answer for the
+built-in L47/L95 (the transition levels sit at the pressures ``sudif``
+annotates, which a test pins). A user table has no index table of its own, so
+each of its levels takes the order of the ECHAM level nearest it in log
+reference pressure (mid-level ``a_c + b_c·p0s1_bg``, 101325 Pa by default;
+``jcm/diffusion.py::_orders_by_reference_pressure``). The orders are a property
+of where in the column the damping is needed rather than of an index, so a
+thinned troposphere or a coarsened mesosphere keeps the damping each
+pressure range has in ECHAM, and a table cut from L95's interfaces gets, level
+by level, the order of the L95 level it spans. The source profile is the
+tabulated truncation nearest the run's in log space, as for the built-in grids;
+where both L47 and L95 are tabulated at it (T63) the L95 profile is used, since
+its 95 mid-levels resolve the transition pressures more finely and the two
+profiles' transitions (``sudif``: L47 ≈ 0.23/1.22/2.96 hPa, L95 ≈
+0.15/0.77/1.50 hPa) differ by under a factor of two. The zonal mean stays
+undiffused, as for the built-in profiles. The wind-dependent ``damhih`` branch
+of ``lmidatm`` is not ported for any table (see below).
+
+The level-resolved boundary data (ozone, oxidants) are published per
+``(grid, nlev)`` on the *built-in* tables and are mapped onto the model level
+for level, with no vertical interpolation (the ozone loader checks the level
+count and horizontal grid, the oxidant reader the count and, when the file
+carries them, ``hyam``/``hybm``). A user table that happens to have 47 or 95
+levels therefore must not receive those bundles. On the Dinosaur backend,
+which is the one that takes a user table, every route (``auto``, an
+explicit ``hf://bundles/...`` path as the ``ma-*`` configurations set, a
+packaged or local file, ``ForcingData.from_bundles``) ends at one attach
+function per input, which checks the data: a file that carries its vertical
+coordinate (ozone: the mid-level ``level_a_pa``/``level_b`` written by
+``interpolate_ozone``; oxidants: ``hyam``/``hybm``) is compared with the
+model's and a mismatch raises, for built-in and user tables alike; a file with
+none is refused on a user table when it is a published bundle, and accepted when
+it is a local file, whose naming is the user's statement that it is on their
+levels. The ``auto`` routes and ``from_bundles`` fail earlier, before any fetch.
+The remedy is a file on the table's own levels
+(``jcm.data.bc.interpolate_ozone.vertical_interp_log_p`` maps any pressure-level
+field onto given pressures) or an opt-out (``forcing.ozone_file=analytic``,
+``forcing.oxidants_file=null``). The pySES backend rejects ``grid.level_table``.
 
 **What ECHAM/CAM does.** ECHAM6 (Stevens et al. 2013, *JAMES*) is a spectral-
 transform core with leapfrog + semi-implicit correction and spectral (∇²ⁿ)
@@ -183,6 +250,11 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
   wavenumbers whose advective Courant number exceeds one, ``mo_hdiff.f90``)
   is not ported: it guards ECHAM's Eulerian leapfrog advection, and the
   semi-Lagrangian transport has no such Courant limit.
+- `science` — ECHAM defines the ``lmidatm`` orders per level index on its own
+  grids only. For a user hybrid table jcm maps them by reference pressure from
+  the nearest tabulated truncation's L95 (else L47) profile, a choice of ours
+  with no Fortran counterpart; on ECHAM's own grids the index tables are used
+  unchanged.
 - `compute` — the dinosaur backend integrates with a two-time-level
   semi-Lagrangian semi-implicit Crank–Nicolson RK2 step rather than ECHAM's
   three-time-level leapfrog + semi-implicit (both are semi-implicit; the
@@ -225,8 +297,9 @@ residual that correction's weights could not absorb (see
 vertical level counts; high-``nlev`` / high-truncation configurations need a
 resolution-aware timestep to stay stable (see
 {doc}`../design/speedy_variable_levels`). The ECHAM ``lmidatm`` hyperdiffusion
-profiles exist only for L47/L95; other hybrid grids fall back to the uniform
-SPEEDY profile with a warning. The pySES backend's open production gap is that
+index tables exist only for L47/L95; a hybrid grid that names its own level
+table is mapped from them by pressure, and a hybrid grid of any other level
+count without a table falls back to the uniform SPEEDY profile with a warning. The pySES backend's open production gap is that
 multi-GPU sharding of the element and physics-column axes
 is unreconciled (see {doc}`../design/pyses_cam_se_dycore`). Its precision seam
 is float64 dynamics driving float32 physics by default
@@ -246,7 +319,7 @@ rely on.
   nodal-tracer fixer (``bermejo_conde_correction``,
   ``BermejoCondeTracerTransport``).
 - ``jcm/config/dycore/dinosaur.yaml`` — ``advection``,
-  ``sl_vertical_interpolation``, ``humidity_mass_fixer``, ``local_mass_fixer``,
+  ``sl_vertical_interpolation``, ``sl_departure_iterations``, ``humidity_mass_fixer``, ``local_mass_fixer``,
   ``nodal_humidity``.
 - ``jcm/checkpoint.py`` — ``_migrate_humidity_representation``: a state
   stored with the other humidity representation is converted on load.

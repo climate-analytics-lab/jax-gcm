@@ -2514,6 +2514,28 @@ class TestTracerSpec(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "qnc"):
             physics.required_tracers()
 
+    def test_conserved_defaults_true_and_disagreement_raises(self):
+        self.assertTrue(TracerSpec("age").conserved)
+
+        def term(flag, nm, cat):
+            class T(PhysicsTerm):
+                name: ClassVar[str] = nm
+                category: ClassVar[str] = cat
+                @classmethod
+                def required_tracers(cls):
+                    return (TracerSpec("age", conserved=flag),)
+                def __call__(self, state, diagnostics, forcing, terrain):
+                    return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+            return T()
+
+        agreed = ComposablePhysics(terms=[term(False, "a", "x"), term(False, "b", "y")])
+        (spec,) = agreed.required_tracers()
+        self.assertFalse(spec.conserved)
+        with self.assertRaisesRegex(ValueError, "age"):
+            ComposablePhysics(
+                terms=[term(False, "a", "x"), term(True, "b", "y")]
+            ).required_tracers()
+
     def test_nondimensionalize_flag_round_trip(self):
         """Tracers with nondimensionalize=False must round-trip unchanged through the converters."""
         from dinosaur import primitive_equations
@@ -2695,3 +2717,147 @@ class TestWithheldOutputKeys:
         for key in NOA_KEYS:
             assert f"radiation.noa_frac_{key}" not in out, (
                 "internal held fraction published")
+
+
+# ---------------------------------------------------------------------------
+# Tracer-tendency accumulation across terms, on both host layouts
+# ---------------------------------------------------------------------------
+
+class _TracerTendency(PhysicsTerm):
+    """Toy term tending a fixed set of tracers by constant rates."""
+
+    category: ClassVar[str] = "test"
+    requires: ClassVar[tuple[str, ...]] = ()
+    provides: ClassVar[tuple[str, ...]] = ()
+
+    def __init__(self, name, rates):
+        super().__init__()
+        self.name = name
+        self._rates = dict(rates)
+
+    def required_tracers(self):
+        # An instance override of the classmethod: the tracers declared
+        # depend on this instance's constructor arguments.
+        return tuple(TracerSpec(t) for t in self._rates)
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        shape = state.temperature.shape
+        tracers = {t: r * jnp.ones(shape) for t, r in self._rates.items()}
+        return PhysicsTendency.zeros(shape, tracers=tracers), diagnostics
+
+
+class _NoTracerTendency(PhysicsTerm):
+    """Toy term that returns no tracer tendencies at all."""
+
+    name: ClassVar[str] = "no_tracer_tend"
+    category: ClassVar[str] = "test"
+    requires: ClassVar[tuple[str, ...]] = ()
+    provides: ClassVar[tuple[str, ...]] = ()
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+
+class TestTracerTendencyAccumulation(unittest.TestCase):
+    """Tendencies from several terms accumulate per tracer on either layout.
+
+    Terms tend different tracer sets, the same tracer, or none; the
+    composed tendency must be the per-tracer sum with a missing key counting
+    as zero, and the grid and column-vectorized hosts must agree.
+    """
+
+    SHAPE = (2, 4, 8)
+
+    def _compose(self, terms, vectorize):
+        physics = ComposablePhysics(
+            terms=terms, checkpoint_terms=False, vectorize_columns=vectorize)
+        state = _make_test_state(self.SHAPE).copy(tracers={
+            spec.name: jnp.zeros(self.SHAPE)
+            for spec in physics.required_tracers()})
+        tend, _ = physics.compute_tendencies(
+            state, _make_test_forcing(self.SHAPE[1:]),
+            _make_test_terrain(self.SHAPE[1:]))
+        return tend
+
+    def _check(self, terms_fn, want):
+        for vectorize in (False, True):
+            with self.subTest(vectorize_columns=vectorize):
+                tend = self._compose(terms_fn(), vectorize)
+                self.assertEqual(set(tend.tracers), set(want))
+                for name, rate in want.items():
+                    npt.assert_allclose(tend.tracers[name], rate)
+                    self.assertEqual(tend.tracers[name].shape, self.SHAPE)
+
+    def test_terms_tending_different_tracers(self):
+        self._check(lambda: [_TracerTendency("a", {"tr_a": 1.0}),
+                             _TracerTendency("b", {"tr_b": 2.0})],
+                    {"tr_a": 1.0, "tr_b": 2.0})
+
+    def test_terms_tending_the_same_tracer(self):
+        self._check(lambda: [_TracerTendency("a", {"tr_a": 1.0}),
+                             _TracerTendency("b", {"tr_a": 2.5})],
+                    {"tr_a": 3.5})
+
+    def test_overlapping_and_disjoint_tracer_sets(self):
+        self._check(lambda: [_TracerTendency("a", {"tr_a": 1.0, "tr_b": 1.0}),
+                             _TracerTendency("b", {"tr_b": 2.0, "tr_c": 4.0})],
+                    {"tr_a": 1.0, "tr_b": 3.0, "tr_c": 4.0})
+
+    def test_term_with_no_tracer_tendencies(self):
+        self._check(lambda: [_TracerTendency("a", {"tr_a": 1.0}),
+                             _NoTracerTendency()],
+                    {"tr_a": 1.0})
+        self._check(lambda: [_NoTracerTendency(),
+                             _TracerTendency("a", {"tr_a": 1.0})],
+                    {"tr_a": 1.0})
+
+
+    def test_state_tracer_no_term_tends_has_a_zero_entry(self):
+        # Consumers index the tendency by every state tracer, so the key set
+        # follows the state on both layouts. A tendency for a tracer the
+        # state lacks has nothing to apply to and is dropped on both.
+        for vectorize in (False, True):
+            with self.subTest(vectorize_columns=vectorize):
+                physics = ComposablePhysics(
+                    terms=[_TracerTendency("a", {"tr_a": 1.0, "tr_gone": 5.0})],
+                    checkpoint_terms=False, vectorize_columns=vectorize)
+                state = _make_test_state(self.SHAPE).copy(tracers={
+                    "tr_a": jnp.zeros(self.SHAPE),
+                    "tr_idle": jnp.zeros(self.SHAPE)})
+                tend, _ = physics.compute_tendencies(
+                    state, _make_test_forcing(self.SHAPE[1:]),
+                    _make_test_terrain(self.SHAPE[1:]))
+                self.assertEqual(set(tend.tracers), {"tr_a", "tr_idle"})
+                npt.assert_allclose(tend.tracers["tr_a"], 1.0)
+                npt.assert_allclose(tend.tracers["tr_idle"], 0.0)
+
+
+class TestPhysicsTendencyArithmetic(unittest.TestCase):
+    """``PhysicsTendency`` trees add as a union over the tracer key sets."""
+
+    SHAPE = (2, 3, 4)
+
+    def _tend(self, **tracers):
+        return PhysicsTendency.zeros(
+            self.SHAPE, tracers={k: v * jnp.ones(self.SHAPE)
+                                 for k, v in tracers.items()})
+
+    def test_add_unions_keys_with_missing_as_zero(self):
+        total = self._tend(a=1.0, b=2.0) + self._tend(b=3.0, c=4.0)
+        self.assertEqual(set(total.tracers), {"a", "b", "c"})
+        for name, want in {"a": 1.0, "b": 5.0, "c": 4.0}.items():
+            npt.assert_allclose(total.tracers[name], want)
+
+    def test_add_with_an_empty_tracer_dict(self):
+        for total in (self._tend() + self._tend(a=1.0),
+                      self._tend(a=1.0) + self._tend()):
+            self.assertEqual(set(total.tracers), {"a"})
+            npt.assert_allclose(total.tracers["a"], 1.0)
+
+    def test_inplace_add_accumulates(self):
+        acc = self._tend()
+        acc += self._tend(a=1.0)
+        acc += self._tend(b=2.0)
+        acc += self._tend(a=3.0)
+        npt.assert_allclose(acc.tracers["a"], 4.0)
+        npt.assert_allclose(acc.tracers["b"], 2.0)

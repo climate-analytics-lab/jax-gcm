@@ -60,7 +60,11 @@ Algorithm (column-mode, executed at each grid column):
 - ``launch_level``, ``num_azimuths``, and ``smoothing_passes`` are
   passed as Python integer kwargs to :func:`hines_gwd` rather than
   living on the parameters tree, because they control loop bounds that
-  must be static at JIT trace time.
+  must be static at JIT trace time. On :class:`HinesGwd` the launch level
+  is given either as ECHAM's level count (``launch_level``) or as a
+  reference pressure (``launch_pressure_hpa``, see
+  :func:`launch_level_from_pressure`); the latter is resolved once in
+  ``cache_coords`` to the same static count.
 
 - A small handful of bug-for-bug Fortran quirks are preserved (and
   flagged at the call sites with ``# Fortran-quirk`` comments) so the
@@ -68,6 +72,7 @@ Algorithm (column-mode, executed at each grid column):
   the leftover-loop-variable in ``mair`` indexing at the top-level
   heating term, and the 0-based shift of various 1-based loop bounds.
 """
+import logging
 import math
 from typing import NamedTuple, Tuple
 
@@ -733,6 +738,59 @@ from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
 
 
+#: ECHAM's ``emiss_lev`` (``mo_gw_hines`` namelist): the launch level as a
+#: count of levels above the surface. Used when neither launch key is given.
+DEFAULT_LAUNCH_LEVEL = 10
+
+
+def launch_level_from_pressure(vertical, launch_pressure_hpa: float) -> int:
+    """Resolve a launch pressure to :func:`hines_gwd`'s ``launch_level`` count.
+
+    Picks the full level whose reference pressure is nearest
+    ``launch_pressure_hpa`` and returns its count above the surface, the
+    same quantity as ECHAM's ``emiss_lev``: ``nlev - idx - 1`` for the
+    top-first full-level index ``idx`` (the frame :func:`hines_gwd` works
+    in). The reference pressure of a level is
+    ``a_centers + b_centers * p0s1_bg`` for a hybrid coordinate and
+    ``centers * p0s1_bg`` for a sigma coordinate, i.e. the level's pressure
+    at the standard surface pressure ``constants.p0s1_bg``
+    (:func:`jcm.physics.coords_util.reference_pressure_pa`, the definition
+    the nudging profile and the hyperdiffusion mapping share).
+
+    Args:
+        vertical: dycore vertical-coordinate object (``a_centers`` /
+            ``b_centers`` or ``centers``), top-first.
+        launch_pressure_hpa: requested launch pressure (hPa).
+
+    Returns:
+        The static launch-level count, ``1 <= launch_level <= nlev - 1``.
+
+    Raises:
+        ValueError: if the pressure lies above the top full level or below
+            the lowest level at which the scheme can launch (it reads the
+            layer mass of the level below the launch level, so the lowest
+            full level is excluded); the message names the valid range.
+
+    """
+    import numpy as np
+
+    from jcm.physics.coords_util import reference_pressure_pa
+    p_hpa = reference_pressure_pa(vertical) / 100.0
+    nlev = p_hpa.size
+    lo, hi = float(p_hpa[0]), float(p_hpa[nlev - 2])
+    p = float(launch_pressure_hpa)
+    if not (np.isfinite(p) and lo <= p <= hi):
+        raise ValueError(
+            f"launch_pressure_hpa={launch_pressure_hpa} is outside the range "
+            f"this vertical grid can launch from: {lo:.4g} hPa (top full "
+            f"level) to {hi:.4g} hPa (second-lowest full level; the scheme "
+            f"needs a layer below the launch level), at the reference "
+            f"surface pressure {float(_physical_constants.p0s1_bg) / 100.0:g} hPa."
+        )
+    idx = int(np.argmin(np.abs(p_hpa - p)))
+    return nlev - idx - 1
+
+
 class HinesGwd(PhysicsTerm):
     """Hines (1997) doppler-spread spectral non-orographic GWD.
 
@@ -742,6 +800,15 @@ class HinesGwd(PhysicsTerm):
     moist-air diagnostics dict, computes per-layer mass ``Δp / g`` on
     the fly, and writes only u/v/T tendencies (no Data sub-struct —
     Hines is a pure tendency producer).
+
+    The launch level is either ``launch_level`` (levels above the
+    surface, ECHAM's ``emiss_lev``; 10 when neither key is given) or
+    ``launch_pressure_hpa`` (resolved once in :meth:`cache_coords` to the
+    nearest full level at the reference surface pressure, so one setting
+    means the same height on vertical tables whose troposphere differs
+    from ECHAM's). Giving both is an error. The resolved count selects an
+    array slice and loop bound, so it is static Python data rather than a
+    differentiable parameter leaf.
     """
 
     name: ClassVar[str] = "hines_gwd"
@@ -752,9 +819,75 @@ class HinesGwd(PhysicsTerm):
     )
     provides: ClassVar[tuple[str, ...]] = ()
 
-    def __init__(self, params: HinesParameters | None = None):
-        """Hold the scheme-native :class:`HinesParameters`."""
+    def __init__(
+        self,
+        params: HinesParameters | None = None,
+        launch_level: int | None = None,
+        launch_pressure_hpa: float | None = None,
+    ):
+        """Hold the scheme-native :class:`HinesParameters` and launch level.
+
+        Args:
+            params: scheme parameters (differentiable leaves).
+            launch_level: levels above the surface to launch from (ECHAM
+                ``emiss_lev``), ``>= 1``. Default (both launch keys
+                ``None``): 10.
+            launch_pressure_hpa: launch pressure (hPa) as the alternative
+                to ``launch_level``; resolved in :meth:`cache_coords`.
+
+        Raises:
+            ValueError: if both launch keys are given, or ``launch_level``
+                is not a positive integer.
+
+        """
+        if launch_level is not None and launch_pressure_hpa is not None:
+            raise ValueError(
+                "HinesGwd: give either launch_level (levels above the "
+                "surface) or launch_pressure_hpa, not both "
+                f"(got launch_level={launch_level}, "
+                f"launch_pressure_hpa={launch_pressure_hpa})."
+            )
+        if launch_level is not None and int(launch_level) < 1:
+            raise ValueError(
+                f"HinesGwd: launch_level must be >= 1, got {launch_level}.")
         self.params = nnx.Param(params or HinesParameters.default())
+        self.launch_pressure_hpa = (
+            None if launch_pressure_hpa is None else float(launch_pressure_hpa))
+        self._launch_level_explicit = launch_level is not None
+        # Static (not a pytree leaf): selects an index and loop bounds.
+        if launch_level is not None:
+            self.launch_level = int(launch_level)
+        elif launch_pressure_hpa is None:
+            self.launch_level = DEFAULT_LAUNCH_LEVEL
+        else:
+            self.launch_level = None      # set by cache_coords
+
+    def cache_coords(self, coords) -> None:
+        """Resolve ``launch_pressure_hpa`` to the static launch-level count."""
+        if self.launch_pressure_hpa is not None:
+            self.launch_level = launch_level_from_pressure(
+                coords.vertical, self.launch_pressure_hpa)
+            return
+        nlev = int(coords.vertical.layers)
+        if self.launch_level < nlev:
+            return
+        if self._launch_level_explicit:
+            raise ValueError(
+                f"HinesGwd: launch_level={self.launch_level} needs more "
+                f"than the {nlev} levels of this grid (valid: 1 to "
+                f"{nlev - 1}).")
+        # The unset default is ECHAM's count for ECHAM's grids. A stack
+        # shallower than it (the idealised 8-layer grids) has no such level:
+        # the launch index falls off the top of the column and the scheme
+        # applies no drag. That stays a run, not an error, because those
+        # grids are used to exercise the rest of the package; the warning
+        # says what to set where Hines is meant to act.
+        logging.getLogger(__name__).warning(
+            "HinesGwd: the default launch level (%d levels above the "
+            "surface, ECHAM's emiss_lev) does not exist on this %d-level "
+            "grid, so the scheme applies no gravity-wave drag here. Set "
+            "launch_pressure_hpa (or launch_level) to launch from a level "
+            "this grid has.", self.launch_level, nlev)
 
     def __call__(
         self,
@@ -764,6 +897,11 @@ class HinesGwd(PhysicsTerm):
         terrain: TerrainData,
     ) -> tuple[PhysicsTendency, dict]:
         """Compute u/v tendencies + heating from Hines (1997)."""
+        if self.launch_level is None:
+            raise RuntimeError(
+                "HinesGwd: launch_pressure_hpa is resolved in cache_coords, "
+                "which was not called before the first step.")
+        launch_level = int(self.launch_level)
         params = self.params.get_value()
         pressure_full = diagnostics["pressure_full"]
         pressure_half = diagnostics["pressure_half"]
@@ -777,7 +915,7 @@ class HinesGwd(PhysicsTerm):
         )
 
         tend, _state = jax.vmap(
-            lambda *a: hines_gwd(*a, params),
+            lambda *a: hines_gwd(*a, params, launch_level=launch_level),
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1),
             out_axes=(0, 0),
         )(

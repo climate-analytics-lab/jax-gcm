@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import jax
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from jcm import progress as _progress
 from jcm import provenance, temporal_aggregation
@@ -118,6 +118,33 @@ def configure_host_device_count(n: int | None) -> None:
 # Coordinate system
 # ---------------------------------------------------------------------------
 
+def _grid_level_table(grid):
+    """Hybrid levels named by ``grid.level_table``, or ``None`` if unset.
+
+    ``level_table`` is either inline ``{a: [...], b: [...]}`` half-level
+    coefficients or the path of a netCDF file carrying ECHAM's
+    ``vct_a``/``vct_b`` (``hf://`` and the usual path resolution apply, with
+    provenance recorded). It only means something on a ``hybrid`` grid, so any
+    other family raises rather than ignore it. ``grid.layers``, when also
+    given, must equal the table's ``len(a) - 1``.
+    """
+    table = grid.get("level_table", None)
+    if table is None:
+        return None
+    if grid.get("vertical", None) != "hybrid":
+        raise ValueError(
+            f"grid.level_table is a hybrid-level table but grid.vertical="
+            f"{grid.get('vertical', None)!r}; set grid.vertical=hybrid.")
+    from omegaconf import OmegaConf
+
+    from jcm.physics.echam.echam_levels import levels_from_level_table
+    if OmegaConf.is_config(table):
+        table = OmegaConf.to_container(table, resolve=True)
+    if isinstance(table, str):
+        table = _resolve_data_path(table)
+    return levels_from_level_table(table, grid.get("layers", None))
+
+
 def build_coords(cfg: DictConfig):
     """Build a ``CoordinateSystem`` from ``cfg.grid``.
 
@@ -134,15 +161,18 @@ def build_coords(cfg: DictConfig):
     this family and ``sigma`` is for physics that does not care about the
     spacing (Held-Suarez). Layer count is independent of physics: each
     physics package is responsible for raising if it can't accept the chosen
-    ``cfg.grid.layers``.
+    ``cfg.grid.layers``. A ``hybrid`` grid may instead name its own
+    half-level table with ``cfg.grid.level_table`` (see
+    :func:`_grid_level_table`); the layer count is then the table's.
 
     ``cfg.grid.spmd_mesh`` (optional) is a ``[x, y, z]`` triple specifying
     the SPMD device mesh over (longitude, latitude, vertical); pass ``null``
     or omit to run on a single device.
     """
     grid = cfg.grid
-    layers = grid.layers
     truncation = grid.spectral_truncation
+    user_levels = _grid_level_table(grid)
+    layers = user_levels.layers if user_levels is not None else grid.layers
     spmd_mesh = grid.get("spmd_mesh", None)
     spmd_mesh = tuple(spmd_mesh) if spmd_mesh is not None else None
 
@@ -163,17 +193,23 @@ def build_coords(cfg: DictConfig):
         )
     if vertical == "hybrid":
         # ECHAM/ICON ship pre-tuned full-depth hybrid tables for 47 / 95
-        # levels; for any other count the user has to drop the table in by
-        # hand. Keep the error chatty so the failure mode is obvious.
+        # levels (``layers``); any other table is the user's own, named by
+        # ``grid.level_table``. Keep the error chatty so the failure mode is
+        # obvious.
         from jcm.physics.echam.echam_levels import get_echam_levels
-        try:
-            vert = get_echam_levels(layers)
-        except ValueError as exc:
-            raise ValueError(
-                f"hybrid coords with {layers} levels are not pre-configured. "
-                "Use one of the supported counts (47, 95) or extend "
-                "jcm.physics.echam.echam_levels.get_echam_levels."
-            ) from exc
+        if user_levels is not None:
+            vert = user_levels
+        else:
+            try:
+                vert = get_echam_levels(layers)
+            except ValueError as exc:
+                raise ValueError(
+                    f"hybrid coords with {layers} levels are not "
+                    "pre-configured. Use one of the supported counts "
+                    "(47, 95) or name your own half-level table with "
+                    "grid.level_table ({a: [...], b: [...]} or a netCDF "
+                    "file with vct_a/vct_b)."
+                ) from exc
         return get_coords(
             vertical_coords=vert,
             spectral_truncation=truncation,
@@ -571,15 +607,23 @@ def maybe_add_nudging(physics, cfg: DictConfig, coords):
         return physics
     import jax.numpy as jnp
 
-    from jcm.nudging import NudgingConfig, with_nudging
+    from omegaconf import OmegaConf
+
+    from jcm.nudging import LatTop, NudgingConfig, with_nudging
     inv_tau, nlev = _nudging_inv_tau(nudging_cfg, coords.vertical)
+    lat_top_cfg = nudging_cfg.get("lat_top", None)
+    if lat_top_cfg is not None and OmegaConf.is_config(lat_top_cfg):
+        lat_top_cfg = OmegaConf.to_container(lat_top_cfg, resolve=True)
+    lat_top = (None if lat_top_cfg is None else LatTop.from_mapping(
+        lat_top_cfg,
+        min_pressure_hpa=float(nudging_cfg.get("min_pressure_hpa", 60.0))))
     config = NudgingConfig(
         inv_tau_wind=jnp.asarray(inv_tau),
         inv_tau_temperature=(jnp.asarray(inv_tau)
                              if nudging_cfg.get("nudge_temperature", False)
                              else jnp.zeros(nlev)),
     )
-    return with_nudging(physics, config)
+    return with_nudging(physics, config, lat_top=lat_top)
 
 
 def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):
@@ -705,7 +749,10 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
     is what the L95 middle-atmosphere grids exist to exploit. Any other
     grid — SPEEDY T31L8, Held-Suarez, a hybrid grid at an untabulated level
     count — gets the uniform SPEEDY del² profile, with a warning in the
-    hybrid case since that is unlikely to be what was intended (#579).
+    hybrid case since that is unlikely to be what was intended (#579). A
+    hybrid grid that names its own table (``grid.level_table``) is the
+    exception: it gets the ECHAM profile mapped onto its levels by reference
+    pressure, at any level count (:func:`jcm.diffusion.echam_lmidatm_orders`).
 
     Set ``cfg.diffusion.kind: default`` to force the uniform SPEEDY profile
     (24h temp / 12h vor_q / 2h div), ``echam_lmidatm`` to force the ECHAM
@@ -719,16 +766,20 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
     scale = 1.0 if diffusion is None else float(diffusion.get("scale", 1.0))
 
     grid_cfg = cfg.get("grid", None)
-    layers = int(grid_cfg.get("layers", 0)) if grid_cfg is not None else 0
+    # A user level table (``grid.level_table``) fixes the layer count and gets
+    # ECHAM's order profile mapped onto its levels by pressure.
+    levels = _grid_level_table(grid_cfg) if grid_cfg is not None else None
+    layers = (levels.layers if levels is not None
+              else int(grid_cfg.get("layers", 0)) if grid_cfg is not None else 0)
     truncation = int(grid_cfg.get("spectral_truncation", 0)) if grid_cfg is not None else 0
     vertical = str(grid_cfg.get("vertical", "")) if grid_cfg is not None else ""
 
     if kind == "auto":
-        base = DiffusionFilter.auto(truncation, layers, vertical)
+        base = DiffusionFilter.auto(truncation, layers, vertical, levels)
     elif kind == "default":
         base = DiffusionFilter.default()
     elif kind == "echam_lmidatm":
-        base = DiffusionFilter.echam_lmidatm(truncation, layers)
+        base = DiffusionFilter.echam_lmidatm(truncation, layers, levels)
     elif kind == "echam_t63_l47":
         base = DiffusionFilter.echam_t63_l47()
     elif kind == "echam_t85_l47":
@@ -1015,16 +1066,20 @@ def _resolve_start_time(cfg: DictConfig):
 _LOG_LEVEL_NAMES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
-def _apply_log_level(cfg: DictConfig) -> None:
+def apply_log_level(cfg: DictConfig) -> None:
     """Set the ``jcm`` logger level from ``cfg.run.log_level``.
 
     The level goes on the ``jcm`` logger rather than the root one, so the
     CLI's verbosity knob covers jcm's own output without deciding a level for
     anything else in the host process. ``jcm`` the *library* sets no level at
     all — this function and Hydra's own ``job_logging`` are the only logging
-    configuration jcm performs, and both belong to the CLI. Called only from
-    :func:`run`, never from the model builders: those are reachable from
-    :func:`jcm.configurations.load`, a library door.
+    configuration jcm performs, and both belong to the process's entry point.
+    :func:`run` calls it; the model builders never do, because they are
+    reachable from the library doors (:func:`jcm.configurations.load`,
+    :func:`jcm.configurations.from_config`), where resetting the host's
+    ``jcm`` level would be the library configuring logging. A host that wants
+    the config's level calls this itself, or passes
+    ``from_config(..., apply_log_level=True)``.
 
     A numeric level is taken as-is, spelled as an int or a string: a config
     writer reasonably tries ``run.log_level=50``, and an interpolation such
@@ -1058,6 +1113,11 @@ def _apply_log_level(cfg: DictConfig) -> None:
                     f"expected one of {', '.join(_LOG_LEVEL_NAMES)} or an "
                     "int.") from None
     logging.getLogger("jcm").setLevel(level)
+
+
+#: Pre-publication name of :func:`apply_log_level`, kept for downstream code
+#: that already calls it.
+_apply_log_level = apply_log_level
 
 
 def resolve_effective_time_step_seconds(
@@ -1122,6 +1182,22 @@ def resolve_effective_time_step_seconds(
         "pass the built model/dycore, or select a backend whose config "
         "declares one (pySES's dycore.dt_seconds)."
     )
+
+
+def _departure_iterations(value) -> int:
+    """Validate ``dycore.sl_departure_iterations`` (a positive integer).
+
+    A fractional, boolean or non-positive count would otherwise surface as an
+    opaque failure inside dinosaur's trajectory solve; ``null`` means "the
+    default" (one iteration).
+    """
+    if value is None:
+        return 1
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            f"dycore.sl_departure_iterations must be a positive integer, "
+            f"got {value!r}.")
+    return int(value)
 
 
 def build_model(cfg: DictConfig) -> Model:
@@ -1194,6 +1270,8 @@ def build_model(cfg: DictConfig) -> Model:
         # null -> the dycore default (log_pressure on hybrid grids, sigma on
         # sigma grids).
         "vertical_coordinate": dycore_cfg.get("sl_vertical_coordinate", None),
+        "departure_iterations": _departure_iterations(
+            dycore_cfg.get("sl_departure_iterations", 1)),
         "humidity_mass_fixer": bool(dycore_cfg.get("humidity_mass_fixer", True)),
         "local_mass_fixer": bool(dycore_cfg.get("local_mass_fixer", True)),
         "nodal_humidity": bool(dycore_cfg.get(
@@ -1234,6 +1312,12 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     lid sits outside the shipped radiation schemes' validity and both
     refrigerates and accelerates unbounded without it.
     """
+    if (cfg.get("grid", None) or {}).get("level_table", None) is not None:
+        raise ValueError(
+            "grid.level_table is not supported on the pySES backend: its "
+            "vertical grid is the dycore's own (dycore.nlev, the built-in "
+            "ECHAM table) and its forcing maps level-resolved inputs onto "
+            "that table.")
     import jax.numpy as jnp
 
     from jcm.dycore.pyses import PysesCamSEDycore
@@ -1687,7 +1771,7 @@ def run(cfg: DictConfig, model: Model | None = None):
     # whereas ``build_model`` is reachable from the documented Python door
     # ``jcm.configurations.load``, where resetting the caller's ``jcm`` level
     # would be the library configuring logging all over again.
-    _apply_log_level(cfg)
+    apply_log_level(cfg)
 
     # Best-effort raise of the CPU device count, looked up from
     # ``grid.host_device_count`` with a top-level ``host_device_count``
@@ -2089,17 +2173,56 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
             )
 
 
-def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
-    if model is None:
-        model = build_model(cfg)
+def build_run_forcing(cfg: DictConfig, model: Model):
+    """Build the run's :class:`~jcm.forcing.ForcingData` and run its guards.
 
-    forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
+    The one sequence every full-mode door shares (:func:`_run_full` and
+    :func:`jcm.configurations.from_config`): the boundary forcing, the ERA5
+    nudging target when ``nudging.enabled`` (host-resident, numpy leaves; see
+    :func:`_maybe_attach_nudging_target`), then the emulator-GHG guard, the
+    run-window coverage check and the config-trap warnings.
+    """
+    dycore = getattr(model, "dycore", None)
+    forcing = build_forcing(cfg, model.coords, dycore=dycore)
     forcing = _maybe_attach_nudging_target(forcing, cfg, model)
     guard_emulator_ghg_forcing(model.physics, forcing)
     validate_run_forcing(model.physics, forcing,
                          run_window=configured_run_window(cfg, model))
     warn_on_config_traps(cfg, model.physics, forcing, coords=model.coords,
-                         dycore=getattr(model, "dycore", None))
+                         dycore=dycore)
+    return forcing
+
+
+def initial_state_kwargs(cfg: DictConfig, model: Model) -> dict:
+    """``Model.run`` keyword arguments that apply ``cfg.init``.
+
+    ``{}`` for ``isothermal`` (the model's own default start); otherwise
+    ``initial_state`` and, for a ``from_state`` warm start, the donor's
+    ``initial_physics_state`` too. Shared by :func:`_run_full` and
+    :func:`jcm.configurations.from_config` so both doors start from the same
+    state.
+    """
+    init = cfg.get("init", {})
+    kind = init.get("kind", "isothermal")
+    if kind == "isothermal":
+        return {}
+    if kind == "jw":
+        return {"initial_state": jw_state(model, rh=float(init.get("rh", 0.6)))}
+    if kind == "balanced_isothermal":
+        return {"initial_state": balanced_isothermal_state(model)}
+    if kind == "from_state":
+        state, carry = _state_from_file(model, cfg)
+        return {"initial_state": state, "initial_physics_state": carry}
+    if kind == "era5":
+        return {"initial_state": _state_from_era5(model, cfg)}
+    raise ValueError(f"Unknown init.kind={kind!r}")
+
+
+def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
+    if model is None:
+        model = build_model(cfg)
+
+    forcing = build_run_forcing(cfg, model)
     # After model + forcing construction: config-selected libraries are
     # imported and the ozone source is decided, so the summary is accurate.
     logger.info("provenance: %s", provenance.summary())
@@ -2130,34 +2253,12 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         )
 
     progress_bar = bool(cfg.run.get("progress_bar", False))
-    if cfg.init.kind == "isothermal":
-        return model.run(
-            forcing=forcing,
-            save_interval=cfg.run.save_interval,
-            total_time=total_time,
-            end_time=end_time,
-            output_averages=cfg.run.output_averages,
-            snapshot_interval=cfg.run.get("snapshot_interval"),
-            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
-            progress=progress_bar,
-        )
+    output_selection = written_output_selection(cfg)
     # A warm start (from_state) carries the donor's physics carry through to
-    # ``run``; every other init builds a fresh carry (initial_physics_state
-    # stays None).
-    initial_physics_state = None
-    if cfg.init.kind == "jw":
-        initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
-    elif cfg.init.kind == "balanced_isothermal":
-        initial_state = balanced_isothermal_state(model)
-    elif cfg.init.kind == "from_state":
-        initial_state, initial_physics_state = _state_from_file(model, cfg)
-    elif cfg.init.kind == "era5":
-        initial_state = _state_from_era5(model, cfg)
-    else:
-        raise ValueError(f"Unknown init.kind={cfg.init.kind!r}")
+    # ``run``; every other init builds a fresh carry.
+    init_kwargs = initial_state_kwargs(cfg, model)
     return model.run(
-        initial_state=initial_state,
-        initial_physics_state=initial_physics_state,
+        **init_kwargs,
         forcing=forcing,
         save_interval=cfg.run.save_interval,
         total_time=total_time,
@@ -2165,6 +2266,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         output_averages=cfg.run.output_averages,
         snapshot_interval=cfg.run.get("snapshot_interval"),
         snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+        output_keep=output_selection.keep,
+        output_drop=output_selection.drop,
         progress=progress_bar,
     )
 
@@ -2384,6 +2487,45 @@ def _prescribed_start_time(configured, file_first, source: str):
     return configured
 
 
+def _output_selection_from_cfg(cfg: DictConfig):
+    """Return the ``run.output_keep`` / ``run.output_drop`` selection of a config."""
+    from jcm.output_selection import OutputSelection
+
+    def _plain(value):
+        if value is None:
+            return None
+        return (list(OmegaConf.to_container(value))
+                if OmegaConf.is_config(value) else value)
+
+    return OutputSelection.from_args(
+        _plain(cfg.run.get("output_keep", None)),
+        _plain(cfg.run.get("output_drop", None)))
+
+
+def written_output_selection(cfg: DictConfig):
+    """Return the selection of variables a run of ``cfg`` writes.
+
+    ``run.output_keep`` / ``run.output_drop``, with the one variable the
+    runner itself needs at write time added: ``run.pressure_levels``
+    interpolates every level field with the model's own ``pressure_full``,
+    so a keep-list keeps it implicitly and a drop-list that names it is
+    refused. Every path that hands a selection to the model (the single
+    integration, the chunked loop, :func:`jcm.configurations.from_config`)
+    takes it from here, so the rule cannot hold on one and not another. No
+    model is needed: the names are checked against the model's output
+    variables where the selection is used.
+    """
+    written = _output_selection_from_cfg(cfg)
+    if written.is_default or not cfg.run.get("pressure_levels", None):
+        return written
+    if "pressure_full" in written.drop:
+        raise ValueError(
+            "run.output_drop lists pressure_full, which run.pressure_levels "
+            "interpolates every level field with. Remove it from "
+            "run.output_drop, or unset run.pressure_levels.")
+    return written.requiring(["pressure_full"])
+
+
 def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
     """Refuse integration-only run knobs in a diagnostic run mode.
 
@@ -2399,6 +2541,11 @@ def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
             f"run.mode={mode!r} has no integration scan to sample, so "
             f"observers ({sorted(cfg.observers)}) apply only to "
             "run.mode=full. Remove them for this mode.")
+    if not _output_selection_from_cfg(cfg).is_default:
+        raise ValueError(
+            f"run.mode={mode!r} writes its own fixed output, so "
+            "run.output_keep / run.output_drop apply only to run.mode=full. "
+            "Unset them for this mode.")
     chunk = float(cfg.run.get("chunk_days", 0) or 0)
     ckpt = cfg.run.get("checkpoint_path", None)
     if chunk > 0 or ckpt not in (None, "", "null"):
@@ -2827,7 +2974,7 @@ def run_chunked(
 
     from jcm.date import parse_duration_seconds
     from jcm.forcing import _host_epoch_seconds
-    from jcm.nudging import samples_per_span, window_target
+    from jcm.nudging import window_forcing
 
     # All scheduling is in exact integer seconds of the model clock; days are
     # derived only for file names and reports. The save interval is handed to
@@ -2856,6 +3003,7 @@ def run_chunked(
     health_cfg = cfg.run.get("health", {})
     max_wind_speed = health_cfg.get("max_wind_speed", 250.0)
     max_temperature = health_cfg.get("max_temperature", 400.0)
+    max_q_gkg = health_cfg.get("max_q_gkg", 100.0)
 
     # Constant pressure-surface output (#258): applied to each dataset right
     # before it is written (chunk/monthly/snapshot files below), never to
@@ -2901,6 +3049,14 @@ def run_chunked(
         monthly_schedule = check_monthly_schedule(
             cfg, model, chunk_seconds, total_seconds)
         accumulator = MonthlyMeanAccumulator()
+
+    # Which variables are written (``run.output_keep`` / ``run.output_drop``).
+    # ``out_selection`` is what reaches the files. ``model_selection`` is what
+    # the model computes: the same, plus the variables this loop reads back
+    # from each chunk's Dataset (the health gate, the budget report, the
+    # pressure-level conversion), so a user's choice can never blind the gate.
+    # Those are stripped again before anything is written (``process_chunk``).
+    out_selection, model_selection = _chunk_output_selections(cfg, model)
 
     reports: list[dict] = []
     elapsed_seconds = 0
@@ -2973,7 +3129,10 @@ def run_chunked(
         nonlocal last_params
         host_t0 = time.perf_counter()
         elapsed_sim_days = job.elapsed_seconds / 86400.0
-        ds = job.preds.to_xarray()
+        # ``ds_full`` holds what the model computed; the gate and the budget
+        # report read it, and ``ds`` is the selection that is written.
+        ds_full = job.preds.to_xarray()
+        ds = out_selection.filter_dataset(ds_full)
         # Feed the monthly stream before provenance attrs (which carry the
         # per-chunk wall time) are stamped on the chunk dataset.
         closed_months = (accumulator.update(_monthly_input(ds))
@@ -3006,10 +3165,11 @@ def run_chunked(
             dycore.to_physics_state(job.run_state.dynamics)
             if dycore is not None and hasattr(job.run_state, "dynamics")
             else None)
-        ok, report = check_health(ds, job.chunk_idx, elapsed_sim_days,
+        ok, report = check_health(ds_full, job.chunk_idx, elapsed_sim_days,
                                   is_bootstrap_chunk=is_bootstrap_chunk,
                                   max_wind_speed=max_wind_speed,
                                   max_temperature=max_temperature,
+                                  max_q_gkg=max_q_gkg,
                                   boundary_state=boundary_state)
         report["wall_seconds"] = job.chunk_wall
         reports.append(report)
@@ -3022,7 +3182,7 @@ def run_chunked(
         # model's actual timestep is authoritative even when a caller passes
         # a separately assembled cfg with a conflicting explicit value.
         dt_seconds = float(model.dt_si.m)
-        for _line in aerosol_budget_report(ds, dt_seconds):
+        for _line in aerosol_budget_report(ds_full, dt_seconds):
             print(_line)
 
         # ``:.12g`` (not the default 6-significant-digit ``:g``): past
@@ -3178,14 +3338,10 @@ def run_chunked(
                 # Only the nudging samples that bracket this chunk go to the
                 # device; one window length for every chunk keeps the
                 # compiled program shared.
-                chunk_forcing = forcing
-                nudge = getattr(forcing, "nudging_target", None)
-                n_nudge = (None if nudge is None else samples_per_span(
-                    nudge, max(chunk_seconds, cur_chunk_seconds)))
-                if n_nudge is not None:
-                    start_s = int(_host_epoch_seconds(model.start_time))
-                    chunk_forcing = forcing.copy(nudging_target=window_target(
-                        nudge, start_s + elapsed_seconds, n_nudge))
+                chunk_forcing = window_forcing(
+                    forcing,
+                    int(_host_epoch_seconds(model.start_time)) + elapsed_seconds,
+                    max(chunk_seconds, cur_chunk_seconds))
 
                 t0 = time.perf_counter()
                 first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
@@ -3226,6 +3382,8 @@ def run_chunked(
                         snapshot_interval=cfg.run.get("snapshot_interval"),
                         snapshot_variables=tuple(
                             cfg.run.get("snapshot_variables") or ()),
+                        output_keep=model_selection.keep,
+                        output_drop=model_selection.drop,
                         progress=False,
                     )
                 else:
@@ -3237,6 +3395,8 @@ def run_chunked(
                         snapshot_interval=cfg.run.get("snapshot_interval"),
                         snapshot_variables=tuple(
                             cfg.run.get("snapshot_variables") or ()),
+                        output_keep=model_selection.keep,
+                        output_drop=model_selection.drop,
                         progress=False,
                     )
 
@@ -3297,6 +3457,31 @@ def run_chunked(
         _write_monthly(final, output_prefix, last_params, pressure_levels_hpa)
 
     return reports
+
+
+def _chunk_output_selections(cfg: DictConfig, model):
+    """Return the written and the computed output selections of a chunked run.
+
+    Returns ``(written, computed)``. Both are the default selection, with no
+    model call at all, unless ``run.output_keep`` / ``run.output_drop`` is
+    set. Otherwise the names are validated against the model's output
+    variables here, before any integration, and ``computed`` additionally
+    holds the variables the loop reads between chunks
+    (:func:`jcm.diagnostics.runner_read_fields`) that exist in this model.
+
+    The written selection is :func:`written_output_selection`'s, which is
+    where ``run.pressure_levels`` keeps ``pressure_full``.
+    """
+    from jcm.diagnostics import runner_read_fields
+
+    written = written_output_selection(cfg)
+    if written.is_default:
+        return written, written
+    available = model.output_variable_names()
+    _output_selection_from_cfg(cfg).validate(available)
+    read_back = runner_read_fields(
+        available, dynamics_needed=getattr(model, "dycore", None) is None)
+    return written, written.requiring(sorted(read_back & set(available)))
 
 
 def check_monthly_schedule(cfg: DictConfig, model, chunk_seconds: int,

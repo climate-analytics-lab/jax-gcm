@@ -8,7 +8,21 @@ plus two upper-boundary dissipation terms:
   fixed launch level, sweeping cutoff vertical wavenumbers upward, with momentum
   deposition and heating applied to the state; the vertical diffusion
   coefficient the sweep also computes (``diffco``) is currently a **discarded
-  diagnostic** — no term consumes it.
+  diagnostic** — no term consumes it. The launch level is a static choice made
+  in one of two ways: ``launch_level``, a count of levels above the surface
+  (ECHAM's ``emiss_lev``, ``mo_gw_hines`` namelist; default 10, which is
+  ~634 hPa on L95), or ``launch_pressure_hpa``, resolved once in ``cache_coords``
+  to the nearest full level at the reference surface pressure
+  (``constants.p0s1_bg``, the one definition the nudging profile shares). The pressure form
+  keeps the launch height fixed on vertical tables whose troposphere is thinned
+  relative to ECHAM's, where ten levels can reach the stratosphere (~126 hPa).
+  Giving both is an error, a pressure outside the launchable range raises with
+  that range, and the scheme needs a layer below the launch level, so the
+  lowest full level cannot be selected. On a grid with no more levels than the
+  default count (the idealised 8-layer stacks) that level does not exist: the
+  scheme applies no drag there and warns, and a launch pressure is the way to
+  make it act. The resolved count selects an array slice and
+  loop bounds, so it is not a differentiable leaf; the Hines parameters are.
 - **Lott-Miller SSO** (``jcm/physics/gravity_waves/sso/lott_miller.py::LottMillerSso``):
   sub-grid orographic drag with blocked-flow form drag below the blocking level
   and a saturated gravity-wave stress profile above, from the grid-mean

@@ -54,6 +54,40 @@ import tree_math
 _LATLON_TOL_DEG = 1e-3
 
 
+def _check_level_axis(ds, path, vertical, required: bool) -> None:
+    """Compare a file's mid-level hybrid coefficients with the model's.
+
+    The ozone file is mapped onto the model's levels with no vertical
+    interpolation, so a file built on other levels (a built-in bundle on a user
+    table, or a bundle for a different table) would put ozone at the wrong
+    pressures without any error. "The same levels" is
+    :func:`jcm.physics.echam.echam_levels.same_hybrid_coefficients`, which
+    admits the pySES backend's regularised top interface.
+    """
+    if "level_a_pa" not in ds or "level_b" not in ds:
+        if required:
+            raise ValueError(
+                f"Ozone file {path} is a published level-resolved bundle, on "
+                "one of ECHAM's built-in tables, but this grid's levels are a "
+                "user table (grid.level_table) and the file carries no vertical "
+                "coordinate (level_a_pa/level_b) to check. Supply a file built "
+                "on these levels (jcm.data.bc.interpolate_ozone."
+                "vertical_interp_log_p maps a pressure-level field onto "
+                "them; a local file is taken as your statement that it is), or "
+                "set forcing.ozone_file=analytic.")
+        return
+    from jcm.physics.echam.echam_levels import same_hybrid_coefficients
+    if not same_hybrid_coefficients(
+            ds["level_a_pa"].values, ds["level_b"].values,
+            vertical.a_centers, vertical.b_centers):
+        raise ValueError(
+            f"Ozone file {path}: its mid-level hybrid coefficients "
+            "(level_a_pa/level_b) are not the model's, so mapping it level for "
+            "level would put ozone at the wrong pressures. Build it on this "
+            "grid's levels (jcm.data.bc.interpolate_ozone.vertical_interp_log_p "
+            "maps a pressure-level field onto them).")
+
+
 @tree_math.struct
 class OzoneClimatology:
     """Per-column ozone profiles in ppmv on the model's vertical grid.
@@ -92,6 +126,8 @@ class OzoneClimatology:
         align_mode: str = "auto",
         persist: str = "strict",
         anchors: str = "mid_month",
+        vertical=None,
+        require_vertical_axis: bool = False,
     ) -> "OzoneClimatology":
         """Load a pre-interpolated ozone file as a ``TimeSeries`` leaf.
 
@@ -137,6 +173,16 @@ class OzoneClimatology:
                 L711/L748) versus the pre-#902 behaviour (held from the
                 1st). Ignored for a transient file.
 
+            vertical: the model's ``HybridCoordinates``, when known. The file
+                is mapped onto the model level for level, so when it carries
+                its own mid-level coefficients (``level_a_pa`` /
+                ``level_b``, written by ``jcm.data.bc.interpolate_ozone``)
+                they must equal the model's; a mismatch raises.
+            require_vertical_axis: raise when ``vertical`` is given but the
+                file carries no such coefficients (set by the caller for a
+                published bundle on a user level table, which nothing in the
+                file can vouch for).
+
         Returns:
             ``OzoneClimatology`` whose ``o3_ppmv`` is a
             ``TimeSeries`` shaped ``(ntime, nlev, nlon * nlat)`` with
@@ -170,11 +216,13 @@ class OzoneClimatology:
                     "rebuild them with a common epoch.")
             ds = xr.concat(dsets, dim="time")
             path = paths[0]
+            level_sources = list(zip(dsets, paths))
         else:
             path = Path(path)
             # ``decode_times=False`` to read the raw values + units; we
             # decode below only if we end up in the BY_DATE branch.
             ds = xr.open_dataset(path, decode_times=False)
+            level_sources = [(ds, path)]
         if var_name not in ds.data_vars:
             raise ValueError(
                 f"Ozone file {path} missing '{var_name}' variable; have "
@@ -195,6 +243,15 @@ class OzoneClimatology:
                 f"``jcm.data.bc.interpolate_ozone`` against the right "
                 f"vertical resolution / horizontal grid."
             )
+
+        if vertical is not None:
+            # Each file's own coefficients, not the concatenated dataset's:
+            # the time concatenation stacks these static variables along
+            # ``time``, and every year of a list has to be on the model's
+            # levels, not only the first.
+            for source, source_path in level_sources:
+                _check_level_axis(source, source_path, vertical,
+                                  require_vertical_axis)
 
         # Coord-value validation — shape match alone won't catch a file
         # with the same N points but flipped/shifted lat or lon (e.g.

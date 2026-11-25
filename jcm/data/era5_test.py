@@ -270,3 +270,153 @@ class TempNameUniquenessTest(unittest.TestCase):
     def test_two_calls_produce_different_temp_names(self):
         import uuid
         self.assertNotEqual(uuid.uuid4().hex, uuid.uuid4().hex)
+
+
+def _random_wb2(ntime):
+    """Synthetic store with per-sample structure, so a chunk-boundary error
+    (a sample regridded with the wrong neighbour) cannot cancel out.
+    """
+    rng = np.random.default_rng(3)
+    ds = _synthetic_wb2(ntime=ntime)
+    shape4 = ds["u"].shape
+    return ds.assign(
+        u=(ds["u"].dims, rng.normal(size=shape4)),
+        v=(ds["v"].dims, rng.normal(size=shape4)),
+        T=(ds["T"].dims, ds["T"].values + rng.normal(size=shape4)),
+        sp=(ds["sp"].dims, 1.0e5 + 2.0e3 * rng.normal(size=ds["sp"].shape)))
+
+
+class TestChunkedRegrid(unittest.TestCase):
+    """The time-chunked regrid is the single-piece regrid, only cheaper."""
+
+    NTIME = 11
+    VARS = ("u", "v", "T")
+    START, END = "2000-01-01", "2000-01-03"
+
+    def setUp(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        self.coords = TestToModelGrid._coords(None)
+        self.store = _random_wb2(self.NTIME)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cache = tmp.name
+        patches = [
+            mock.patch.dict(os.environ, {"JCM_ERA5_CACHE": tmp.name}),
+            mock.patch.object(era5, "_open_store",
+                              lambda nlon: self.store),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _reference(self, window_slice):
+        """Regrid the whole window in one kernel call (the single-piece result)."""
+        sub = self.store.isel(time=window_slice)
+        out = era5._to_model_grid(sub[list(self.VARS) + ["sp"]], self.coords,
+                                  self.VARS)
+        out.attrs["source"] = era5.select_store(
+            int(self.coords.horizontal.nodal_shape[0]))
+        return out
+
+    def _roundtrip(self, ds):
+        """Return ``ds`` as a single ``to_netcdf`` of the whole result reads back."""
+        path = f"{self.cache}/ref.nc"
+        ds.to_netcdf(path)
+        return xr.open_dataset(path).load()
+
+    def _assert_same(self, got, want, encoding=True):
+        xr.testing.assert_identical(got, want)
+        for name in want.data_vars:
+            self.assertEqual(got[name].dtype, want[name].dtype)
+            np.testing.assert_array_equal(got[name].values,
+                                          want[name].values)
+        for name in ("time", *want.data_vars) if encoding else ():
+            g, w = dict(got[name].encoding), dict(want[name].encoding)
+            for d in (g, w):
+                d.pop("source", None)
+                # NaN != NaN: compare the fill value separately.
+                fill = d.pop("_FillValue", None)
+                d["fill_is_nan"] = fill is not None and np.isnan(fill)
+            self.assertEqual(g, w, name)
+
+    def _run(self, **kw):
+        return era5.dataset_on_model_grid(
+            self.coords, self.START, self.END, variables=self.VARS, **kw)
+
+    def test_chunked_equals_single_piece_in_memory_and_in_cache(self):
+        # 11 samples: chunk 4 -> 4+4+3 (a ragged tail), 11 and 50 -> one
+        # piece, 1 -> every sample on its own boundary.
+        want = self._roundtrip(self._reference(slice(None)))
+        key = era5._window_key(self.coords, self.START, self.END, "6h",
+                               self.VARS)
+        for chunk in (1, 4, 11, 50):
+            with self.subTest(chunk=chunk, cache=False):
+                self._assert_same(self._run(cache=False, time_chunk=chunk),
+                                  want, encoding=False)
+            with self.subTest(chunk=chunk, cache=True):
+                (era5.cache_dir() / key).unlink(missing_ok=True)
+                self._assert_same(self._run(time_chunk=chunk), want)
+                # Warm cache (re-open of the same file): same again, and the
+                # key is the one a single-piece run used.
+                self.assertTrue((era5.cache_dir() / key).exists())
+                self._assert_same(self._run(time_chunk=chunk), want)
+
+    def test_dask_backed_store_with_unaligned_zarr_chunks(self):
+        # The real store is lazy (dask) with its own chunking, which need
+        # not line up with the regrid chunk: results must not depend on it.
+        want = self._reference(slice(None))
+        self.store = self.store.chunk({"time": 3, "lat": 7, "lon": 10,
+                                       "level": 2})
+        self._assert_same(self._run(cache=False, time_chunk=4), want,
+                          encoding=False)
+
+    def test_one_sample_window_and_subsampled_freq(self):
+        got = era5.dataset_on_model_grid(
+            self.coords, "2000-01-01T00", "2000-01-01T00",
+            variables=self.VARS, cache=False, time_chunk=4)
+        self.assertEqual(got.time.size, 1)
+        np.testing.assert_array_equal(
+            got["T"].values, self._reference(slice(0, 1))["T"].values)
+        # freq subsamples before chunking, so chunks see the subsampled axis.
+        want = self._reference(slice(None, None, 4))
+        got = self._run(freq="1d", cache=False, time_chunk=2)
+        self.assertEqual(got.time.size, want.time.size)
+        self._assert_same(got, want, encoding=False)
+
+    def test_kernel_never_sees_more_than_chunk_samples(self):
+        from unittest import mock
+        seen = []
+        real = era5._to_model_grid
+
+        def spy(ds, coords, variables):
+            seen.append(ds.time.size)
+            return real(ds, coords, variables)
+
+        with mock.patch.object(era5, "_to_model_grid", spy):
+            self._run(time_chunk=4)
+        self.assertEqual(seen, [4, 4, 3])
+
+    def test_default_chunk_follows_the_budget(self):
+        small = era5._default_time_chunk(self.coords, 1)
+        big = era5._default_time_chunk(self.coords, 5)
+        self.assertGreaterEqual(small, big)
+        self.assertGreaterEqual(big, 1)
+        self._assert_same(self._run(cache=False),
+                          self._reference(slice(None)), encoding=False)
+
+    def test_bad_chunk_rejected(self):
+        with self.assertRaises(ValueError):
+            self._run(time_chunk=0)
+
+    def test_cli_exposes_time_chunk(self):
+        from unittest import mock
+        with mock.patch.object(era5, "dataset_on_model_grid") as m, \
+                mock.patch("jcm.runners.build_coords", return_value="c"):
+            m.return_value = xr.Dataset(coords={"time": [0, 1]})
+            era5._main(["--grid", "echam_t63_l47_hybrid", "--start",
+                        "2000-01-01", "--end", "2000-01-02",
+                        "--time-chunk", "7"])
+        self.assertEqual(m.call_args.kwargs["time_chunk"], 7)

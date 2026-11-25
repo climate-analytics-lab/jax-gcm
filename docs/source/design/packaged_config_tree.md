@@ -100,3 +100,52 @@ first application of it: the `experiment` group was renamed to `configuration`
 (the word "experiment" already means a *realized simulation* elsewhere in the
 project), so a downstream searchpath user must change
 `+experiment@<node>=<name>` to `+configuration@<node>=<name>`.
+
+## Driving jcm from a host process
+
+A co-simulation host that owns the time loop (it advances jcm a segment at a
+time between exchanges with other components) uses jcm as a library through
+three public pieces, none of them underscore-prefixed.
+
+**Build from a composed config.** `jcm.configurations.from_config(cfg)` takes a
+composed config (an OmegaConf `DictConfig` or a plain nested dict) and returns
+the `LoadedConfiguration` that `jcm.configurations.load` returns; `load(name)`
+is "compose, then `from_config`", so the two cannot drift. A host that keeps its
+own config directory composes it with jcm's either through
+`load(name, extra_config_dir=...)` (the directory joins `hydra.searchpath` behind
+jcm's own, so its new groups and recipes compose with jcm's) or by composing
+against `jcm.configurations.CONFIG_DIR` itself and passing the result in.
+`from_config` rejects a config that lacks `run`, `grid`, `physics`, `terrain`,
+`forcing` or `run.save_interval`, or has neither `run.total_time` nor
+`run.end_time`, and carries every other
+section through untouched, so an overlay's extra groups are not an error. The
+build is the sequence the CLI's full mode runs: `constants.*` overrides,
+`build_model`, `runners.build_run_forcing` (boundary forcing, the ERA5 nudging
+target, the forcing guards and config-trap warnings) and
+`runners.initial_state_kwargs` (`init.kind`); `runners._run_full` calls the same
+two helpers, so the doors share one implementation. `model.run(**exp.run_kwargs)`
+is the CLI's single integration.
+
+**Process-global steps are explicit.** The logger level and JAX's compilation
+cache are performance/verbosity settings of the process, not of the model, so
+the door does not apply them unasked. A host calls `runners.apply_log_level(cfg)`
+and `runners.maybe_enable_compilation_cache()` itself, or passes
+`from_config(..., apply_log_level=True, enable_compilation_cache=True)`.
+`configure_host_device_count`, `provenance.start_run` and the `from_state`
+path pre-flight belong to `runners.run` alone.
+
+**Step with `run`/`resume`, window the target.** The nudging target the door
+returns is host-resident (numpy leaves; a year of 6-hourly T63L47 ERA5 is about
+15 GB, which the compiled step must not carry on the device). `Model.run` takes
+it whole. A host that calls `Model.run` once and `Model.resume` repeatedly
+passes each call `jcm.nudging.window_forcing(forcing, start, span_seconds)`:
+the forcing with the target cut to the `samples_per_span(target, span_seconds)`
+samples starting at the last sample at or before `start` (the sample before the
+segment and one after, for an interpolating leaf), moved to the device. The
+window length depends only on the span and the target's spacing, so equal
+segments share one compiled program; a window past the end of the series is
+clamped to end there, and a `persist="hold"` leaf holds its last sample. A
+forcing with no target, or with only a static or climatological one, is returned
+unchanged. `runners.run_chunked` windows each chunk through this same function,
+so a segmented run is bit-identical to the same chunks of a chunked run and to
+the same segments with the whole target attached.

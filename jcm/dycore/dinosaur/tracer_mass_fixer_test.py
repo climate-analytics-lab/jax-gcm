@@ -249,5 +249,124 @@ class SemiLagrangianTransportTest(unittest.TestCase):
         self.assertLess(np.max(np.abs(rel_far)), 1e-6)
 
 
+class NonConservedTracerTest(unittest.TestCase):
+    """``TracerSpec(conserved=False)`` exempts a tracer from both mass fixers.
+
+    ``dust`` (conserved) and ``clock`` (not) carry the same patchy field, so
+    any difference between them after a step is the fixers' doing.
+    """
+
+    @staticmethod
+    def _dycore(local, clock_conserved=False, **sl_options):
+        from jcm.dycore.dinosaur.dycore import DinosaurDycore
+        from jcm.physics.physics_term import TracerSpec
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.terrain import TerrainData
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        return DinosaurDycore(
+            coords=coords, terrain=TerrainData.aquaplanet(coords),
+            dt_seconds=2400.0, advection="semi_lagrangian",
+            tracer_specs={
+                "dust": TracerSpec(name="dust"),
+                "clock": TracerSpec(name="clock", conserved=clock_conserved),
+            },
+            sl_options={"local_mass_fixer": local, **sl_options},
+        )
+
+    @staticmethod
+    def _state(dycore):
+        state = dycore.initial_state(None, random_seed=0)
+        blob = np.zeros(state.tracers["dust"].shape)
+        blob[3, 10:13, 20:23] = 1.0
+        q0 = jnp.asarray(1e-8 * blob, dtype=state.temperature_variation.dtype)
+        return state.replace(tracers={**state.tracers, "dust": q0, "clock": q0})
+
+    @staticmethod
+    def _mass(dycore, state, name):
+        w = np.asarray(dycore.coords.horizontal.quadrature_weights)
+        dp = np.asarray(dycore._nodal_tracer_column_weight(state))
+        return float((np.asarray(state.tracers[name]) * dp * w).sum())
+
+    def test_mass_fixed_set_excludes_only_the_exempt_tracer(self):
+        d = self._dycore(local=True)
+        self.assertEqual(set(d.mass_fixed_tracers) & {"dust", "clock"}, {"dust"})
+        self.assertIn("clock", d._nodal_tracers)  # still transported nodally
+        self.assertIn("specific_humidity", d.mass_fixed_tracers)
+
+    def test_local_fixer_leaves_the_exempt_tracer_unfixed(self):
+        d = self._dycore(local=True)
+        moved = d._dynamics_step_fn(self._state(d))
+        # Reference: the same step with no local fixer at all.
+        d0 = self._dycore(local=False)
+        ref = d0._dynamics_step_fn(self._state(d0))
+        np.testing.assert_array_equal(
+            np.asarray(moved.tracers["clock"]), np.asarray(ref.tracers["clock"]))
+        # The conserved tracer in the same state IS corrected.
+        self.assertGreater(
+            float(np.max(np.abs(np.asarray(moved.tracers["dust"])
+                                - np.asarray(ref.tracers["dust"])))), 0.0)
+        # Transport and the limiter still act on the exempt tracer.
+        self.assertGreaterEqual(float(jnp.min(moved.tracers["clock"])), 0.0)
+        self.assertGreater(float(jnp.sum(moved.tracers["clock"] != 0)), 9.0)
+
+    def test_global_fixer_leaves_the_exempt_tracer_unscaled(self):
+        d = self._dycore(local=False)
+        state = self._state(d)
+        moved = d._dynamics_step_fn(state)
+        # Perturb both tracers' mass identically, as transport error would.
+        bumped = moved.replace(tracers={
+            **moved.tracers,
+            "dust": 1.1 * moved.tracers["dust"],
+            "clock": 1.1 * moved.tracers["clock"]})
+        fixed = d._fix_nodal_tracer_mass(state, bumped)
+        np.testing.assert_array_equal(
+            np.asarray(fixed.tracers["clock"]),
+            np.asarray(bumped.tracers["clock"]))
+        self.assertAlmostEqual(
+            self._mass(d, fixed, "dust") / self._mass(d, state, "dust"),
+            1.0, places=3)
+        self.assertGreater(
+            self._mass(d, fixed, "clock") / self._mass(d, state, "clock"), 1.05)
+
+    def test_default_path_is_unchanged(self):
+        # An explicit conserved=True spec and a single-tracer dycore (which
+        # never sees the exemption) give the conserved tracer's step bit for
+        # bit, and the full step() runs both fixers on it.
+        d_true = self._dycore(local=True, clock_conserved=True)
+        d_one = _sl_dycore(local=True)
+        self.assertEqual(d_true.mass_fixed_tracers, d_true._nodal_tracers)
+        s_true = self._state(d_true)
+        s_one = d_one.initial_state(None, random_seed=0).replace(
+            tracers={**d_one.initial_state(None, random_seed=0).tracers,
+                     "dust": s_true.tracers["dust"]})
+        out_true = d_true._dynamics_step_fn(s_true)
+        out_one = d_one._dynamics_step_fn(s_one)
+        np.testing.assert_array_equal(
+            np.asarray(out_true.tracers["dust"]),
+            np.asarray(out_one.tracers["dust"]))
+        np.testing.assert_array_equal(
+            np.asarray(out_true.tracers["clock"]),
+            np.asarray(out_true.tracers["dust"]))
+
+    def test_flipping_the_flag_through_the_setter_rebuilds_transport(self):
+        d = self._dycore(local=True, clock_conserved=True)
+        state = self._state(d)
+        before = d._dynamics_step_fn(state)
+        d.tracer_specs = dict(self._dycore(local=True).tracer_specs)
+        self.assertEqual(set(d.mass_fixed_tracers) & {"dust", "clock"}, {"dust"})
+        after = d._dynamics_step_fn(state)
+        self.assertFalse(np.array_equal(np.asarray(before.tracers["clock"]),
+                                        np.asarray(after.tracers["clock"])))
+
+    def test_nonconserved_humidity_spec_is_rejected(self):
+        from jcm.physics.physics_term import TracerSpec
+
+        d = self._dycore(local=True)
+        with self.assertRaises(ValueError):
+            d.tracer_specs = {"specific_humidity": TracerSpec(
+                "specific_humidity", conserved=False)}
+
+
 if __name__ == "__main__":
     unittest.main()

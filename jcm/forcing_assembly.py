@@ -149,6 +149,7 @@ def _resolve_auto_ozone(coords):
             _vertical_kind(coords),
         )
         return None
+    reject_user_hybrid_for_mirror_data(coords, "forcing.ozone_file=auto")
     nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
     nlev = int(coords.nodal_shape[0])
     manifest = mm.load_manifest()
@@ -357,6 +358,108 @@ def _vertical_kind(coords) -> str:
     return "hybrid" if isinstance(coords.vertical, HybridCoordinates) else "sigma"
 
 
+def _is_user_hybrid(coords) -> bool:
+    """Whether the model's vertical is a hybrid table other than ECHAM's built-ins."""
+    if _vertical_kind(coords) != "hybrid":
+        return False
+    from jcm.physics.echam.echam_levels import is_builtin_table
+    return not is_builtin_table(coords.vertical)
+
+
+def _level_resolved_mirror_path(path) -> bool:
+    """Whether ``path`` names a published level-resolved product (mirror or packaged).
+
+    Recognises the same three spellings as the alignment lookup
+    (``hf://<rel>``, the Hugging Face cache copy ``fetch`` returns, a packaged
+    file under ``jcm``) and then asks the manifest whether the product is
+    level-resolved. A copy saved elsewhere is a user file.
+    """
+    from pathlib import Path
+    manifest = mm.load_manifest()
+    rel = ir._mirror_relative(path, manifest, Path(__file__).resolve().parent)
+    if rel is None:
+        return False
+    return any(rec["levels"] and ir._template_regex(rec["path"]).match(rel)
+               for rec in manifest["products"].values())
+
+
+def check_oxidants_on_model_levels(coords, paths, ds) -> None:
+    """Refuse an oxidant file that cannot be shown to be on the model's levels.
+
+    Every route by which oxidants reach the model (``auto``, an explicit
+    ``hf://bundles/...`` path, a local file, ``ForcingData.from_bundles``) ends
+    at :func:`_attach_oxidants`, and none interpolates vertically: the file is
+    mapped level for level. Where the file carries ``hyam``/``hybm`` they are
+    compared with the model's by :func:`jcm.forcing.validate_oxidant_levels`,
+    for built-in and user tables alike. Where it carries none, a published
+    bundle (which is on a built-in table) is refused on a user table, while a
+    local file is accepted: naming it is the user's statement that it is on
+    their levels, and nothing in it can contradict that. (Ozone makes the same
+    two checks in ``OzoneClimatology.from_file``.)
+
+    Raises:
+        ValueError: a published bundle without a vertical coordinate on a user
+            table.
+
+    """
+    if "hyam" in ds and "hybm" in ds:
+        return
+    path_list = list(paths) if isinstance(paths, (list, tuple)) else [paths]
+    if _is_user_hybrid(coords) and any(
+            _level_resolved_mirror_path(p) for p in path_list):
+        raise ValueError(
+            f"forcing.oxidants_file {path_list[0]!r} is a published "
+            "level-resolved bundle, on one of ECHAM's built-in tables, but "
+            "this grid's levels are a user table (grid.level_table) and the "
+            "file carries no vertical coordinate (hyam/hybm) to check. Supply "
+            "a file built on these levels (a local file is taken as your "
+            "statement that it is), or set forcing.oxidants_file=null.")
+
+
+def reject_user_hybrid_for_mirror_data(coords, what) -> None:
+    """Refuse a mirror/packaged level-resolved product on a user hybrid table.
+
+    The level-resolved boundary data (ozone, oxidants) are published per
+    ``(grid, nlev)`` on the BUILT-IN ECHAM L47/L95 tables, and the model maps
+    them level for level: nothing here interpolates them vertically (the ozone
+    loader checks the level count and horizontal grid only; the oxidant reader
+    checks the count, and the file's ``hyam``/``hybm`` when it carries them).
+    A user table (``grid.level_table``) that merely has 47 or 95 levels would
+    therefore pull a bundle on different pressures without any error — the same
+    silent corruption :func:`_vertical_kind` guards against for sigma grids. So
+    this raises, naming what to supply. A user table whose count is not a
+    published one needs no guard here: no bundle exists for it, and the
+    resolvers already fail (ozone) or report the unresolved key (oxidants).
+
+    Args:
+        coords: the model ``CoordinateSystem``.
+        what: the config key / entry point being resolved, for the message.
+
+    Raises:
+        ValueError: ``coords`` carries a non-built-in hybrid table whose level
+            count is one the mirror publishes bundles for.
+
+    """
+    if _vertical_kind(coords) != "hybrid":
+        return
+    nlev = int(coords.nodal_shape[0])
+    if nlev not in mm.load_manifest()["levels"]:
+        return
+    from jcm.physics.echam.echam_levels import is_builtin_table
+    if is_builtin_table(coords.vertical):
+        return
+    raise ValueError(
+        f"{what} would resolve to the data mirror's {nlev}-level bundle, "
+        f"but this grid's {nlev} hybrid levels are a user table "
+        "(grid.level_table), not the built-in ECHAM "
+        f"L{nlev} table the bundle is on, and the file is mapped level for "
+        "level with no vertical interpolation. Supply a file built for these "
+        "levels (jcm.data.bc.interpolate_ozone.vertical_interp_log_p maps any "
+        "pressure-level field onto them; oxidants must carry matching "
+        "hyam/hybm) via the key, or opt out: forcing.ozone_file=analytic, "
+        "forcing.<key>=null for the others.")
+
+
 # ---------------------------------------------------------------------------
 # auto emission resolution
 # ---------------------------------------------------------------------------
@@ -434,6 +537,11 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
         # pySES only gets here for a grid-free product, which needs no
         # spectral grid identity (and its native coords have none).
         spectral = not is_pyses
+        if spectral:
+            manifest = mm.load_manifest()
+            if mm.product(manifest, mm.product_for_key(manifest, key))["levels"]:
+                reject_user_hybrid_for_mirror_data(
+                    coords, f"forcing.{key}=auto")
         r = ir.resolve_input(
             key, "auto", grid_token=_grid_token(coords) if spectral else None,
             nlev=int(coords.nodal_shape[0]) if spectral else None,
@@ -767,8 +875,15 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     align = resolve_align(ozone_align, paths=ozone_file,
                           config_key="forcing.ozone_align",
                           transient="by_date_interp")
+    # The file is compared with the model's levels where it carries them; a
+    # published bundle on a user table has nothing to compare and is refused.
+    unverifiable = (_is_user_hybrid(coords) and any(
+        _level_resolved_mirror_path(p) for p in (
+            ozone_file if isinstance(ozone_file, list) else [ozone_file])))
     climatology = OzoneClimatology.from_file(
         ozone_file,
+        vertical=coords.vertical if _vertical_kind(coords) == "hybrid" else None,
+        require_vertical_axis=unverifiable,
         nlon=int(nlon), nlat=int(nlat), nlev=int(nlev),
         lat_deg=lat_deg, lon_deg=lon_deg, align_mode=align,
         persist=ozone_persist, anchors=_monthly_anchors(forcing_cfg),
@@ -1353,6 +1468,7 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
             persist=_persist(forcing_cfg, "oxidants_file"),
             anchors=_monthly_anchors(forcing_cfg))
         validate_oxidant_levels(ds, coords, ref)
+        check_oxidants_on_model_levels(coords, paths, ds)
     finally:
         ds.close()
     if not mapping:

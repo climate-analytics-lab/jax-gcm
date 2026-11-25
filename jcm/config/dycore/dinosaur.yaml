@@ -45,6 +45,16 @@ sl_vertical_interpolation: null
 # the Eulerian core. See docs/source/design/sl_vertical_interpolation.md.
 sl_vertical_coordinate: null
 
+# Number of fixed-point iterations in the semi-Lagrangian departure-point
+# solve (a positive integer; the default 1 is dinosaur's, which relies on its
+# warm-started trajectory solves for the accuracy of two cold iterations). The
+# solve is a fixed-point iteration whose error grows with the step (the
+# trajectory curvature scales with dt), so a time-step sweep to long steps
+# raises it to keep the departure points converged, at the cost of one more
+# trajectory evaluation per iteration per step. Ignored by the Eulerian core.
+# See docs/source/science/dynamical_core.md.
+sl_departure_iterations: 1
+
 # Global mass fixer for a modal specific humidity (nodal_humidity: false)
 # under semi-Lagrangian transport: after the step, scale q so that its global mass equals the
 # post-physics, pre-transport value, as the nodal tracers' fixer does for

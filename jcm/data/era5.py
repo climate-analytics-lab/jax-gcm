@@ -23,10 +23,14 @@ internet — prefetch on a login node first::
     python -m jcm.data.era5 --grid echam_t63_l47_hybrid \\
         --start 1979-01-01 --end 1980-01-01
 
-Memory: a nudging target is held in memory for the whole run —
-``3 vars × nlev × nlon × nlat × times``. At T63L47 that is ~15 GB per
-6-hourly year; use ``freq="1d"`` (~2.5 GB/year) or shorter windows
-where that bites.
+Memory: the regrid (the prefetch, and any cache miss) runs over the time
+axis in chunks of ``time_chunk`` samples (default: a 4 GiB working-set
+budget, :data:`DEFAULT_CHUNK_BUDGET_BYTES`) and writes each chunk into the
+cache file as it is produced, so its peak host memory scales with the
+chunk, not the window. A *run* that attaches the target holds all of it in
+host memory for the whole run — ``3 vars × nlev × nlon × nlat × times``.
+At T63L47 that is ~15 GB per 6-hourly year; use ``freq="1d"``
+(~2.5 GB/year) or shorter windows where that bites.
 
 Requires the ``era5`` extra (``pip install jcm[era5]`` → gcsfs, zarr).
 """
@@ -70,6 +74,12 @@ _RENAME = {
 #: Hours between samples in the WB2 6-hourly stores.
 _STORE_HOURS = 6
 _FREQ_STEPS = {"6h": 1, "12h": 2, "1d": 4}
+
+#: Host-memory budget for one time chunk of the regrid (see
+#: :func:`_default_time_chunk`). 4 GiB keeps the prefetch comfortable on a
+#: login node while still amortising the per-chunk store read; the working
+#: set is linear in the chunk, so the budget is the knob, not the window.
+DEFAULT_CHUNK_BUDGET_BYTES = 4 * 2**30
 
 
 def select_store(model_nlon: int) -> str:
@@ -182,6 +192,107 @@ def _to_model_grid(ds: xr.Dataset, coords,
     return out
 
 
+def _default_time_chunk(coords, n_variables: int) -> int:
+    """Time samples per regrid chunk that fit :data:`DEFAULT_CHUNK_BUDGET_BYTES`.
+
+    Per sample and horizontal model point the regrid holds, in float64, the
+    bilinearly-interpolated source column (``n_variables`` fields on the 13
+    store levels), the model level pressures and their logs, and the
+    interpolation weights/neighbours (about six model-level fields), plus the
+    float32 output (``n_variables`` model-level fields). The store-side read
+    and the longitude-seam pad add roughly half again on top. At T63L47 with
+    three variables that is ~90 MB per sample, i.e. ~45 samples (11 days of
+    6-hourly data) per 4 GiB.
+    """
+    nlon, nlat = coords.horizontal.nodal_shape
+    nlev = (np.asarray(coords.vertical.a_centers).size
+            if hasattr(coords.vertical, "a_centers")
+            else np.asarray(coords.vertical.centers).size)
+    n_src_levels = 13
+    per_point = (8 * (n_variables * n_src_levels + 6 * nlev)
+                 + 4 * n_variables * nlev)
+    per_sample = int(1.5 * per_point * int(nlon) * int(nlat))
+    return max(1, DEFAULT_CHUNK_BUDGET_BYTES // per_sample)
+
+
+def _regrid_chunks(window: xr.Dataset, coords,
+                   variables: tuple[str, ...], chunk: int):
+    """Yield ``(start_index, regridded_chunk)`` over the time axis.
+
+    The regrid is separable in time: the bilinear lat/lon interpolation and
+    the per-column log-p interpolation act on one time sample at a time, so
+    a chunk's values are bit-identical to the same samples of a single-piece
+    regrid. ``chunk`` bounds the samples handed to :func:`_to_model_grid`,
+    which is what bounds the host memory.
+    """
+    for i0 in range(0, window.time.size, chunk):
+        yield i0, _to_model_grid(window.isel(time=slice(i0, i0 + chunk)),
+                                 coords, variables)
+
+
+def _output_template(first: xr.Dataset, times: np.ndarray, *, lazy: bool,
+                     attrs: dict) -> xr.Dataset:
+    """Full-window dataset shaped like the chunk ``first`` but spanning ``times``.
+
+    On the lazy path the data variables are dask zeros, one time sample per
+    dask chunk, which only fix the on-disk layout and are never held at full
+    size. ``lazy=False`` allocates them (the ``cache=False`` return value has
+    to exist in memory anyway).
+    """
+    import dask.array as da
+
+    other = {k: v for k, v in first.coords.items() if k != "time"}
+    out = xr.Dataset(coords={"time": times, **other})
+    for name, var in first.data_vars.items():
+        shape = (times.size,) + var.shape[1:]
+        if lazy:
+            data = da.zeros(shape, dtype=var.dtype,
+                            chunks=(1,) + var.shape[1:])
+        else:
+            data = np.empty(shape, dtype=var.dtype)
+        out[name] = (var.dims, data, dict(var.attrs))
+    out.attrs.update(attrs)
+    return out
+
+
+def _regrid_window(window: xr.Dataset, coords, variables: tuple[str, ...],
+                   chunk: int, *, attrs: dict,
+                   path: Path | None = None) -> xr.Dataset | None:
+    """Regrid ``window`` in time chunks, into memory or into the file ``path``.
+
+    With ``path`` each chunk is written into the netCDF file as soon as it is
+    produced and then dropped, so the peak is one chunk; returns ``None``.
+    Without it the chunks fill a preallocated result, so the peak is that
+    result plus one chunk. The file's layout comes from writing the
+    full-window template with xarray, so it is the file a single
+    ``to_netcdf`` of the whole result would write (netCDF cannot grow a fixed
+    time dimension by appending).
+    """
+    import itertools
+
+    chunks = _regrid_chunks(window, coords, variables, chunk)
+    first_start, first = next(chunks)
+    all_chunks = itertools.chain([(first_start, first)], chunks)
+    template = _output_template(first, window.time.values,
+                                lazy=path is not None, attrs=attrs)
+    if path is None:
+        for start, part in all_chunks:
+            for name in part.data_vars:
+                template[name].values[start:start + part.time.size] = \
+                    part[name].values
+        return template
+
+    import netCDF4
+
+    template.to_netcdf(path, engine="netcdf4", compute=False) \
+        .compute(scheduler="synchronous")
+    with netCDF4.Dataset(path, "r+") as nc:
+        for start, part in all_chunks:
+            for name in part.data_vars:
+                nc[name][start:start + part.time.size] = part[name].values
+    return None
+
+
 def _window_key(coords, start: str, end: str, freq: str,
                 variables: tuple[str, ...]) -> str:
     import hashlib
@@ -207,12 +318,22 @@ def _window_key(coords, start: str, end: str, freq: str,
 def dataset_on_model_grid(coords, start: str, end: str, *,
                           freq: str = "6h",
                           variables: tuple[str, ...] = ("u", "v", "T"),
-                          cache: bool = True) -> xr.Dataset:
+                          cache: bool = True,
+                          time_chunk: int | None = None) -> xr.Dataset:
     """Return the regridded ERA5 window ``[start, end]``, cached locally.
 
     ``freq`` subsamples the 6-hourly store (``"6h"``, ``"12h"``,
     ``"1d"``). The cache key covers grid, levels, window, frequency and
     variables, so different runs share files only when identical.
+
+    The regrid runs over the window in chunks of ``time_chunk`` time
+    samples (default: as many as fit :data:`DEFAULT_CHUNK_BUDGET_BYTES`,
+    see :func:`_default_time_chunk`), so host memory is bounded by the chunk
+    rather than the window. ``time_chunk`` changes the peak only: the
+    result, and the cache file, are the same for every value. With
+    ``cache=True`` each chunk is written into the cache file as it is
+    produced and the returned dataset is the lazily-opened file (as on a
+    cache hit); with ``cache=False`` it is the in-memory result.
     """
     if freq not in _FREQ_STEPS:
         raise ValueError(f"freq {freq!r} not in {sorted(_FREQ_STEPS)}")
@@ -230,29 +351,35 @@ def dataset_on_model_grid(coords, start: str, end: str, *,
             f"ERA5 window [{start}, {end}] is empty — the WB2 stores "
             f"cover {str(ds.time.values[0])[:10]} to "
             f"{str(ds.time.values[-1])[:10]}")
-    out = _to_model_grid(window[list(variables) + ["sp"]], coords,
-                         variables)
-    out.attrs["source"] = select_store(int(nlon))
-    if cache:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Globally-unique temp name + atomic replace: concurrent runs may
-        # request the same uncached window, and a shared tmp path would let
-        # their writes interleave (or the second rename fail).
-        #
-        # NOT os.getpid(): each container gets its own PID namespace, so two
-        # pods sharing a cache PVC routinely land on the SAME pid and collide
-        # on the temp file. That is not hypothetical — two jcm Jobs launched
-        # together both got pid 382 and one died with
-        # "PermissionError: .../wb2_..._6h_u-v-T.tmp382.nc". uuid4 is unique
-        # across hosts, which pid is not.
-        tmp = path.with_suffix(f".tmp{uuid.uuid4().hex}.nc")
-        try:
-            out.to_netcdf(tmp)
-            tmp.replace(path)
-        finally:
-            tmp.unlink(missing_ok=True)
-        logger.info("era5: cached %s", path)
-    return out
+    if time_chunk is None:
+        time_chunk = _default_time_chunk(coords, len(variables))
+    if time_chunk < 1:
+        raise ValueError(f"time_chunk must be >= 1, got {time_chunk}")
+    window = window[list(variables) + ["sp"]]
+    attrs = {"source": select_store(int(nlon))}
+    if not cache:
+        return _regrid_window(window, coords, variables, time_chunk,
+                              attrs=attrs)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Globally-unique temp name + atomic replace: concurrent runs may
+    # request the same uncached window, and a shared tmp path would let
+    # their writes interleave (or the second rename fail).
+    #
+    # NOT os.getpid(): each container gets its own PID namespace, so two
+    # pods sharing a cache PVC routinely land on the SAME pid and collide
+    # on the temp file. That is not hypothetical — two jcm Jobs launched
+    # together both got pid 382 and one died with
+    # "PermissionError: .../wb2_..._6h_u-v-T.tmp382.nc". uuid4 is unique
+    # across hosts, which pid is not.
+    tmp = path.with_suffix(f".tmp{uuid.uuid4().hex}.nc")
+    try:
+        _regrid_window(window, coords, variables, time_chunk,
+                       attrs=attrs, path=tmp)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    logger.info("era5: cached %s", path)
+    return xr.open_dataset(path)
 
 
 def nudging_target(coords, start: str, end: str, *, freq: str = "6h",
@@ -304,6 +431,10 @@ def _main(argv=None) -> int:
     ap.add_argument("--start", required=True)
     ap.add_argument("--end", required=True)
     ap.add_argument("--freq", default="6h", choices=sorted(_FREQ_STEPS))
+    ap.add_argument("--time-chunk", type=int, default=None,
+                    help="time samples regridded at once (default: sized "
+                         "to a 4 GiB working set); lower it on a "
+                         "memory-limited node, the cache is unchanged")
     ap.add_argument("--init", action="store_true",
                     help="also prefetch the initial-state variables at "
                          "--start")
@@ -324,7 +455,8 @@ def _main(argv=None) -> int:
                                config_dir=str(config_dir)):
         cfg = compose(config_name="config", overrides=[f"grid={args.grid}"])
     coords = build_coords(cfg)
-    ds = dataset_on_model_grid(coords, args.start, args.end, freq=args.freq)
+    ds = dataset_on_model_grid(coords, args.start, args.end, freq=args.freq,
+                               time_chunk=args.time_chunk)
     print(f"nudging window cached: {ds.time.size} steps")
     if args.init:
         initial_state(coords, args.start)

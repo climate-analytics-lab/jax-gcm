@@ -110,7 +110,15 @@ with a validated ordering. The factories live next to their term files:
 - `jcm/physics/held_suarez/held_suarez_physics.py::held_suarez_physics()`
 
 Held-Suarez is a single-term `ComposablePhysics` (`HeldSuarez`, built by
-`held_suarez_physics()`).
+`held_suarez_physics()`). `HeldSuarez` is broadcasting-native: the vertical
+is axis 0, sigma broadcasts against it, and latitude is cached once per
+column (`jcm.physics.coords_util.column_lat_lon`, flattened lon-major) and
+reshaped to the host's horizontal shape — read off
+`normalized_surface_pressure` — at call time. The one code path therefore
+serves `(nlev,)`, `(nlev, ncols)` and `(nlev, nlon, nlat)` states, and
+`held_suarez_physics(vectorize_columns=True)` composes it with column-only
+terms (gravity-wave drag, tracer terms). The forcing is defined on sigma
+levels, from the vertical coordinate's `centers`.
 
 ## The `diagnostics` dict
 
@@ -137,6 +145,20 @@ Two key conventions:
 The diagnostics dict that comes out of `compute_tendencies` *is* the
 cross-step physics carry — operator-split integration threads it as a
 JAX pytree through `lax.scan` (see [`operator_split_physics.md`](operator_split_physics.md)).
+
+Public diagnostics are those of the step that produced the saved state, so
+they are diagnosed from the state that step *started* from (the physics
+input). The exception is a diagnostic that is a pure function of the
+dynamics state, today the `omega` republished by `OmegaDiagnostic` from the
+dycore's provider: it is re-diagnosed on the saved state in `Model` (snapshot
+frames) and re-aligned to the post-step states in the running mean
+(averaged frames, by the end-point correction `(f(x_N) - f(x_0)) / N`), so it
+matches the `u`, `v`, `T` saved beside it at the cost of two evaluations per
+saved frame. The `omega` the physics terms *read* stays the step-start one,
+and so do the AeroCom vertical velocities (`aerocom_wap`, `aerocom_w500`,
+`aerocom_w700`): they are interpolated on the physics-input pressures inside
+the step, so they belong to that state together with every other AeroCom
+field.
 
 ## Validation
 
@@ -188,6 +210,19 @@ actually prevents the next one.
 declare non-default tracers (anything beyond `specific_humidity`).
 `Model` collects specs from every term at build time and seeds the
 initial state's tracer dict.
+
+### Tracer tendencies accumulate per tracer, on either layout
+
+A term returns tendencies only for the tracers it evolves, and a term that
+evolves none returns an empty `tracers` dict. `PhysicsTendency` addition and
+subtraction therefore take the union of the two operands' tracer keys, a
+missing key counting as zero (`tree_math` alone requires identical structures
+and would raise). Both hosts hand the dycore a tendency whose `tracers` keys
+are exactly the state's tracers: untended ones are zero, and a tendency for a
+tracer the state does not hold has nothing to apply to and is dropped on the
+grid host as on the column-vectorized one. Consumers (the positivity cap, the
+pySES scatter) index the tendency by every state tracer, which is why the key
+set follows the state and not the terms.
 
 ## Composition operators
 

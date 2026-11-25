@@ -758,7 +758,17 @@ class ComposablePhysics(nnx.Module, Physics):
         diagnostics["_dt_seconds"] = self.dt_seconds
         diagnostics["_band_config"] = self.band_config
 
-        tendencies = PhysicsTendency.zeros(state.temperature.shape)
+        # One zero entry per state tracer, as on the columns path: consumers
+        # (the dycore tendency scatter, the positivity cap) index the
+        # tendency by every state tracer, so the key set must not depend on
+        # which terms happened to tend which tracer. A tendency for a tracer
+        # absent from the state has no field to apply to and is dropped, as
+        # ``_accumulate`` does for the columns path.
+        tracer_keys = tuple(state.tracers)
+        tendencies = PhysicsTendency.zeros(
+            state.temperature.shape,
+            tracers={name: jnp.zeros_like(field)
+                     for name, field in state.tracers.items()})
 
         for term in self.terms:
             # Running tendency view, same contract as the columns path: a
@@ -779,6 +789,8 @@ class ComposablePhysics(nnx.Module, Physics):
             call_fn = profiling.scoped(call_fn, term.name)
             tend, diagnostics = call_fn(state, diagnostics, forcing, terrain)
             tendencies += tend
+            tendencies = tendencies.copy(
+                tracers={k: tendencies.tracers[k] for k in tracer_keys})
 
         # Same cross-step handoff as the columns path (see there for why).
         # This raw value fixes the compute_tendencies output structure; the

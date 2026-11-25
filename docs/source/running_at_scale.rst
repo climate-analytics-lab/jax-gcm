@@ -403,13 +403,15 @@ when the working directory is ephemeral (a container, a scratch job) — and run
 unhealthy chunk instead of integrating a doomed state for hours; set it
 ``false`` to log and keep going.
 
-Beyond NaNs and the fixed absolute-blowup bounds, the gate also enforces two
-configurable ceilings, ``run.health.max_wind_speed`` (250 m/s) and
-``run.health.max_temperature`` (400 K) — loose enough that no validated
+Beyond NaNs and the fixed absolute-blowup bounds, the gate also enforces
+configurable ceilings, ``run.health.max_wind_speed`` (250 m/s),
+``run.health.max_temperature`` (400 K) and ``run.health.max_q_gkg``
+(100 g/kg; in a dry configuration q is a near-passive tracer, so one spike
+is not a blow-up signature) — loose enough that no validated
 configuration trips them, but tight enough to catch an unforced or
 underdamped dry core (no physics, or physics such as SSO drag that only ever
 removes energy/momentum) drifting arbitrarily far outside any physical
-regime without ever producing a NaN (#1145). Set either to ``null`` to
+regime without ever producing a NaN (#1145). Set any of them to ``null`` to
 disable it for a deliberately hot/windy experiment::
 
    python -m jcm.main +configuration=t63-echam-rrtmgp run=longrun \

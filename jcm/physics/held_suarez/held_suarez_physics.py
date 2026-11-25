@@ -16,6 +16,7 @@ from jcm.forcing import ForcingData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 import jcm.constants as jcm_constants
 from jcm.dycore.dinosaur.dycore import physics_specs_from_constants
+from jcm.physics.coords_util import column_lat_lon
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.composable_physics import ComposablePhysics
 
@@ -70,20 +71,47 @@ class HeldSuarez(PhysicsTerm):
         self._coords_cached = False
 
     def cache_coords(self, coords: coordinate_systems.CoordinateSystem) -> None:
-        """Cache the sigma centers and latitudes used by the analytic forcing."""
+        """Cache the sigma centers and the per-column latitude.
+
+        Latitude is stored once per physics column, flattened lon-major to
+        ``(ncols,)`` by :func:`jcm.physics.coords_util.column_lat_lon` (the
+        helper every horizontally-aware term uses, so scattered-column grids
+        work too). The forcing is defined on sigma levels: a vertical
+        coordinate without ``centers`` is evaluated at a 101325 Pa reference
+        surface pressure.
+        """
         vertical = coords.vertical
         if hasattr(vertical, 'centers'):
             sigma = vertical.centers
         else:
             sigma = vertical.get_sigma_centers(101325.0)
+        lat, _ = column_lat_lon(coords.horizontal)
         self._sigma = nnx.Variable(jnp.asarray(sigma))
-        self._lat = nnx.Variable(jnp.asarray(coords.horizontal.latitudes))
+        self._lat = nnx.Variable(jnp.asarray(lat))
         self._coords_cached = True
 
+    def _column_geometry(self, normalized_surface_pressure):
+        """Return ``(sigma, lat)`` shaped to broadcast against ``(nlev, *horiz)``.
+
+        The horizontal shape is read off the surface pressure, so the one code
+        path serves a single column, a ``(ncols,)`` block and an
+        ``(nlon, nlat)`` grid. The cached latitude holds the same columns
+        flattened lon-major, so reshaping it to the host's horizontal shape
+        lays it out exactly as the host laid out its columns.
+        """
+        horiz = normalized_surface_pressure.shape
+        sigma = self._sigma.get_value().reshape((-1,) + (1,) * len(horiz))
+        lat = self._lat.get_value().reshape(horiz)
+        return sigma, lat
+
+    def _cutoff(self, sigma):
+        """Boundary-layer weight ``max(0, (sigma - sigma_b) / (1 - sigma_b))``."""
+        sigma_b = self.sigma_b.get_value()
+        return jnp.maximum(0.0, (sigma - sigma_b) / (1.0 - sigma_b))
+
     def _equilibrium_temperature(self, normalized_surface_pressure):
-        sigma = self._sigma.get_value()
-        lat = self._lat.get_value()
-        p_over_p0 = sigma[:, jnp.newaxis, jnp.newaxis] * normalized_surface_pressure
+        sigma, lat = self._column_geometry(normalized_surface_pressure)
+        p_over_p0 = sigma * normalized_surface_pressure
         temperature = p_over_p0 ** self._kappa * (
             self.maxT.get_value()
             - self.dTy.get_value() * jnp.sin(lat) ** 2
@@ -91,22 +119,15 @@ class HeldSuarez(PhysicsTerm):
         )
         return jnp.maximum(self.minT.get_value(), temperature)
 
-    def _kv(self):
-        sigma = self._sigma.get_value()
-        kv = self.kf.get_value() * jnp.maximum(
-            0.0, (sigma - self.sigma_b.get_value()) / (1.0 - self.sigma_b.get_value())
-        )
-        return kv[:, jnp.newaxis, jnp.newaxis]
+    def _kv(self, normalized_surface_pressure):
+        sigma, _ = self._column_geometry(normalized_surface_pressure)
+        return self.kf.get_value() * self._cutoff(sigma)
 
-    def _kt(self):
-        sigma = self._sigma.get_value()
-        lat = self._lat.get_value()
-        cutoff = jnp.maximum(
-            0.0, (sigma - self.sigma_b.get_value()) / (1.0 - self.sigma_b.get_value())
-        )
+    def _kt(self, normalized_surface_pressure):
+        sigma, lat = self._column_geometry(normalized_surface_pressure)
         return self.ka.get_value() + (
             self.ks.get_value() - self.ka.get_value()
-        ) * (cutoff[:, jnp.newaxis, jnp.newaxis] * jnp.cos(lat) ** 4)
+        ) * (self._cutoff(sigma) * jnp.cos(lat) ** 4)
 
     def __call__(
         self,
@@ -116,10 +137,11 @@ class HeldSuarez(PhysicsTerm):
         terrain: TerrainData,
     ) -> tuple[PhysicsTendency, dict]:
         """Compute Held-Suarez tendencies; diagnostics dict is passed through unchanged."""
-        Teq = self._equilibrium_temperature(state.normalized_surface_pressure)
-        d_temperature = -self._kt() * (state.temperature - Teq)
-        d_v_wind = -self._kv() * state.v_wind
-        d_u_wind = -self._kv() * state.u_wind
+        ps = state.normalized_surface_pressure
+        Teq = self._equilibrium_temperature(ps)
+        d_temperature = -self._kt(ps) * (state.temperature - Teq)
+        d_v_wind = -self._kv(ps) * state.v_wind
+        d_u_wind = -self._kv(ps) * state.u_wind
         d_spec_humidity = jnp.zeros_like(state.temperature)
 
         tendencies = PhysicsTendency(
@@ -131,13 +153,20 @@ class HeldSuarez(PhysicsTerm):
         return tendencies, diagnostics
 
 
-def held_suarez_physics(**kwargs) -> ComposablePhysics:
+def held_suarez_physics(vectorize_columns: bool = False, **kwargs) -> ComposablePhysics:
     """Return a ComposablePhysics with the single Held-Suarez forcing term.
 
-    Any keyword arguments are forwarded to `HeldSuarez.__init__`.
+    Args:
+        vectorize_columns: Run the term on the flattened ``(nlev, ncols)``
+            column layout instead of the ``(nlev, nlon, nlat)`` grid. The term
+            is layout-agnostic, so both give the same tendencies; the column
+            layout is the one to choose when composing with column-only terms
+            (gravity-wave drag, tracer terms) via ``+``.
+        **kwargs: Forwarded to `HeldSuarez.__init__`.
+
     """
     return ComposablePhysics(
         terms=[HeldSuarez(**kwargs)],
         checkpoint_terms=False,
-        vectorize_columns=False,
+        vectorize_columns=vectorize_columns,
     )

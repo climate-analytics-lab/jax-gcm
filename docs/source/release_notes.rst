@@ -4,14 +4,106 @@ Release Notes
 dev (unreleased)
 ----------------
 
+New capabilities
+^^^^^^^^^^^^^^^^
+
+These are the hooks a downstream overlay had to patch ``jcm`` internals for
+(#1237); each is now a config key or a public argument, and every default
+leaves existing behaviour unchanged.
+
+- **A tracer can opt out of the semi-Lagrangian mass fixers.**
+  ``TracerSpec(conserved=False)`` declares a tracer whose physics imposes a
+  value (an age-of-air clock, a tracer relaxed to a profile). It is
+  transported and limited like any other, but neither the local
+  Bermejo-Conde fixer nor the global proportional one restores its
+  pre-transport mass. Two terms declaring the same tracer must agree on the
+  flag (:doc:`design/tracer_mass_conservation`).
+- **Choose which variables a run writes.** ``run.output_keep`` and
+  ``run.output_drop`` (``output_keep=`` / ``output_drop=`` on ``Model.run``
+  and ``Model.resume``) select the written variables. Unselected diagnostics
+  and prognostics are pruned before the output accumulation, so they cost no
+  device time or memory; the chunked health gate still computes the fields it
+  reads. An unknown name raises before the integration starts. A selected run
+  agrees with an unselected one to round-off, not bit for bit
+  (:doc:`design/output_selection`).
+- **User-supplied hybrid level tables.** A hybrid grid can name its own
+  half-level table with ``grid.level_table``: inline ``a``/``b`` coefficients
+  or a netCDF file carrying ``vct_a``/``vct_b``. ECHAM's level-dependent
+  hyperdiffusion orders are mapped onto it by reference pressure. A user
+  table with 47 or 95 levels does not pull the built-in table's ozone or
+  oxidant bundle: ``auto`` raises and says what to supply.
+- **A nudging top that follows latitude.** ``nudging.lat_top`` sets a
+  tropical and a polar top pressure with a smooth blend between and a
+  vertical taper, so one run can keep nudging the tropical upper troposphere
+  while leaving the extratropical lowermost stratosphere free. ``null`` keeps
+  the single ``min_pressure_hpa`` step (:doc:`design/era5_nudging`).
+- **Hines launch level as a pressure.** ``launch_pressure_hpa`` on
+  ``HinesGwd`` (``hines_launch_pressure_hpa`` on ``echam_physics``) is
+  resolved once to the nearest full level, for vertical tables where ECHAM's
+  count of ten levels above the surface lands somewhere else. The count is
+  now settable too (``launch_level``); the default is unchanged.
+- **Held-Suarez on the column-vectorized path.** ``HeldSuarez`` is
+  broadcasting-native, so ``held_suarez_physics(vectorize_columns=True)``
+  composes it with column-only terms. Whole-grid results are bit-identical.
+- **Small keys.** ``dycore.sl_departure_iterations`` sets the
+  semi-Lagrangian departure-point iteration count (default 1), and
+  ``run.health.max_q_gkg`` makes the health gate's humidity ceiling
+  configurable (default 100 g/kg, ``null`` disables it).
+- **Drive JCM from a host process.** ``jcm.configurations.from_config``
+  builds the model, forcing and ``run_kwargs`` from any composed config, a
+  downstream overlay's included; ``load`` is now compose-then-``from_config``
+  and takes an ``extra_config_dir``. ``jcm.nudging.window_forcing`` puts one
+  segment's window of a host-resident nudging target on the device, the same
+  call the chunked runner makes, so a caller alternating ``Model.run`` and
+  ``Model.resume`` no longer carries the whole target there.
+  ``runners.apply_log_level`` is public. A co-simulation host needs no
+  ``runners._*`` call (:doc:`design/packaged_config_tree`).
+- **The ERA5 prefetch regrids in time chunks.** ``python -m jcm.data.era5``
+  streams each chunk into the cache file, so its peak host memory follows the
+  chunk (a 4 GiB working set by default, ``--time-chunk`` to change it) and
+  not the window. Cache files and keys are unchanged.
+
 Bug fixes
 ^^^^^^^^^
 
+- **Saved omega belongs to the saved state** (#1237). ``omega`` in the output
+  was diagnosed from the state the last step started from, one time step
+  behind the ``u``, ``v`` and ``T`` saved beside it. Snapshot frames are now
+  re-diagnosed on the saved state and interval means are aligned to the same
+  post-step states as the dynamics fields. The omega the physics reads is
+  unchanged.
+- **Tracer tendencies accumulate on the whole-grid physics path** (#1237).
+  With ``vectorize_columns=False``, a term returning a tracer tendency raised
+  a tree-structure error. ``PhysicsTendency`` now adds as a union over tracer
+  keys, as the column-vectorized path already did.
+- **Run provenance cannot stop a run** (#1237). A modified tracked binary or
+  non-UTF-8 file crashed the git probe with ``UnicodeDecodeError``. The
+  dirty-tree fingerprint is now hashed over git's raw bytes, and every probe
+  that cannot produce its value records a ``<probe failed: ...>`` marker
+  instead of raising. The fingerprint of a dirty tree, and so its
+  ``run_hash``, differs from the one earlier versions recorded for the same
+  tree (:doc:`design/run_provenance`).
+- **Provenance keeps what a Python-built model recorded** (#1236). In a
+  process that never called ``start_run()``, the first ``collect()`` emptied
+  the input and fact registries, so they were missing from the output
+  attributes, the sidecar and ``run_hash``. ``start_run()`` is now the only
+  call that clears them.
+- **Terrain SSO statistics on another grid are ignored, not loaded raw**
+  (#1237). ``terrain.kind=from_file`` with a file coarser than the model grid
+  interpolated the orography but kept the file's subgrid-orography fields at
+  their own shape, which crashed Lott-Miller at the first step and was
+  silently zeroed by the dust scheme. They are now dropped with a warning
+  and derived from the interpolated orography, as ``TerrainData.from_file``
+  does. A run with Lott-Miller drag still needs a terrain file built for its
+  grid.
+- **Hines warns where its default launch level does not exist** (#1237). On
+  a grid with ten levels or fewer the default launch level falls off the top
+  of the column and the scheme applies no drag. It now says so; results are
+  unchanged.
 - **McICA sub-columns are the same with ``jax_enable_x64`` on or off.** The
   rank draws are float32 in every precision mode. They were the session's
   default float, so a run with x64 enabled (importing ``mam4_jax`` enables it)
   sampled a different cloud stream from the same run without.
-  
 - **The global mean reduces only the horizontal axes** (#1233).
   ``jcm.analysis.global_mean`` used to reduce every dimension not on a list
   of known non-horizontal ones. That list missed the SLIM ``soil_layer`` and

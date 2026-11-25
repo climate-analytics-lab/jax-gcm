@@ -9,6 +9,14 @@ store (no parallel Python dict — that is how ``benchmark.PRESETS`` drifted).
 ``.config`` is exposed for introspection). So ``model.run(**exp.run_kwargs)``
 reproduces ``python -m jcm.main +configuration=<name>``'s single integration.
 
+``from_config(cfg)`` is the engine ``load`` calls after composing: it takes any
+already-composed config (a downstream's own overlay included) and builds the
+same objects, so a host process needs no ``jcm.runners`` internals. See
+``docs/source/design/packaged_config_tree.md`` ("Driving jcm from a host
+process"). ``runners.run`` keeps its own pre-build sequence (provenance reset
+before the build, the ``from_state`` fail-fast, mode dispatch) and shares the
+forcing and initial-state helpers with this module.
+
 Both doors (this one and :meth:`jcm.forcing.ForcingData.from_bundles`) route
 through the SAME :mod:`jcm.runners` builders the CLI uses, so a recipe means one
 thing whether it is composed from the shell or from a notebook.
@@ -65,7 +73,7 @@ def available() -> dict[str, str]:
             for p in sorted(CONFIGURATION_DIR.glob("*.yaml"))}
 
 
-def _compose(name: str, overrides: list[str]):
+def _compose(name: str, overrides: list[str], extra_config_dir=None):
     """Compose ``+configuration=<name>`` (+ dotted overrides) against the root.
 
     ``initialize_config_dir`` clears the global Hydra on exit, and we also clear
@@ -73,7 +81,22 @@ def _compose(name: str, overrides: list[str]):
     leave a *host* application's own initialised Hydra cleared, we snapshot all
     Hydra singletons first and restore them in a ``finally`` — the host's
     context still composes after ``load`` returns (F3).
+
+    ``extra_config_dir`` joins Hydra's search path (``hydra.searchpath``), so a
+    downstream's own groups and recipes compose with jcm's. The entry sits
+    behind jcm's own directory, so new groups and names are added and a file
+    that shares a group/name with one of jcm's does not replace it.
     """
+    if extra_config_dir is not None:
+        # The path as it is, not ``Path.as_uri()``: Hydra's ``file://`` source
+        # does not percent-decode, so an escaped space or comma would name a
+        # directory that does not exist and the entry would be skipped without
+        # a word. Quoting keeps those characters out of the override grammar.
+        from hydra.core.override_parser.types import Quote, QuotedString
+        entry = QuotedString(
+            text=f"file://{Path(extra_config_dir).resolve()}",
+            quote=Quote.single).with_quotes()
+        overrides = [f"hydra.searchpath=[{entry}]", *overrides]
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
     from hydra.core.singleton import Singleton
@@ -120,9 +143,9 @@ def _run_kwargs(cfg, model) -> dict:
     carry). Chunking/checkpointing is a runner-loop concern and stays out here.
     """
     from jcm import runners
-    from jcm.initial_states import balanced_isothermal_state, jw_state
 
     run = cfg.run
+    output_selection = runners.written_output_selection(cfg)
     # A calendar ``total_time`` ("12 months", run/longrun.yaml) is resolved
     # against the start into the exact end_time, as the CLI does.
     total_time, end_time = runners._run_duration(
@@ -139,27 +162,120 @@ def _run_kwargs(cfg, model) -> dict:
         "output_averages": bool(run.output_averages),
         "snapshot_interval": run.get("snapshot_interval"),
         "snapshot_variables": tuple(run.get("snapshot_variables") or ()),
+        "output_keep": output_selection.keep,
+        "output_drop": output_selection.drop,
     }
-    init = cfg.get("init", {})
-    kind = init.get("kind", "isothermal")
-    if kind == "isothermal":
-        pass
-    elif kind == "jw":
-        kwargs["initial_state"] = jw_state(model, rh=float(init.get("rh", 0.6)))
-    elif kind == "balanced_isothermal":
-        kwargs["initial_state"] = balanced_isothermal_state(model)
-    elif kind == "from_state":
-        state, carry = runners._state_from_file(model, cfg)
-        kwargs["initial_state"] = state
-        kwargs["initial_physics_state"] = carry
-    elif kind == "era5":
-        kwargs["initial_state"] = runners._state_from_era5(model, cfg)
-    else:
-        raise ValueError(f"Unknown init.kind={kind!r} in configuration recipe")
+    kwargs.update(runners.initial_state_kwargs(cfg, model))
     return kwargs
 
 
-def load(name: str, **overrides) -> LoadedConfiguration:
+#: Config sections a composed config must carry for the build to make sense;
+#: ``init``, ``nudging``, ``constants`` and ``observers`` are optional (each
+#: has a documented default when absent). Extra sections are never rejected.
+_REQUIRED_SECTIONS = ("run", "grid", "physics", "terrain", "forcing")
+_REQUIRED_RUN_KEYS = ("save_interval",)
+
+
+def _check_required(cfg) -> None:
+    """Raise ``ValueError`` naming every required key the composed ``cfg`` lacks."""
+    missing = [k for k in _REQUIRED_SECTIONS if cfg.get(k) is None]
+    if cfg.get("run") is not None:
+        missing += [f"run.{k}" for k in _REQUIRED_RUN_KEYS
+                    if cfg.run.get(k) is None]
+        # The run's extent is ``total_time`` or, instead, an ``end_time``.
+        if cfg.run.get("total_time") is None and cfg.run.get("end_time") is None:
+            missing.append("run.total_time (or run.end_time)")
+    if missing:
+        raise ValueError(
+            "composed config is missing required key(s): "
+            f"{', '.join(missing)}. Compose it on top of jcm's own config "
+            "(jcm.configurations.CONFIG_DIR) so its defaults supply them.")
+
+
+def from_config(cfg, *, name: str | None = None, apply_log_level: bool = False,
+                enable_compilation_cache: bool = False) -> LoadedConfiguration:
+    """Build a model, forcing and ``run_kwargs`` from an already-composed config.
+
+    The engine behind :func:`load`: a host that composes its own Hydra config
+    (a ``--config-dir`` overlay on :data:`CONFIG_DIR`, see :func:`load`'s
+    ``extra_config_dir``) calls this directly, so it needs no ``jcm.runners``
+    internals. ``model.run(**result.run_kwargs)`` reproduces
+    ``python -m jcm.main`` for ``cfg``'s single full-mode integration, and the
+    config-trap warnings the CLI fires are emitted here too.
+
+    The nudging target, when ``nudging.enabled``, comes back host-resident
+    (numpy leaves) in ``result.forcing``; ``model.run(**run_kwargs)`` accepts
+    that whole. A caller that steps the model itself keeps it on the host and
+    puts one segment's window on the device with
+    :func:`jcm.nudging.window_forcing`.
+
+    Process-global steps are opt-in, so a library caller never has its own
+    process reconfigured by default: ``apply_log_level=True`` sets the ``jcm``
+    logger level from ``run.log_level`` (:func:`jcm.runners.apply_log_level`),
+    and ``enable_compilation_cache=True`` turns on JAX's persistent compilation
+    cache (:func:`jcm.runners.maybe_enable_compilation_cache`). Both are public
+    for a host that wants them at another moment. ``constants.*`` overrides are
+    always applied, because the dynamical core reads the live
+    :mod:`jcm.constants` singleton at construction and the built model would
+    otherwise disagree with ``config``. The CLI's other pre-build steps stay
+    with :func:`jcm.runners.run`: the SPMD device count
+    (``configure_host_device_count``; ``XLA_FLAGS`` is the reliable lever),
+    ``provenance.start_run`` and the ``from_state`` fail-fast path check (a bad
+    ``init.file`` still raises, from the state loader).
+
+    Args:
+        cfg: a composed config, an OmegaConf ``DictConfig`` or a plain nested
+            dict. It is not modified. Sections jcm's defaults always supply
+            (``run``, ``grid``, ``physics``, ``terrain``, ``forcing``,
+            ``run.save_interval`` and one of ``run.total_time`` /
+            ``run.end_time``) must be present, else
+            ``ValueError`` lists what is missing; extra sections are carried
+            through untouched.
+        name: label for :attr:`LoadedConfiguration.name` (default ``"custom"``).
+        apply_log_level: see above.
+        enable_compilation_cache: see above.
+
+    Returns:
+        The same :class:`LoadedConfiguration` :func:`load` returns.
+
+    """
+    from omegaconf import DictConfig, OmegaConf
+
+    from jcm import runners
+
+    if not isinstance(cfg, DictConfig):
+        cfg = OmegaConf.create(cfg)
+    _check_required(cfg)
+
+    if apply_log_level:
+        runners.apply_log_level(cfg)
+    if enable_compilation_cache:
+        runners.maybe_enable_compilation_cache()
+
+    label = "custom" if name is None else name
+    # pySES recipes need the optional backend; fail with a clear message rather
+    # than the raw ImportError build_model would surface (guarded like the tests).
+    if cfg.get("dycore", {}).get("name", "dinosaur") == "pyses":
+        import importlib.util
+        if importlib.util.find_spec("pyses") is None:
+            raise ModuleNotFoundError(
+                f"configuration {label!r} uses the pySES CAM-SE backend, which "
+                "is not installed. Install pyses (>=0.1.3.1) to load it.")
+
+    runners.apply_constants_overrides(cfg)
+    model = runners.build_model(cfg)
+    forcing = runners.build_run_forcing(cfg, model)
+
+    run_kwargs = _run_kwargs(cfg, model)
+    run_kwargs["forcing"] = forcing
+    # Plain resolved dict for introspection; a still-unfilled ``???`` key stays a
+    # string rather than raising on this read-only copy.
+    config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False)
+    return LoadedConfiguration(name=label, model=model, forcing=forcing,
+                               run_kwargs=run_kwargs, config=config)
+
+
+def load(name: str, *, extra_config_dir=None, **overrides) -> LoadedConfiguration:
     """Compose a named configuration recipe and return its built objects.
 
     ``name`` is any :func:`available` key (a ``jcm/config/configuration/*.yaml``
@@ -172,58 +288,29 @@ def load(name: str, **overrides) -> LoadedConfiguration:
 
     ``model.run(**exp.run_kwargs)`` reproduces the CLI's single integration for
     the recipe; the same config-trap warnings the CLI fires are emitted here.
+    ``load`` is "compose, then :func:`from_config`" with its process-global
+    steps off.
+
+    A downstream that keeps its own config directory (its recipes, extra
+    groups) passes it as ``extra_config_dir``: it joins Hydra's search path
+    behind jcm's, so its new groups and recipes compose with jcm's and a recipe
+    there may be named by ``name`` (the :func:`available` check then covers
+    only jcm's own recipes, so it is skipped). To compose by other means (the
+    host's own primary config, ``hydra.main``), compose against
+    :data:`CONFIG_DIR` and hand the result to :func:`from_config`::
+
+        from hydra import compose, initialize_config_dir
+        from jcm.configurations import CONFIG_DIR, from_config
+
+        with initialize_config_dir(version_base=None, config_dir=str(CONFIG_DIR)):
+            cfg = compose("config", overrides=[
+                "+configuration=t63-echam-jam", "hydra.searchpath=[file:///my/conf]"])
+        exp = from_config(cfg, apply_log_level=True)
     """
-    from omegaconf import OmegaConf
-
-    from jcm import runners
-
-    names = available()
-    if name not in names:
+    if extra_config_dir is None and name not in (names := available()):
         raise ValueError(
             f"Unknown configuration {name!r}. Available: {sorted(names)}")
 
     overrides_list = [_override_str(k, v) for k, v in overrides.items()]
-    cfg = _compose(name, overrides_list)
-
-    # pySES recipes need the optional backend; fail with a clear message rather
-    # than the raw ImportError build_model would surface (guarded like the tests).
-    if cfg.get("dycore", {}).get("name", "dinosaur") == "pyses":
-        import importlib.util
-        if importlib.util.find_spec("pyses") is None:
-            raise ModuleNotFoundError(
-                f"configuration {name!r} uses the pySES CAM-SE backend, which "
-                "is not installed. Install pyses (>=0.1.3.1) to load it.")
-
-    # Apply any ``+constants.*`` overrides to the process-global jcm.constants
-    # singleton BEFORE build, exactly as the CLI (runners.run) does — the dycore
-    # reads the live singleton at construction, so skipping this would build with
-    # default physics while ``.config`` claimed otherwise. Of runners.run()'s
-    # other pre-build steps only this one bears on the built model, so it is the
-    # sole one the door mirrors: configure_host_device_count (SPMD device count)
-    # and maybe_enable_compilation_cache (JAX compile cache) are process-global,
-    # perf-only side effects — XLA_FLAGS is the reliable device-count lever and a
-    # notebook can enable the cache itself; provenance.start_run and the
-    # from_state fail-fast path check are run-loop concerns (provenance is
-    # attached by _run_full/run_chunked, which the door does not use, and a bad
-    # init.file still raises via _state_from_file in _run_kwargs).
-    runners.apply_constants_overrides(cfg)
-
-    model = runners.build_model(cfg)
-    dycore = getattr(model, "dycore", None)
-    forcing = runners.build_forcing(cfg, model.coords, dycore=dycore)
-    forcing = runners._maybe_attach_nudging_target(forcing, cfg, model)
-    # Same guards/warnings the CLI runs after model+forcing construction.
-    runners.guard_emulator_ghg_forcing(model.physics, forcing)
-    runners.validate_run_forcing(
-        model.physics, forcing,
-        run_window=runners.configured_run_window(cfg, model))
-    runners.warn_on_config_traps(cfg, model.physics, forcing,
-                                 coords=model.coords, dycore=dycore)
-
-    run_kwargs = _run_kwargs(cfg, model)
-    run_kwargs["forcing"] = forcing
-    # Plain resolved dict for introspection; a still-unfilled ``???`` key stays a
-    # string rather than raising on this read-only copy.
-    config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False)
-    return LoadedConfiguration(name=name, model=model, forcing=forcing,
-                               run_kwargs=run_kwargs, config=config)
+    cfg = _compose(name, overrides_list, extra_config_dir=extra_config_dir)
+    return from_config(cfg, name=name)

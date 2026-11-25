@@ -251,6 +251,42 @@ same-step linear interpolant).
 - All three are ignored by the Eulerian core, whose step is unchanged: SPEEDY
   runs are bit-identical with or without them.
 
+## Tracers whose physics imposes a value
+
+``TracerSpec.conserved`` (default ``True``) says whether the dynamics may
+restore a tracer's global ``∫ q·dp``. Both fixers assume the pre-transport
+mass is the right target, because the physics changes it only through explicit
+sources and sinks. A tracer whose physics imposes a *value* breaks that
+assumption: an age-of-air clock gains a constant per unit time everywhere, and
+a tracer relaxed to a profile is pinned to it, so the pre-transport mass is
+simply the previous value and rescaling to it undoes the imposed rate (a clock
+run through the global fixer advanced at 0.44 of its rate over a year;
+a profile-held tracer drifted by 7 % in two years). A tracer declared
+``conserved=False`` is therefore left out of **both** stages — the local
+Bermejo–Conde correction (``BermejoCondeTracerTransport.mass_fixed_tracers``)
+and the global proportional factor (``_fix_nodal_tracer_mass``) — through one
+set, ``DinosaurDycore.mass_fixed_tracers``. It is still transported on the
+grid and still passes the quasi-monotone limiter; only the mass restoration is
+skipped.
+
+Where the flag applies:
+
+- Two terms declaring one tracer must agree on every field including
+  ``conserved``; ``ComposablePhysics.required_tracers`` raises on a mismatch.
+- The set is part of what the transport bakes in, so assigning
+  ``dycore.tracer_specs`` with a changed set of non-conserved tracers (a physics
+  swap) rebuilds the transport like a changed tracer set does.
+- ``specific_humidity`` is the prognostic water species, not a
+  physics-declared tracer: nodal humidity is always in the fixed set and a
+  modal humidity is always handled by ``_fix_humidity_mass``, controlled only
+  by ``humidity_mass_fixer``. Declaring it ``conserved=False`` raises.
+- The Eulerian core runs no fixer, and the pySES backend carries every tracer
+  as a passive pySES tracer with no jcm-side mass fixer, so the flag has no
+  effect on either. ``budget_dyn_<sp>`` (the transport-leak gauge) is computed
+  from the saved state independently of the fixers, so a non-conserved tracer
+  that has a gauge will show its imposed-value change there as dynamics
+  leakage; do not read it for such a tracer.
+
 To check a run, take the global means of the saved daily output:
 ``S = P − E + dPW/dt``, with ``P`` = ``surface_exchange.precipitation``,
 ``E`` = ``surface_exchange.evaporation``, and ``PW`` from ``specific_humidity``

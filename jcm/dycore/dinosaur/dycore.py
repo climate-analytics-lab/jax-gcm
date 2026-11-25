@@ -408,6 +408,7 @@ class DinosaurDycore(DynamicalCore):
         # Only the name set is baked into the transport; the setter compares
         # against this to decide whether a rebuild is needed.
         self._transport_tracer_names = tuple(self._tracer_specs)
+        self._transport_unconserved = self._unconserved_tracers()
         if self._advection == EULERIAN:
             if self._tracer_specs:
                 logger.warning(
@@ -478,6 +479,7 @@ class DinosaurDycore(DynamicalCore):
             departure_iterations=self._sl_options.get("departure_iterations", 1),
             vertical_interpolation_order=self.vertical_interpolation_order,
             local_mass_fixer=self.local_mass_fixer,
+            mass_fixed_tracers=self.mass_fixed_tracers,
         )
         # Imported here, after ``_require_semi_lagrangian`` has run in
         # ``__init__``: the module subclasses dinosaur's SL classes at import
@@ -669,6 +671,38 @@ class DinosaurDycore(DynamicalCore):
         return bool(self._sl_options.get("mass_fixer", True)
                     and self._sl_options.get("humidity_mass_fixer", True))
 
+    def _unconserved_tracers(self) -> tuple:
+        """Names of the declared tracers with ``TracerSpec.conserved`` false.
+
+        Read from the live specs. ``specific_humidity`` is the prognostic
+        water species, not a physics-declared tracer (its mass budget is the
+        water budget), so declaring it non-conserved is rejected rather than
+        silently ignored.
+        """
+        names = tuple(n for n, spec in self._tracer_specs.items()
+                      if not getattr(spec, "conserved", True))
+        if "specific_humidity" in names:
+            raise ValueError(
+                "TracerSpec('specific_humidity', conserved=False) is not "
+                "supported: humidity's mass fixers (nodal and modal) close "
+                "the global water budget and are controlled by "
+                "sl_options['mass_fixer'] / ['humidity_mass_fixer'].")
+        return names
+
+    @property
+    def mass_fixed_tracers(self) -> tuple:
+        """Nodal tracers whose mass the SL fixers restore.
+
+        Every nodal tracer except those declared ``conserved=False``; both
+        the local Bermejo-Conde fixer inside the transport step and the
+        global proportional fixer (:meth:`_fix_nodal_tracer_mass`) act on
+        exactly this set, and on nothing outside it. Nodal
+        ``specific_humidity`` is always in it; a modal humidity is handled by
+        :meth:`_fix_humidity_mass`, which the flag does not touch.
+        """
+        skip = set(self._unconserved_tracers())
+        return tuple(n for n in self._nodal_tracers if n not in skip)
+
     @property
     def tracer_specs(self) -> dict:
         """Mapping ``name -> TracerSpec`` for every tracer the physics declares.
@@ -688,9 +722,11 @@ class DinosaurDycore(DynamicalCore):
         specs = dict(specs) if specs else {}
         # Spec *values* (initial_value, nondimensionalize) are read live from
         # self._tracer_specs by initial_state/state-bridge calls; only the
-        # name set is baked into the transport, so only that forces a rebuild.
-        rebuild = tuple(specs) != self._transport_tracer_names
+        # name set and the set of non-conserved tracers (which the local
+        # fixer in the transport class bakes in) force a rebuild.
         self._tracer_specs = specs
+        rebuild = (tuple(specs) != self._transport_tracer_names
+                   or self._unconserved_tracers() != self._transport_unconserved)
         if rebuild:
             # Auto mode: a physics swap that adds tracers leaves Eulerian
             # (resolve_advection's rule).
@@ -1207,12 +1243,16 @@ class DinosaurDycore(DynamicalCore):
         creation is already returned at the departure points that produced
         it, inside the transport step, and this pass only closes the
         round-off-sized remainder its weights could not absorb.
+
+        Tracers declared ``TracerSpec(conserved=False)`` are skipped (see
+        :attr:`mass_fixed_tracers`): their physics imposes a value, so the
+        pre-transport mass is not a target for them.
         """
         w = jnp.asarray(self.coords.horizontal.quadrature_weights)
         dp_ref = self._nodal_tracer_column_weight(state_ref)
         dp_new = self._nodal_tracer_column_weight(state_new)
         tracers = dict(state_new.tracers)
-        for name in self._nodal_tracers:
+        for name in self.mass_fixed_tracers:
             q_ref = state_ref.tracers[name]
             q_new = tracers[name]
             target = jnp.sum(q_ref * dp_ref * w)
