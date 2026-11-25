@@ -513,19 +513,56 @@ class TestChunkedRunner(unittest.TestCase):
         model = types.SimpleNamespace(
             dycore=object(),
             output_variable_names=lambda: {"temperature", "pressure_full"})
-        written, computed = _chunk_output_selections(cfg, model, [500, 850])
+        written, computed = _chunk_output_selections(cfg, model)
         self.assertTrue(written.selected("pressure_full"))
         self.assertTrue(computed.selected("pressure_full"))
         bad = _compose(["run.output_drop=[pressure_full]",
                         "run.pressure_levels=[500]"])
         with self.assertRaisesRegex(ValueError, "pressure_levels"):
-            _chunk_output_selections(bad, model, [500])
+            _chunk_output_selections(bad, model)
+
+    def test_pressure_levels_rule_holds_on_every_path(self):
+        """The unchunked run and the Python door keep ``pressure_full`` too."""
+        from jcm import configurations
+        from jcm.runners import written_output_selection
+
+        cfg = _compose(["run.output_keep=[temperature]",
+                        "run.pressure_levels=[500, 850]"])
+        self.assertEqual(written_output_selection(cfg).keep,
+                         ("temperature", "pressure_full"))
+        kwargs = configurations._run_kwargs(cfg, _speedy_model())
+        self.assertEqual(kwargs["output_keep"], ("temperature", "pressure_full"))
+        # Without pressure_levels the keep-list is the user's, unchanged.
+        plain = _compose(["run.output_keep=[temperature]"])
+        self.assertEqual(written_output_selection(plain).keep, ("temperature",))
+        self.assertTrue(written_output_selection(_compose()).is_default)
+        bad = _compose(["run.output_drop=[pressure_full]",
+                        "run.pressure_levels=[500]"])
+        with self.assertRaisesRegex(ValueError, "pressure_levels"):
+            written_output_selection(bad)
+
+    def test_unchunked_keep_list_saves_on_pressure_levels(self):
+        """A kept variable is written on pressure levels by a single run."""
+        from jcm.runners import save_predictions, written_output_selection
+        cfg = _compose(["run.output_keep=[temperature]",
+                        "run.pressure_levels=[500]"])
+        selection = written_output_selection(cfg)
+        model = _speedy_model()
+        preds = model.run(**_RUN,
+                          output_keep=selection.keep,
+                          output_drop=selection.drop)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "out.nc"
+            save_predictions(preds, path, pressure_levels_hpa=[500.0])
+            with xr.open_dataset(path) as ds:
+                self.assertIn("temperature", ds)
+                self.assertNotIn("level", ds["temperature"].dims)
 
     def test_default_never_asks_the_model_for_names(self):
         from jcm.runners import _chunk_output_selections
 
         model = mock.Mock(side_effect=AssertionError("no model access"))
-        written, computed = _chunk_output_selections(_compose(), model, None)
+        written, computed = _chunk_output_selections(_compose(), model)
         self.assertTrue(written.is_default and computed.is_default)
 
     def test_diagnostic_modes_refuse_the_selection(self):

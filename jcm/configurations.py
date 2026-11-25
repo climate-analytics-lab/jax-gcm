@@ -137,7 +137,7 @@ def _run_kwargs(cfg, model) -> dict:
     from jcm import runners
 
     run = cfg.run
-    output_selection = runners._output_selection_from_cfg(cfg)
+    output_selection = runners.written_output_selection(cfg)
     # A calendar ``total_time`` ("12 months", run/longrun.yaml) is resolved
     # against the start into the exact end_time, as the CLI does.
     total_time, end_time = runners._run_duration(

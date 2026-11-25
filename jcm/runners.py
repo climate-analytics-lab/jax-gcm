@@ -2253,7 +2253,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         )
 
     progress_bar = bool(cfg.run.get("progress_bar", False))
-    output_selection = _output_selection_from_cfg(cfg)
+    output_selection = written_output_selection(cfg)
     # A warm start (from_state) carries the donor's physics carry through to
     # ``run``; every other init builds a fresh carry.
     init_kwargs = initial_state_kwargs(cfg, model)
@@ -2500,6 +2500,30 @@ def _output_selection_from_cfg(cfg: DictConfig):
     return OutputSelection.from_args(
         _plain(cfg.run.get("output_keep", None)),
         _plain(cfg.run.get("output_drop", None)))
+
+
+def written_output_selection(cfg: DictConfig):
+    """Return the selection of variables a run of ``cfg`` writes.
+
+    ``run.output_keep`` / ``run.output_drop``, with the one variable the
+    runner itself needs at write time added: ``run.pressure_levels``
+    interpolates every level field with the model's own ``pressure_full``,
+    so a keep-list keeps it implicitly and a drop-list that names it is
+    refused. Every path that hands a selection to the model (the single
+    integration, the chunked loop, :func:`jcm.configurations.from_config`)
+    takes it from here, so the rule cannot hold on one and not another. No
+    model is needed: the names are checked against the model's output
+    variables where the selection is used.
+    """
+    written = _output_selection_from_cfg(cfg)
+    if written.is_default or not cfg.run.get("pressure_levels", None):
+        return written
+    if "pressure_full" in written.drop:
+        raise ValueError(
+            "run.output_drop lists pressure_full, which run.pressure_levels "
+            "interpolates every level field with. Remove it from "
+            "run.output_drop, or unset run.pressure_levels.")
+    return written.requiring(["pressure_full"])
 
 
 def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
@@ -3032,8 +3056,7 @@ def run_chunked(
     # from each chunk's Dataset (the health gate, the budget report, the
     # pressure-level conversion), so a user's choice can never blind the gate.
     # Those are stripped again before anything is written (``process_chunk``).
-    out_selection, model_selection = _chunk_output_selections(
-        cfg, model, pressure_levels_hpa)
+    out_selection, model_selection = _chunk_output_selections(cfg, model)
 
     reports: list[dict] = []
     elapsed_seconds = 0
@@ -3436,7 +3459,7 @@ def run_chunked(
     return reports
 
 
-def _chunk_output_selections(cfg: DictConfig, model, pressure_levels_hpa):
+def _chunk_output_selections(cfg: DictConfig, model):
     """Return the written and the computed output selections of a chunked run.
 
     Returns ``(written, computed)``. Both are the default selection, with no
@@ -3446,24 +3469,16 @@ def _chunk_output_selections(cfg: DictConfig, model, pressure_levels_hpa):
     holds the variables the loop reads between chunks
     (:func:`jcm.diagnostics.runner_read_fields`) that exist in this model.
 
-    ``run.pressure_levels`` interpolates every level field with the model's
-    own ``pressure_full``, so a keep-list keeps it implicitly and a drop-list
-    that names it is refused.
+    The written selection is :func:`written_output_selection`'s, which is
+    where ``run.pressure_levels`` keeps ``pressure_full``.
     """
     from jcm.diagnostics import runner_read_fields
 
-    written = _output_selection_from_cfg(cfg)
+    written = written_output_selection(cfg)
     if written.is_default:
         return written, written
     available = model.output_variable_names()
-    written.validate(available)
-    if pressure_levels_hpa:
-        if "pressure_full" in written.drop:
-            raise ValueError(
-                "run.output_drop lists pressure_full, which run.pressure_levels "
-                "interpolates every level field with. Remove it from "
-                "run.output_drop, or unset run.pressure_levels.")
-        written = written.requiring(["pressure_full"])
+    _output_selection_from_cfg(cfg).validate(available)
     read_back = runner_read_fields(
         available, dynamics_needed=getattr(model, "dycore", None) is None)
     return written, written.requiring(sorted(read_back & set(available)))
