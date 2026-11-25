@@ -100,6 +100,10 @@ Bug fixes
   a grid with ten levels or fewer the default launch level falls off the top
   of the column and the scheme applies no drag. It now says so; results are
   unchanged.
+- **McICA sub-columns are the same with ``jax_enable_x64`` on or off.** The
+  rank draws are float32 in every precision mode. They were the session's
+  default float, so a run with x64 enabled (importing ``mam4_jax`` enables it)
+  sampled a different cloud stream from the same run without.
 - **The global mean reduces only the horizontal axes** (#1233).
   ``jcm.analysis.global_mean`` used to reduce every dimension not on a list
   of known non-horizontal ones. That list missed the SLIM ``soil_layer`` and
@@ -114,6 +118,36 @@ Bug fixes
   with no horizontal dimension raises instead of being averaged over
   whatever it has. The release gates and regression bands average only
   ``lat``/``lon`` fields and are unchanged.
+
+Performance
+^^^^^^^^^^^
+
+- **The RRTMGP term solves all columns at once, column-minor.** With the
+  default placement it hands jax-rrtmgp every column in the model's own
+  ``(nlev, ncols)`` layout through ``RRTMGP.compute_heating_rate_zc``, with
+  the McICA masks of every column drawn in one vertical scan
+  (:func:`jcm.physics.radiation.mcica.generate_subcolumns_batch`) and passed
+  as 1-byte booleans. The per-column scheme remains the solver for any other
+  placement and for a column axis sharded over several CPU devices. Fluxes
+  and heating rates agree with it to float32 rounding, gradients to what
+  float32 resolves through their cancellations, and the sampled cloud covers
+  bit for bit. On an A100 the T63L47 radiation call
+  is about 10 % faster (98 to 89 ms) and compiles a quarter faster; the
+  model day is unchanged within run-to-run noise, since radiation runs every
+  two hours. On one many-core CPU device the call is 5x faster than the
+  per-column solver's default blocks (2048 columns: 12.3 to 2.3 s). On TPU, ``column_block="auto"`` cuts the solve
+  into 128-aligned blocks and the lowered program has no gathers or scatters.
+  A column axis sharded over several GPUs or TPU chips is solved per device,
+  with no collectives. See :doc:`design/rrtmgp_gpu_performance`.
+
+Dependencies
+^^^^^^^^^^^^
+
+- **The radiation term calls jax-rrtmgp's column-minor entry point,**
+  ``RRTMGP.compute_heating_rate_zc``, which 0.8.0 (already the floor since
+  3.1.0) provides, and refuses to start on an older checkout with a message
+  that names the release.
+
 
 v3.1.0 (2026-11-24)
 -------------------
