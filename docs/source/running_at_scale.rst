@@ -173,9 +173,8 @@ command is one validated configuration::
    python -m jcm.main +configuration=ma-t63-l95        # middle-atmosphere JAM sweep
 
 Some configurations need an **optional extra** on top of the base install: the
-default JAM recipe (``t63-echam-jam``, the M7 population) needs ``jcm[m7]``,
-after ``pip install "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e"``
-(m7-jax is not on PyPI yet); the MAM4 JAM recipes (``t63-echam-jam-mam4``, ``*-jam-aerocom*``,
+default JAM recipe (``t63-echam-jam``, the M7 population) needs
+``pip install jcm[m7]``; the MAM4 JAM recipes (``t63-echam-jam-mam4``, ``*-jam-aerocom*``,
 ``ma-*``) select the MAM4-JAX core and need ``pip install jcm[mam4]``; the pySES recipes need ``jcm[pyses]``; the COSP
 satellite-simulator variant needs ``jcm[cosp]`` (its ``jax-cosp`` is not on
 PyPI yet: ``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``

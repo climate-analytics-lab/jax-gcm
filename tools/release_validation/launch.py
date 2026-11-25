@@ -163,12 +163,6 @@ def _preset_grid(preset_name: str) -> str | None:
 #: checks for it before the model is built (``PBS``).
 _CORE_EXTRAS = {"mam4_jax": "mam4", "m7_jax": "m7"}
 
-#: An extra's dependencies that are not on PyPI, by the distribution name its
-#: line in ``tools/ci/extras_preinstall.txt`` starts with. They install from
-#: that file, at the commit it pins, before the extra resolves (as CI's
-#: extras-tests job does).
-_PREINSTALL = {"m7": "m7-jax"}
-
 
 def core_extra(overrides: list[str]) -> tuple[str, str] | None:
     """Return ``(module, extra)`` of the optional-extra JAM core a run selects.
@@ -222,10 +216,8 @@ def core_check(overrides: list[str], venv: str) -> str:
     if core is None:
         return ""
     module, extra = core
-    pre = (" (pip install -r tools/ci/extras_preinstall.txt first)"
-           if extra in _PREINSTALL else "")
     return (f"python -c 'import {module}' || {{ echo 'this member needs the "
-            f"jcm[{extra}] extra in {venv}: pip install -e \".[{extra}]\"{pre}'"
+            f"jcm[{extra}] extra in {venv}: pip install -e \".[{extra}]\"'"
             " >&2; exit 1; }\n")
 
 
@@ -563,9 +555,6 @@ _RECORDED_DISTS = ("jcm", "jax", "jaxlib", "jax-cuda12-plugin", "jax-rrtmgp",
 #: The dependency lock the first attempt of a launch writes into its rundir.
 LOCK_FILE = "requirements.lock"
 
-#: The pinned commit's not-on-PyPI dependencies, in the pod's clone.
-_POD_PREINSTALL = "/work/jcm/tools/ci/extras_preinstall.txt"
-
 
 def pinned_setup(rundir: str, extras: tuple[str, ...] = ("mam4",)) -> str:
     """Shell that installs the pinned commit's own dependency set in the pod.
@@ -589,38 +578,21 @@ def pinned_setup(rundir: str, extras: tuple[str, ...] = ("mam4",)) -> str:
     of that rundir — one launch, by :func:`rundir_guard` — installs under it
     as a constraint. The versions each attempt ran with also go into the
     rundir's PROVENANCE.
-
-    An extra whose dependency is not on PyPI (``m7``'s m7-jax) installs it
-    first from ``tools/ci/extras_preinstall.txt``, at the commit that file
-    pins, on every attempt: a git dependency is no ``name==version`` line, so
-    the lock cannot carry it, and the pinned commit is what makes it
-    reproducible instead.
     """
     dists = ", ".join(repr(d) for d in _RECORDED_DISTS)
     lock = f"{rundir}/{LOCK_FILE}"
     spec = f"/work/jcm[{','.join(extras)}]"
     what = (f"the {extras[0]} extra" if len(extras) == 1
             else f"the {', '.join(extras)} extras")
-    names = [_PREINSTALL[e] for e in extras if e in _PREINSTALL]
-    pre, pre_locked, pre_first = "", "", ""
-    if names:
-        pattern = "|".join(re.escape(n) for n in names)
-        pre = (f"grep -E '^({pattern})[[:space:]]*@' {_POD_PREINSTALL} "
-               "> /tmp/preinstall.txt\n")
-        pip = "pip install --no-cache-dir --disable-pip-version-check"
-        pre_locked = (f"  {pip} -c {lock} -r /tmp/preinstall.txt "
-                      "2>&1 | tail -2\n")
-        pre_first = (f"  {pip} -c /tmp/cuda-jax.txt -r /tmp/preinstall.txt "
-                     "2>&1 | tail -2\n")
     return f"""# The pinned commit's own dependency set (requirements.txt + {what}),
 # not the image's older release, resolved once per launch: the first attempt
 # holds the image's CUDA jax by a constraint and writes the lock, and every
 # later attempt installs exactly the locked versions (the GPU check backs both).
-{pre}if [ -f {lock} ]; then
-{pre_locked}  pip install --no-cache-dir --disable-pip-version-check -c {lock} -e '{spec}' 2>&1 | tail -2
+if [ -f {lock} ]; then
+  pip install --no-cache-dir --disable-pip-version-check -c {lock} -e '{spec}' 2>&1 | tail -2
 else
   pip freeze 2>/dev/null | grep -iE '^(jax|jaxlib|jax[-_]cuda12[-_]plugin|jax[-_]cuda12[-_]pjrt)==' > /tmp/cuda-jax.txt || true
-{pre_first}  pip install --no-cache-dir --disable-pip-version-check -c /tmp/cuda-jax.txt -e '{spec}' 2>&1 | tail -2
+  pip install --no-cache-dir --disable-pip-version-check -c /tmp/cuda-jax.txt -e '{spec}' 2>&1 | tail -2
   pip freeze --exclude-editable 2>/dev/null | grep -E '^[A-Za-z0-9_.-]+==' > {lock}.tmp
   mv {lock}.tmp {lock}
 fi

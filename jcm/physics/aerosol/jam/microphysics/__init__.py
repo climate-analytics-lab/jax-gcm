@@ -9,9 +9,9 @@ collect every non-mam4 JAM test. The dependency is pulled in only when the core
 is actually accessed (``from ...microphysics import Mam4JaxMicrophysics``,
 construction, or an explicit import of its adapter module). When that dependency
 is not installed, the access raises a ``ModuleNotFoundError`` that names the
-install line, rather than a bare ``No module named ...``: the default JAM
-configuration runs M7, whose m7-jax is not on PyPI, so the bare error would
-leave a PyPI user with no way forward.
+jcm extra to install, rather than a bare ``No module named ...``, which names
+a module and not the extra that provides it: the default JAM configuration
+runs M7, so a plain ``pip install jcm`` meets this on its first JAM run.
 
 To add a microphysics core:
 
@@ -38,15 +38,6 @@ from jcm.physics.aerosol.jam.microphysics.m7_data import (
     M7_SPEC,
 )
 
-#: The m7-jax commit the ``jcm[m7]`` extra is validated against. m7-jax is not
-#: on PyPI yet, so the extra names it (``m7-jax==0.2.0.dev0``, every build of
-#: this commit's branch) and it installs from GitHub first. This is the one
-#: copy a user reads, in the error a missing core raises; a test holds it equal
-#: to ``tools/ci/extras_preinstall.txt``'s line and to the install docs.
-M7_JAX_REQUIREMENT = (
-    "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git"
-    "@8fe0fa7496b86026523984d6c573c1555c86c90e")
-
 #: Cores deferred to first access: attribute name -> (module that defines it,
 #: the optional package that module imports, how to install that package).
 #: Listed here precisely because importing their module pulls an optional
@@ -60,13 +51,9 @@ _LAZY_CORES = {
         "pip install 'jcm[mam4]'"),
     "M7JaxMicrophysics": (
         "jcm.physics.aerosol.jam.microphysics.m7_jax", "m7_jax",
-        "The M7 JAM core (jam_microphysics: m7_jax; the default JAM "
-        "configuration t63-echam-jam) needs the jcm[m7] extra. m7-jax is "
-        "not on PyPI yet, so install its pinned commit from GitHub first:\n"
-        f"    pip install \"{M7_JAX_REQUIREMENT}\"\n"
-        "    pip install 'jcm[m7]'\n"
-        "or run the MAM4 configuration, t63-echam-jam-mam4, whose extra "
-        "(jcm[mam4]) installs from PyPI."),
+        "The M7 JAM core (jam_microphysics: m7_jax; physics=echam-jam-m7, "
+        "which the default JAM configuration t63-echam-jam composes) needs "
+        "the jcm[m7] extra: pip install 'jcm[m7]'"),
 }
 
 __all__ = [

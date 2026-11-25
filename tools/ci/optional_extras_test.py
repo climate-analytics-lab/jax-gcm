@@ -31,7 +31,7 @@ def test_direct_url_requirements_are_flagged(tmp_path):
         name = "x"
         dynamic = ["dependencies"]
         [project.optional-dependencies]
-        named = ["m7-jax==0.2.0.dev0"]
+        named = ["m7-jax==0.2.0"]
         url = ["m7-jax @ git+https://github.com/o/r.git@abc"]
         [tool.setuptools.dynamic]
         dependencies = {file = ["requirements.txt"]}
@@ -44,17 +44,6 @@ def test_direct_url_requirements_are_flagged(tmp_path):
     assert optional_extras.direct_url_requirements(tmp_path) == [
         "dependencies: dinosaur @ git+https://github.com/o/d.git@sl",
         "url: m7-jax @ git+https://github.com/o/r.git@abc"]
-
-
-def test_the_user_guide_installs_the_m7_commit_ci_tests():
-    """The guide's install line must name the preinstall file's m7-jax commit."""
-    root = _HERE.parent.parent
-    pinned = [line for line in
-              (_HERE / "extras_preinstall.txt").read_text().splitlines()
-              if line.startswith("m7-jax @ ")]
-    assert len(pinned) == 1
-    guide = (root / "docs" / "source" / "advanced_features.rst").read_text()
-    assert f'pip install "{pinned[0]}"' in guide
 
 
 def test_repository_gates_only_through_the_marker():

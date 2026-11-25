@@ -203,10 +203,8 @@ The initial state the configuration calls for is already applied, so
 invisible.
 
 Configurations that select an optional component need its extra installed —
-``jcm[m7]`` for the default JAM recipe (``t63-echam-jam``, M7; m7-jax is not on
-PyPI yet, so install its pinned commit first with
-``pip install "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e"``,
-see :doc:`advanced_features`), ``jcm[mam4]`` for the MAM4 JAM recipes (``t63-echam-jam-mam4``, ``ma-*``), ``jcm[pyses]`` for the CAM-SE
+``jcm[m7]`` for the default JAM recipe (``t63-echam-jam``, M7; see
+:doc:`advanced_features`), ``jcm[mam4]`` for the MAM4 JAM recipes (``t63-echam-jam-mam4``, ``ma-*``), ``jcm[pyses]`` for the CAM-SE
 backend, ``jcm[cosp]`` for the COSP variant (after
 ``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``,
 since jax-cosp is not on PyPI yet) — and fail with a clear

@@ -22,6 +22,14 @@ Bug fixes
   whatever it has. The release gates and regression bands average only
   ``lat``/``lon`` fields and are unchanged.
 
+Dependencies
+^^^^^^^^^^^^
+
+- **The m7 extra installs from PyPI.** ``jcm[m7]`` pins ``m7-jax==0.2.0``, so
+  ``pip install jcm[m7]`` is the whole install for the default JAM
+  configuration (``t63-echam-jam``), and ``tools/ci/extras_preinstall.txt``
+  no longer carries a GitHub commit for it.
+
 v3.1.0 (2026-11-24)
 -------------------
 

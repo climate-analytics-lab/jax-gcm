@@ -1325,12 +1325,10 @@ fi
 
 
 def test_the_m7_member_installs_its_core_in_the_pod(tmp_path):
-    """The M7 member's pod installs m7-jax before jcm[mam4,m7], every attempt.
+    """The M7 member's pod installs jcm[mam4,m7], and the lock carries m7-jax.
 
-    m7-jax is not on PyPI: it comes from tools/ci/extras_preinstall.txt at
-    the commit that file pins. A git dependency is no ``name==version`` line,
-    so the lock never carries it and a later attempt installs it the same
-    way, under the lock, rather than failing to resolve ``jcm[m7]``.
+    m7-jax resolves from PyPI like every other pin, so its version goes into
+    the lock with the rest and a later attempt reinstalls exactly it.
     """
     rundir = tmp_path / "run"
     rundir.mkdir()
@@ -1340,41 +1338,27 @@ def test_the_m7_member_installs_its_core_in_the_pod(tmp_path):
     (bindir / "pip").write_text(f"""#!/usr/bin/env bash
 echo "$*" >> {log}
 if [ "$1" = freeze ]; then
-  printf 'jax==0.10.1\nm7-jax @ git+https://m@abc\nfoo==1.2\n'
+  printf 'jax==0.10.1\nm7-jax==0.2.0\nfoo==1.2\n'
 fi
 """)
     (bindir / "pip").chmod(0o755)
-    preinstall = tmp_path / "extras_preinstall.txt"
-    preinstall.write_text("# comment\n"
-                          "jax-cosp @ git+https://example/jax-cosp.git\n"
-                          "m7-jax @ git+https://example/M7-JAX.git@abc\n")
-    picked = tmp_path / "preinstall.txt"
     setup = launch.pinned_setup(str(rundir), ("mam4", "m7"))
     install = setup[:setup.index("python - <<'PYDEPS'")]
-    install = (install.replace(launch._POD_PREINSTALL, str(preinstall))
-               .replace("/tmp/preinstall.txt", str(picked))
-               .replace("/tmp/cuda-jax.txt", f"{tmp_path}/cuda-jax.txt"))
+    install = install.replace("/tmp/cuda-jax.txt", f"{tmp_path}/cuda-jax.txt")
     env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
     assert _bash(install, **env).returncode == 0          # first attempt
-    assert picked.read_text() == "m7-jax @ git+https://example/M7-JAX.git@abc\n"
     lock = rundir / launch.LOCK_FILE
-    assert "m7-jax" not in lock.read_text()
+    assert "m7-jax==0.2.0" in lock.read_text().split()
     installs = [c for c in log.read_text().splitlines()
                 if c.startswith("install")]
     assert installs == [
-        f"install --no-cache-dir --disable-pip-version-check "
-        f"-c {tmp_path}/cuda-jax.txt -r {picked}",
         f"install --no-cache-dir --disable-pip-version-check "
         f"-c {tmp_path}/cuda-jax.txt -e /work/jcm[mam4,m7]"]
     log.write_text("")
     assert _bash(install, **env).returncode == 0          # a later attempt
     assert log.read_text().splitlines() == [
         f"install --no-cache-dir --disable-pip-version-check -c {lock} "
-        f"-r {picked}",
-        f"install --no-cache-dir --disable-pip-version-check -c {lock} "
         f"-e /work/jcm[mam4,m7]"]
-    # Every other member's setup is exactly what it was.
-    assert "preinstall" not in launch.pinned_setup(str(rundir))
 
 
 def test_member_extras_follow_the_runs_jam_core():
@@ -1417,10 +1401,9 @@ def test_pbs_job_checks_its_core_before_building_the_model(monkeypatch):
     line = launch.core_check(m, "/v")
     r = _bash(line.replace("python -c", f"{sys.executable} -c", 1))
     assert r.returncode == 1
-    assert "jcm[m7]" in r.stderr and "extras_preinstall" in r.stderr
+    assert 'jcm[m7] extra in /v: pip install -e ".[m7]"' in r.stderr
     monkeypatch.setattr(launch, "core_extra", lambda ovs: ("json", "mam4"))
     line = launch.core_check(m, "/v")
-    assert "extras_preinstall" not in line       # mam4-jax is on PyPI
     assert _bash(line.replace("python -c", f"{sys.executable} -c", 1)
                  ).returncode == 0
 

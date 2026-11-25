@@ -12,9 +12,10 @@ import pytest
 class OptionalCoreInstallHintTest(unittest.TestCase):
     """A missing optional microphysics core says how to install it.
 
-    The default JAM configuration runs M7, whose m7-jax is not on PyPI, so a
-    bare ``No module named 'm7_jax'`` would leave a PyPI user stuck. The core
-    is made absent here (``None`` in ``sys.modules``) whatever this
+    The default JAM configuration runs M7, whose core is the optional
+    ``jcm[m7]`` extra, so a plain ``pip install jcm`` meets the missing core
+    on its first JAM run, and a bare ``No module named 'm7_jax'`` does not
+    say which extra provides it. The core is made absent here (``None`` in ``sys.modules``) whatever this
     environment has installed, and its adapter unloaded so it re-imports.
     """
 
@@ -43,16 +44,14 @@ class OptionalCoreInstallHintTest(unittest.TestCase):
                 sys.modules.pop(key, None)
             sys.modules.update(saved)
 
-    def test_missing_m7_core_names_the_github_preinstall(self):
+    def test_missing_m7_core_names_its_extra(self):
         from jcm.physics.aerosol.jam import jam_terms
-        from jcm.physics.aerosol.jam.microphysics import M7_JAX_REQUIREMENT
         with self._absent("m7_jax", self.M7_ADAPTER), \
                 self.assertRaises(ModuleNotFoundError) as cm:
             jam_terms._load_m7_jax()
         message = str(cm.exception)
-        self.assertIn(f'pip install "{M7_JAX_REQUIREMENT}"', message)
-        self.assertIn("jcm[m7]", message)
-        self.assertIn("t63-echam-jam-mam4", message)
+        self.assertIn("pip install 'jcm[m7]'", message)
+        self.assertIn("t63-echam-jam", message)
         self.assertEqual(cm.exception.name, "m7_jax")
 
     def test_missing_mam4_core_names_its_extra(self):
@@ -70,7 +69,7 @@ class OptionalCoreInstallHintTest(unittest.TestCase):
         with self._absent("m7_jax", self.M7_ADAPTER), \
                 self.assertRaises(ModuleNotFoundError) as cm:
             microphysics.M7JaxMicrophysics  # noqa: B018
-        self.assertIn(microphysics.M7_JAX_REQUIREMENT, str(cm.exception))
+        self.assertIn("pip install 'jcm[m7]'", str(cm.exception))
 
     def test_a_missing_dependency_of_the_core_keeps_its_message(self):
         """A broken install is not reworded as a missing core."""
@@ -92,18 +91,26 @@ class OptionalCoreInstallHintTest(unittest.TestCase):
             ModuleNotFoundError(name="some_dependency"), "m7_jax"))
         self.assertFalse(_missing_core(ModuleNotFoundError(), "m7_jax"))
 
-    def test_m7_requirement_is_the_preinstall_and_documented_line(self):
-        """One commit everywhere a user or CI reads the m7-jax install."""
-        from jcm.physics.aerosol.jam.microphysics import M7_JAX_REQUIREMENT
+    def test_m7_installs_from_pypi_wherever_its_install_is_read(self):
+        """The m7 extra pins m7-jax exactly, and nothing installs it otherwise.
+
+        The adapter imports m7-jax's process modules and its
+        structure-of-arrays entry points, which upstream does not version as
+        public API, so the extra pins one release. A GitHub install line in
+        CI's preinstall file or an install doc would put a different core
+        under the adapter than the one the extra pins.
+        """
+        import tomllib
         root = Path(__file__).resolve().parents[4]
-        preinstall = (root / "tools" / "ci" / "extras_preinstall.txt")
-        self.assertIn(M7_JAX_REQUIREMENT,
-                      [line.strip() for line in
-                       preinstall.read_text().splitlines()])
-        for doc in ("getting_started.rst", "advanced_features.rst",
-                    "running_at_scale.rst"):
-            text = (root / "docs" / "source" / doc).read_text()
-            self.assertIn(f'pip install "{M7_JAX_REQUIREMENT}"', text, doc)
+        with open(root / "pyproject.toml", "rb") as f:
+            extra = tomllib.load(f)["project"]["optional-dependencies"]["m7"]
+        self.assertEqual(len(extra), 1)
+        self.assertRegex(extra[0], r"^m7-jax==\d+\.\d+\.\d+$")
+        for path in (root / "tools" / "ci" / "extras_preinstall.txt",
+                     *(root / "docs" / "source" / doc for doc in (
+                         "getting_started.rst", "advanced_features.rst",
+                         "running_at_scale.rst"))):
+            self.assertNotIn("M7-JAX.git", path.read_text(), path.name)
 
 
 class JamFactoryTest(unittest.TestCase):

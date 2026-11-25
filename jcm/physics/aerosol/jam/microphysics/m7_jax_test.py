@@ -657,37 +657,6 @@ def test_adapter_chunk_size_matches_unchunked_and_differentiable(core_dtype):
         M7JaxMicrophysics(chunk_size=0)
 
 
-def test_adapter_legacy_step_all_fallback_matches_soa_path(monkeypatch):
-    """Fallback ``_HAS_M7_SOA=False`` path via ``ModalMicrophysicsTerm.map_cells`` matches SoA."""
-    import jax
-
-    from jcm.physics.aerosol.jam.microphysics import m7_jax as m7_mod
-    from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
-
-    coriolis = jax.numpy.asarray(2 * 7.292e-5 * np.sin([-0.5, 0.0, 0.8]))
-    core_soa = M7JaxMicrophysics(nucleation_scheme=1, organic_scheme=1, chunk_size=5)
-    core_soa._coriolis = coriolis
-    state, diag = _column()
-    tend_soa, out_soa = core_soa(state, diag, None, None)
-
-    monkeypatch.setattr(m7_mod, "_HAS_M7_SOA", False)
-    core_legacy = M7JaxMicrophysics(nucleation_scheme=1, organic_scheme=1, chunk_size=5)
-    core_legacy._coriolis = coriolis
-    tend_leg, out_leg = core_legacy(state, diag, None, None)
-
-    for key in tend_soa.tracers:
-        np.testing.assert_allclose(
-            np.asarray(tend_leg.tracers[key]),
-            np.asarray(tend_soa.tracers[key]),
-            rtol=1e-14, atol=0.0, err_msg=key,
-        )
-    np.testing.assert_allclose(
-        np.asarray(out_leg["_jam_state"].r_wet),
-        np.asarray(out_soa["_jam_state"].r_wet),
-        rtol=1e-14, atol=0.0,
-    )
-
-
 # The live-HAM_INPUT_DIR staleness guard (comparing a fresh disk read of the
 # real O'Brien/PARNUC tables against the embedded excerpts above) lives in
 # gcr_ionisation_test.py instead of here: this module's

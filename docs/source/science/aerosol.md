@@ -1720,8 +1720,8 @@ scavenges interstitial aerosol by its activated fraction rather than
 carrying an explicit cloud-borne phase. The microphysics is the complete
 native ``m7`` call, through an adapter (``M7JaxMicrophysics``,
 ``jcm/physics/aerosol/jam/microphysics/m7_jax.py``) over the upstream
-``m7-jax`` package (BSD-3, the ``jcm[m7]`` extra, at a validated upstream
-commit until ``m7-jax`` 0.2.0 is released) — ``calcsize``-equivalent
+``m7-jax`` package (the ``jcm[m7]`` extra, ``m7-jax`` 0.2.0) —
+``calcsize``-equivalent
 sizing, κ-Köhler hydration against
 the authentic ``lut_kappa.nc`` table, binary/ion-mediated nucleation,
 coagulation and the cloud-free modal redistribution, all in M7's own units
@@ -1761,9 +1761,8 @@ see below), selected through ``jam_microphysics_options:
 {nucleation_scheme: 2}`` and validated against compiled reference Fortran at
 float64 round-off. This is the *shipped default*: its PARNUC and O'Brien
 tables come from the data mirror (its Tier A ``ham_input`` product) or, when set,
-``HAM_INPUT_DIR``, and it needs an ``m7-jax`` build with Kazil/Lovejoy
-support; construction raises, naming whichever is missing, rather than
-silently falling back. ``physics.jam_microphysics_options.nucleation_scheme=1``
+``HAM_INPUT_DIR``; construction raises, naming the missing directory or
+file, rather than silently falling back. ``physics.jam_microphysics_options.nucleation_scheme=1``
 opts into binary nucleation explicitly where that data is unavailable.
 
 **Code pointers.**

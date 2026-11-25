@@ -543,9 +543,10 @@ def echam_physics(
         jam_microphysics_options: keyword arguments forwarded to the
             ``jam_microphysics`` core's constructor when it names a string
             core — e.g. ``{"nucleation_scheme": 2}`` selects ``"m7_jax"``'s
-            Kazil and Lovejoy (2007) ion-mediated nucleation (needs
-            ``HAM_INPUT_DIR`` and an m7-jax with Kazil support; construction
-            raises naming both if either is missing), or
+            Kazil and Lovejoy (2007) ion-mediated nucleation (its PARNUC
+            and O'Brien tables come from the data mirror, or from
+            ``HAM_INPUT_DIR`` when set; construction raises naming the
+            missing directory or file), or
             ``{"core_dtype": "float32"}`` selects its forward-only float32
             core. ``None`` (default) means today's call for every core —
             MAM4 and the placeholder cores take no options, so any key is

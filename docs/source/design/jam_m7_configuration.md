@@ -147,15 +147,13 @@ by its activated fraction; there is no `mc_*`/`nc_*` phase.
 
 ## Core: `m7-jax` and the jcm adapter
 
-The microphysics lives upstream in `reflective-org/M7-JAX` (BSD-3, alongside the
-HAMMOZ Consortium's BSD-3 M7 Fortran it is validated against) and is the
-`jcm[m7]` extra, pinned by version as `jcm[mam4]` pins `mam4-jax`. Until m7-jax
-0.2.0 is released every M7-JAX#1 build reports 0.2.0.dev0, so the version
-cannot select one: CI installs the validated commit from
-`tools/ci/extras_preinstall.txt`, and the install instructions and the error a
-missing core raises spell out the same commit (a test holds the copies equal).
-Version 0.2 widens the
-package from pure sulfate to the full HAM M7 state.
+The microphysics lives upstream in `reflective-org/M7-JAX` (Apache-2.0, with
+the HAMMOZ Consortium's BSD-3 M7 Fortran it ports and is validated against
+kept under its own notice) and is the `jcm[m7]` extra, installed from PyPI and
+pinned exactly (`m7-jax==0.2.0`), as `jcm[mam4]` pins `mam4-jax`: the adapter
+imports the core's process modules and its structure-of-arrays entry points,
+which upstream does not version as public API. Version 0.2 widens the package
+from pure sulfate to the full HAM M7 state.
 
 ### Native state (per cell)
 

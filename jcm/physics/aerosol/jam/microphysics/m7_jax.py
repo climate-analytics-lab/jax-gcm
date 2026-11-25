@@ -1,8 +1,8 @@
 """ECHAM-HAM M7 modal microphysics core over ``m7-jax`` (jax-gcm#1017).
 
-Wraps ``m7_jax.model.step_all_soa`` (falling back to ``step_all`` on older
-``m7-jax`` pins) — the complete native ``m7`` call on HAM's 18-component,
-seven-mode state, validated against the compiled M7 Fortran — as a JAM
+Wraps ``m7_jax.model.step_all_soa`` — the complete native ``m7`` call on HAM's
+18-component, seven-mode state, validated against the compiled M7 Fortran, in
+its cell-minor (structure-of-arrays) form — as a JAM
 :class:`ModalMicrophysicsTerm` on :data:`M7_SPEC`. This module is the jcm side
 of ECHAM-HAM's ``mo_ham_subm.f90::ham_subm_interface``: it builds M7's inputs
 from jcm's state, calls the core and turns the result back into tracer
@@ -48,9 +48,9 @@ Host diagnostics
   ``gcr_ion_pair_rate``, fed the per-step solar activity/date carried on
   ``forcing.solar`` (jax-gcm#1017 Kazil/GCR task, Part B) -- the same
   date-derived-quantity pattern every other date-dependent term in this
-  codebase uses, not ``DateData`` directly. ``load_kazil_lovejoy_table`` is
-  imported only when ``nucleation_scheme=2`` is constructed, so the other
-  schemes do not depend on it.
+  codebase uses, not ``DateData`` directly. The PARNUC and GCR tables are
+  read only when ``nucleation_scheme=2`` is constructed, so the other schemes
+  never need ``HAM_INPUT_DIR``.
 
 Precision & Chunking
 --------------------
@@ -91,25 +91,20 @@ from jcm.physics.coords_util import column_lat_lon
 from jcm.physics.thermodynamics import saturation_specific_humidity
 from jcm.physics_interface import PhysicsTendency
 
-# m7-jax (BSD-3) is the optional ``jcm[m7]`` extra; this adapter module is
-# imported only when JAM selects the ``m7_jax`` core (lazily, via
-# ``jam_terms``), so a plain jcm import never needs it.
+# m7-jax is the optional ``jcm[m7]`` extra, pinned exactly (pyproject.toml);
+# this adapter module is imported only when JAM selects the ``m7_jax`` core
+# (lazily, via ``jam_terms``), so a plain jcm import never needs it.
 from m7_jax import interface as m7_interface  # noqa: E402
-from m7_jax.model import FullState, step_all  # noqa: E402
+from m7_jax.model import SoAState, step_all_soa  # noqa: E402
+from m7_jax.nucleation import (  # noqa: E402
+    PreparedKazilLovejoyTable,
+    load_kazil_lovejoy_table,
+)
 from m7_jax.properties import (  # noqa: E402
-    KappaTable,
+    PreparedKappaTable,
     default_kappa_table_path,
     load_kappa_table,
 )
-
-try:  # noqa: E402
-    from m7_jax.model import SoAState, step_all_soa
-    from m7_jax.properties import PreparedKappaTable
-
-    _HAS_M7_SOA = hasattr(m7_interface, "aerosol_mass_to_native_soa")
-except ImportError:  # pragma: no cover - older m7-jax pin fallback
-    SoAState = step_all_soa = PreparedKappaTable = None
-    _HAS_M7_SOA = False
 
 #: HAM ``aerocomp`` order (``mo_ham_m7_trac.f90``): the 18 (species, class)
 #: components of the M7 state, the layout ``m7_jax`` expects.
@@ -252,8 +247,8 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
         # float64->float32 casts or 4-D transposes).
         np_cdt = np.float32 if self._core_f32 else np.float64
         _table64 = load_kappa_table(kappa_table or _default_kappa_table_path())
-        self._table_np = nnx.data(tuple(np.asarray(x, dtype=np_cdt) for x in _table64))
-        _growth_np, _radius_np, _temp_np, _hum_np, _kap_np = self._table_np
+        _growth_np, _radius_np, _temp_np, _hum_np, _kap_np = (
+            np.asarray(x, dtype=np_cdt) for x in _table64)
         self._kappa_dims = tuple(int(d) for d in _growth_np.shape)
         self._kappa_growth_flat_np = nnx.data(
             np.ascontiguousarray(np.transpose(_growth_np, (1, 2, 0, 3)).reshape(-1))
@@ -273,39 +268,22 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
         self._kazil_flat_np = nnx.data(None)
         self._kazil_strides: tuple[int, int, int, int] | None = None
         self._gcr_table_np = nnx.data(None)
-        self._KazilLovejoyTable = None
-        self._PreparedKazilLovejoyTable = None
         if nucleation_scheme == 2:
             ham_input_dir = _ham_input_dir()
-            try:
-                from m7_jax.nucleation import KazilLovejoyTable, load_kazil_lovejoy_table
-            except ImportError as exc:
-                raise ImportError(
-                    "nucleation_scheme=2 (Kazil-Lovejoy) needs an m7-jax release with "
-                    "load_kazil_lovejoy_table (jax-gcm#1017 Kazil/GCR task, Part A); "
-                    f"the installed m7-jax does not have it yet ({exc})."
-                ) from exc
-            self._KazilLovejoyTable = KazilLovejoyTable
-            try:
-                from m7_jax.nucleation import PreparedKazilLovejoyTable
-
-                self._PreparedKazilLovejoyTable = PreparedKazilLovejoyTable
-            except ImportError:  # pragma: no cover - older m7-jax pin fallback
-                self._PreparedKazilLovejoyTable = None
-
             _kazil64 = load_kazil_lovejoy_table(_kazil_table_path(ham_input_dir))
             self._kazil_table_np = nnx.data(
                 tuple(np.asarray(x, dtype=np_cdt) for x in _kazil64)
             )
-            if self._PreparedKazilLovejoyTable is not None:
-                _pfr_np = self._kazil_table_np[5]
-                _, n_rh, n_h, n_i, n_c = _pfr_np.shape
-                s_i = int(n_c)
-                s_h = int(n_i) * s_i
-                s_rh = int(n_h) * s_h
-                s_t = int(n_rh) * s_rh
-                self._kazil_strides = (s_t, s_rh, s_h, s_i)
-                self._kazil_flat_np = nnx.data(np.ascontiguousarray(_pfr_np.reshape(-1)))
+            # PARNUC's 5-D log-rate grid flattened once, with its row strides,
+            # for PreparedKazilLovejoyTable's 1-D corner gathers.
+            _pfr_np = self._kazil_table_np[5]
+            _, n_rh, n_h, n_i, n_c = _pfr_np.shape
+            s_i = int(n_c)
+            s_h = int(n_i) * s_i
+            s_rh = int(n_h) * s_h
+            s_t = int(n_rh) * s_rh
+            self._kazil_strides = (s_t, s_rh, s_h, s_i)
+            self._kazil_flat_np = nnx.data(np.ascontiguousarray(_pfr_np.reshape(-1)))
 
             _gcr64 = gcr_ionisation.read_obrien_gcr_ipr(ham_input_dir)
             self._gcr_table_np = nnx.data(
@@ -366,20 +344,18 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
         )
 
     def _prepared_kazil_table(self, cdt):
-        """Build Kazil-Lovejoy PARNUC lookup in core dtype (pre-flattened when supported)."""
-        if self._PreparedKazilLovejoyTable is not None and self._kazil_strides is not None:
-            sg = lambda v: jax.lax.stop_gradient(jnp.asarray(v, dtype=cdt))  # noqa: E731
-            s_t, s_rh, s_h, s_i = self._kazil_strides
-            return self._PreparedKazilLovejoyTable(
-                temperature=sg(self._kazil_table_np[0]),
-                relative_humidity=sg(self._kazil_table_np[1]),
-                h2so4=sg(self._kazil_table_np[2]),
-                ion_pair_rate=sg(self._kazil_table_np[3]),
-                condensation_sink=sg(self._kazil_table_np[4]),
-                log_pfr_flat=sg(self._kazil_flat_np),
-                s_t=s_t, s_rh=s_rh, s_h=s_h, s_i=s_i,
-            )
-        return self._KazilLovejoyTable(*(jnp.asarray(x, dtype=cdt) for x in self._kazil_table_np))
+        """Build the Kazil-Lovejoy PARNUC lookup in the core dtype, pre-flattened."""
+        sg = lambda v: jax.lax.stop_gradient(jnp.asarray(v, dtype=cdt))  # noqa: E731
+        s_t, s_rh, s_h, s_i = self._kazil_strides
+        return PreparedKazilLovejoyTable(
+            temperature=sg(self._kazil_table_np[0]),
+            relative_humidity=sg(self._kazil_table_np[1]),
+            h2so4=sg(self._kazil_table_np[2]),
+            ion_pair_rate=sg(self._kazil_table_np[3]),
+            condensation_sink=sg(self._kazil_table_np[4]),
+            log_pfr_flat=sg(self._kazil_flat_np),
+            s_t=s_t, s_rh=s_rh, s_h=s_h, s_i=s_i,
+        )
 
     def _step(self, state, diagnostics, forcing, terrain):
         """Everything from tracer extraction through M7 integration, in core dtype."""
@@ -428,79 +404,33 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
             step_kwargs["ion_pair_rate"] = self._gcr_ion_pair_rate(
                 forcing, pressure, temperature, horiz, shape, cdt)
 
-        if _HAS_M7_SOA:
-            table = self._prepared_kappa_table(cdt)
-            mass18 = m7_interface.aerosol_mass_to_native_soa(mass_mmr18, rho, self._mw_so4_g)
-            number7 = m7_interface.number_mixing_ratio_to_native_soa(number_mmr7, rho)
-            result = step_all_soa(
-                SoAState(mass18, number7, gas),
-                temperature, pressure, rh, dt,
-                production, cloud_cover, table, forest, in_pbl,
-                compute_valid=False,
-                compute_water=False,
-                chunk_size=self._chunk_size,
-                **step_kwargs,
-            )
-            new_mass18, new_number7, new_gas = result.state
-            new_mass_mmr18 = m7_interface.native_to_aerosol_mass_soa(
-                new_mass18, rho, self._mw_so4_g
-            )
-            new_number_mmr7 = m7_interface.native_to_number_mixing_ratio_soa(new_number7, rho)
-            new_h2so4 = m7_interface.native_to_so4_mixing_ratio(new_gas, rho, self._mw_h2so4_g)
-
-            tracers = {
-                n: (new_mass_mmr18[i] - mass_mmr18[i]) / dt
-                for i, n in enumerate(self._mass_names)
-            }
-            for i, n in enumerate(self._number_names):
-                tracers[n] = (new_number_mmr7[i] - number_mmr7[i]) / dt
-            tracers[h2so4_name] = (new_h2so4 - h2so4_0) / dt - h2so4_run
-            jam_state = self._jam_state_soa(result.properties, new_mass_mmr18, new_number_mmr7)
-            return tracers, jam_state
-
-        # Fallback for older m7-jax releases without step_all_soa; still uses
-        # ModalMicrophysicsTerm.map_cells when chunk_size is configured.
-        table = KappaTable(*(jnp.asarray(x, dtype=cdt) for x in self._table_np))
-        mass_mmr = jnp.stack(mass_mmr18, axis=-1)
-        number_mmr = jnp.stack(number_mmr7, axis=-1)
-        rho_e = rho[..., None]
-        mass = jnp.concatenate([
-            m7_interface.so4_mixing_ratio_to_native(mass_mmr[..., :4], rho_e, self._mw_so4_g),
-            m7_interface.mass_mixing_ratio_to_native(mass_mmr[..., 4:], rho_e),
-        ], axis=-1)
-        number = m7_interface.number_mixing_ratio_to_native(number_mmr, rho_e)
-        ipr = step_kwargs.pop("ion_pair_rate", zeros)
-
-        def _legacy_batch(batch):
-            b_mass, b_num, b_gas, b_t, b_p, b_rh, b_prod, b_cc, b_for, b_pbl, b_ipr = batch
-            extra = dict(step_kwargs)
-            if self._options["nucleation_scheme"] == 2:
-                extra["ion_pair_rate"] = b_ipr
-            return step_all(
-                FullState(b_mass, b_num, b_gas), b_t, b_p, b_rh, dt,
-                b_prod, b_cc, table, b_for, b_pbl, **extra
-            )
-
-        result = self.map_cells(
-            _legacy_batch,
-            (mass, number, gas, temperature, pressure, rh, production, cloud_cover, forest, in_pbl, ipr),
-            shape,
+        table = self._prepared_kappa_table(cdt)
+        mass18 = m7_interface.aerosol_mass_to_native_soa(mass_mmr18, rho, self._mw_so4_g)
+        number7 = m7_interface.number_mixing_ratio_to_native_soa(number_mmr7, rho)
+        result = step_all_soa(
+            SoAState(mass18, number7, gas),
+            temperature, pressure, rh, dt,
+            production, cloud_cover, table, forest, in_pbl,
+            compute_valid=False,
+            compute_water=False,
+            chunk_size=self._chunk_size,
+            **step_kwargs,
         )
-        new_mass, new_number, new_gas = result.state
-        new_mass_mmr = jnp.concatenate([
-            m7_interface.native_to_so4_mixing_ratio(new_mass[..., :4], rho_e, self._mw_so4_g),
-            m7_interface.native_to_mass_mixing_ratio(new_mass[..., 4:], rho_e),
-        ], axis=-1)
-        new_number_mmr = m7_interface.native_to_number_mixing_ratio(new_number, rho_e)
+        new_mass18, new_number7, new_gas = result.state
+        new_mass_mmr18 = m7_interface.native_to_aerosol_mass_soa(
+            new_mass18, rho, self._mw_so4_g
+        )
+        new_number_mmr7 = m7_interface.native_to_number_mixing_ratio_soa(new_number7, rho)
         new_h2so4 = m7_interface.native_to_so4_mixing_ratio(new_gas, rho, self._mw_h2so4_g)
+
         tracers = {
-            n: (new_mass_mmr[..., i] - mass_mmr18[i]) / dt
+            n: (new_mass_mmr18[i] - mass_mmr18[i]) / dt
             for i, n in enumerate(self._mass_names)
         }
         for i, n in enumerate(self._number_names):
-            tracers[n] = (new_number_mmr[..., i] - number_mmr7[i]) / dt
+            tracers[n] = (new_number_mmr7[i] - number_mmr7[i]) / dt
         tracers[h2so4_name] = (new_h2so4 - h2so4_0) / dt - h2so4_run
-        jam_state = self._jam_state(result, new_mass_mmr, new_number_mmr)
+        jam_state = self._jam_state_soa(result.properties, new_mass_mmr18, new_number_mmr7)
         return tracers, jam_state
 
     def _gcr_ion_pair_rate(self, forcing, pressure, temperature, horiz, shape, cdt):
@@ -554,16 +484,3 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
             tiny_vol=_TINY_M7_VOL,
         )
         return self.build_jam_state(dry_m, wet_m, rho_m, kappa_m, mass_m, number_mmr7)
-
-    def _jam_state(self, result, mass_mmr, number_mmr):
-        """Legacy AoS ``_jam_state`` fallback when running against an older ``m7-jax`` pin."""
-        props = result.properties
-        wet_m = tuple(props.wet_radius[..., m] * 1.0e-2 for m in range(7))
-        dry_m = (*(props.dry_radius[..., m] * 1.0e-2 for m in range(4)), *wet_m[4:])
-        rho_m = tuple(props.density[..., m] * 1.0e3 for m in range(7))
-        kappa_m, mass_m = self.mode_kappa_and_mass(
-            [[(mass_mmr[..., i], d, k) for i, d, k in comps] for comps in self._class_components],
-            tiny_vol=_TINY_M7_VOL,
-        )
-        num_m = tuple(number_mmr[..., m] for m in range(7))
-        return self.build_jam_state(dry_m, wet_m, rho_m, kappa_m, mass_m, num_m)

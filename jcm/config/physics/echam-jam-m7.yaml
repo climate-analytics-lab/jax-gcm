@@ -9,8 +9,7 @@
 # Factory-built like echam-jam.yaml: `physics.builder` tells
 # `runners.build_physics` to call `echam_physics(**these_kwargs)`.
 #
-# Needs the m7-jax core: the jcm[m7] extra (m7-jax is not on PyPI yet; the
-# user guide's "Running the ECHAM-JAM M7 aerosol preset" gives the install).
+# Needs the m7-jax core: `pip install jcm[m7]`.
 #
 #     python -m jcm.main +configuration=t63-echam-jam
 

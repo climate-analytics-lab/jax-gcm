@@ -611,12 +611,11 @@ fixture; see
 :doc:`design/jam_m7_configuration` for exactly what is and is not yet
 faithful.
 
-The M7 microphysics core is a separate package, installed as its own extra.
-It is not on PyPI yet, so install the pinned commit from GitHub first:
+The M7 microphysics core is a separate package, ``m7-jax``, installed as its
+own extra:
 
 .. code-block:: bash
 
-   pip install "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e"
    pip install jcm[m7]
 
 .. code-block:: bash
