@@ -60,8 +60,9 @@ def _check_level_axis(ds, path, vertical, required: bool) -> None:
     The ozone file is mapped onto the model's levels with no vertical
     interpolation, so a file built on other levels (a built-in bundle on a user
     table, or a bundle for a different table) would put ozone at the wrong
-    pressures without any error. The tolerance is float32 round-off of the
-    stored coefficients.
+    pressures without any error. "The same levels" is
+    :func:`jcm.physics.echam.echam_levels.same_hybrid_coefficients`, which
+    admits the pySES backend's regularised top interface.
     """
     if "level_a_pa" not in ds or "level_b" not in ds:
         if required:
@@ -75,13 +76,10 @@ def _check_level_axis(ds, path, vertical, required: bool) -> None:
                 "them; a local file is taken as your statement that it is), or "
                 "set forcing.ozone_file=analytic.")
         return
-    a_file = np.asarray(ds["level_a_pa"].values, dtype=np.float64)
-    b_file = np.asarray(ds["level_b"].values, dtype=np.float64)
-    a_model = np.asarray(vertical.a_centers, dtype=np.float64)
-    b_model = np.asarray(vertical.b_centers, dtype=np.float64)
-    if (a_file.shape != a_model.shape
-            or not np.allclose(a_file, a_model, rtol=1e-4, atol=1e-3)
-            or not np.allclose(b_file, b_model, rtol=1e-4, atol=1e-6)):
+    from jcm.physics.echam.echam_levels import same_hybrid_coefficients
+    if not same_hybrid_coefficients(
+            ds["level_a_pa"].values, ds["level_b"].values,
+            vertical.a_centers, vertical.b_centers):
         raise ValueError(
             f"Ozone file {path}: its mid-level hybrid coefficients "
             "(level_a_pa/level_b) are not the model's, so mapping it level for "

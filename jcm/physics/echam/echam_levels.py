@@ -352,18 +352,42 @@ def is_builtin_table(levels) -> bool:
     The built-in tables are the ones the level-resolved boundary data (ozone,
     oxidants) and the ``(truncation, nlev)`` hyperdiffusion profiles are
     published for; any other table that merely shares a level count is a
-    different vertical grid. Compared to float32 round-off, since the built-in
-    arrays are float32 unless x64 is enabled while a table read from a file is
-    float64.
+    different vertical grid. Compared within :data:`LEVEL_MATCH_ATOL_PA` /
+    :data:`LEVEL_MATCH_ATOL_B`, so the pySES backend's table, which is the
+    built-in one with its singular top interface regularised, is still the
+    built-in table.
     """
     n = int(levels.layers)
     if n not in BUILTIN_LEVEL_COUNTS:
         return False
     ref = get_echam_levels(n)
+    return same_hybrid_coefficients(
+        levels.a_boundaries, levels.b_boundaries,
+        ref.a_boundaries, ref.b_boundaries)
+
+
+#: How closely two sets of hybrid coefficients must agree to be the same
+#: levels: 1 Pa on ``a`` and 1e-5 on ``b``, the tolerances
+#: :func:`jcm.forcing.validate_oxidant_levels` applies to a file's
+#: ``hyam``/``hybm``. They absorb float32 storage and the one deliberate
+#: difference between two tables that are the same grid: the pySES backend
+#: replaces the built-in tables' top interface ``a = 0`` by about 1 Pa
+#: (:func:`jcm.dycore.pyses.coords.full_echam_hybrid`), which moves the top
+#: mid-level by half that. Two different vertical grids differ by orders of
+#: magnitude more.
+LEVEL_MATCH_ATOL_PA = 1.0
+LEVEL_MATCH_ATOL_B = 1e-5
+
+
+def same_hybrid_coefficients(a, b, a_ref, b_ref) -> bool:
+    """Whether hybrid coefficients ``(a, b)`` are the levels ``(a_ref, b_ref)``.
+
+    Works on interface or mid-level coefficients alike (both pairs must be the
+    same kind); ``a`` in Pa. See :data:`LEVEL_MATCH_ATOL_PA`.
+    """
+    a, b, a_ref, b_ref = (np.asarray(x, dtype=np.float64)
+                          for x in (a, b, a_ref, b_ref))
     return bool(
-        np.allclose(np.asarray(levels.a_boundaries, np.float64),
-                    np.asarray(ref.a_boundaries, np.float64),
-                    rtol=1e-6, atol=1e-6)
-        and np.allclose(np.asarray(levels.b_boundaries, np.float64),
-                        np.asarray(ref.b_boundaries, np.float64),
-                        rtol=1e-6, atol=1e-6))
+        a.shape == a_ref.shape and b.shape == b_ref.shape
+        and np.allclose(a, a_ref, rtol=0.0, atol=LEVEL_MATCH_ATOL_PA)
+        and np.allclose(b, b_ref, rtol=0.0, atol=LEVEL_MATCH_ATOL_B))

@@ -2,6 +2,7 @@
 
 import unittest
 
+import jax.numpy as jnp
 import numpy as np
 
 from jcm.physics.echam.echam_levels import (
@@ -144,6 +145,28 @@ class UserLevelTableTest(unittest.TestCase):
         b47 = b47.copy()
         b47[-2] -= 1e-3
         self.assertFalse(is_builtin_table(hybrid_levels_from_table(a47, b47)))
+
+    def test_pyses_regularised_top_is_still_the_builtin_table(self):
+        """The pySES table is the built-in one with a finite top interface."""
+        from dinosaur.hybrid_coordinates import HybridCoordinates
+
+        from jcm.dycore.pyses.coords import full_echam_hybrid
+        from jcm.ozone_climatology import _check_level_axis
+        for nlev in (47, 95):
+            a, b = full_echam_hybrid(nlev)
+            pyses = HybridCoordinates(a_boundaries=jnp.asarray(a, jnp.float32),
+                                      b_boundaries=jnp.asarray(b, jnp.float32))
+            self.assertGreater(float(pyses.a_boundaries[0]), 0.0)
+            self.assertTrue(is_builtin_table(pyses))
+        # ...so a bundle on the built-in L47 levels is accepted for it.
+        import xarray as xr
+        from importlib import resources
+        path = resources.files("jcm") / "data" / "bc" / "t63" / "ozone.nc"
+        a, b = full_echam_hybrid(47)
+        pyses47 = HybridCoordinates(a_boundaries=jnp.asarray(a, jnp.float32),
+                                    b_boundaries=jnp.asarray(b, jnp.float32))
+        with xr.open_dataset(path) as ds:
+            _check_level_axis(ds, str(path), pyses47, required=True)
 
     def test_layers_must_equal_table_length(self):
         a, b = _l95_subset()
