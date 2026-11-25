@@ -223,7 +223,43 @@ Attributes:
         Tendency of temperature.
     specific_humidity : jnp.ndarray
         Tendency of specific humidity [kg/kg/s].
+    tracers : dict
+        Tendencies of the additional tracers, keyed by tracer name.
+
+Two tendencies add (or subtract) as a union over their ``tracers`` keys, a
+missing key counting as zero: terms of one composition tend different tracer
+sets, and none need declare the tendencies of the others. ``tree_math``'s own
+arithmetic requires identical pytree structures, which would make every sum
+of such terms an error, so the operators below align the key sets first.
+Identical key sets take the unchanged ``tree_math`` path.
 """
+
+
+def _align_tracer_keys(a: PhysicsTendency, b: PhysicsTendency):
+    """Zero-fill each operand's missing tracer keys from the other's leaves."""
+    if a.tracers.keys() == b.tracers.keys():
+        return a, b
+    fill = lambda src, ref: {  # noqa: E731
+        k: src[k] if k in src else jnp.zeros_like(ref[k])
+        for k in sorted(src.keys() | ref.keys())}
+    return (a.copy(tracers=fill(a.tracers, b.tracers)),
+            b.copy(tracers=fill(b.tracers, a.tracers)))
+
+
+def _tendency_binary_op(vector_op):
+    """Wrap a ``tree_math`` binary operator with tracer-key alignment."""
+    def op(self, other):
+        if isinstance(other, PhysicsTendency):
+            self, other = _align_tracer_keys(self, other)
+        return vector_op(self, other)
+    op.__doc__ = vector_op.__doc__
+    return op
+
+
+# ``tree_math.struct`` puts its mixin first in the MRO, so the operators are
+# replaced on the finished class rather than defined in its body.
+PhysicsTendency.__add__ = _tendency_binary_op(PhysicsTendency.__add__)
+PhysicsTendency.__sub__ = _tendency_binary_op(PhysicsTendency.__sub__)
 
 
 class Physics:
