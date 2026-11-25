@@ -21,6 +21,9 @@ from jcm.physics.gravity_waves.hines import (
     HinesParameters, hines_gwd,
 )
 from jcm.testing import check_gradients
+from jcm.physics.gravity_waves.hines import (
+    HinesGwd, launch_level_from_pressure,
+)
 
 
 def _make_column(nlev: int = 47, u_scale: float = 1.0,
@@ -295,3 +298,151 @@ class TestHinesGradients:
         column = _make_column(nlev=30, u_scale=0.0, v_scale=0.0)
         check_gradients(self._scheme_fn(column, HinesParameters.default()),
                         self._args(column), rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# Launch level as a pressure
+# ---------------------------------------------------------------------------
+
+def _ref_pressure_hpa(vertical):
+    """Return reference (101325 Pa surface) full-level pressures, hPa, top-first."""
+    return (np.asarray(vertical.a_centers)
+            + np.asarray(vertical.b_centers) * 101325.0) / 100.0
+
+
+def _echam_vertical(nlev):
+    from jcm.physics.echam.echam_levels import get_echam_levels
+    return get_echam_levels(nlev)
+
+
+def _term_tendencies(term, ncols):
+    """Run the term on ``ncols`` columns of the test atmosphere."""
+    from types import SimpleNamespace
+    cols = [_make_column(u_scale=1.0 + 0.5 * i) for i in range(ncols)]
+
+    def stack(key):
+        return jnp.stack([col[key] for col in cols], axis=1)  # (nlev, ncols)
+
+    ph = stack("pressure_half")
+    diag = dict(pressure_full=stack("pressure_full"), pressure_half=ph,
+                height_half=stack("height_half"),
+                air_density=stack("density"))
+    state = SimpleNamespace(
+        temperature=stack("temperature"), u_wind=stack("u_wind"),
+        v_wind=stack("v_wind"),
+        specific_humidity=jnp.zeros_like(stack("u_wind")))
+    tend, _ = term(state, diag, None, None)
+    return tend
+
+
+class TestHinesLaunchPressure:
+    """``launch_pressure_hpa`` resolves once to the ``launch_level`` count."""
+
+    @pytest.mark.parametrize("nlev", [47, 95])
+    def test_reference_pressure_of_default_level_gives_default(self, nlev):
+        from types import SimpleNamespace
+        vert = _echam_vertical(nlev)
+        p_hpa = _ref_pressure_hpa(vert)[nlev - 10 - 1]
+        term = HinesGwd(launch_pressure_hpa=float(p_hpa))
+        term.cache_coords(SimpleNamespace(vertical=vert))
+        assert term.launch_level == 10
+
+    @pytest.mark.parametrize("nlev", [47, 95])
+    def test_pressure_path_reproduces_launch_level_bitwise(self, nlev):
+        from types import SimpleNamespace
+        vert = _echam_vertical(nlev)
+        p_hpa = float(_ref_pressure_hpa(vert)[nlev - 10 - 1])
+        by_pressure = HinesGwd(launch_pressure_hpa=p_hpa)
+        by_pressure.cache_coords(SimpleNamespace(vertical=vert))
+        by_count = HinesGwd(launch_level=10)
+        by_count.cache_coords(SimpleNamespace(vertical=vert))
+        a = _term_tendencies(by_pressure, ncols=3)
+        b = _term_tendencies(by_count, ncols=3)
+        np.testing.assert_array_equal(np.asarray(a.u_wind), np.asarray(b.u_wind))
+        np.testing.assert_array_equal(np.asarray(a.v_wind), np.asarray(b.v_wind))
+        np.testing.assert_array_equal(np.asarray(a.temperature),
+                                      np.asarray(b.temperature))
+
+    @pytest.mark.parametrize("nlev, count", [(47, 5), (47, 20), (95, 15), (95, 40)])
+    def test_other_pressure_resolves_to_expected_index(self, nlev, count):
+        from types import SimpleNamespace
+        vert = _echam_vertical(nlev)
+        p_hpa = _ref_pressure_hpa(vert)
+        # Nudge off the level centre: still nearest to the same level.
+        target = float(p_hpa[nlev - count - 1]) * 1.001
+        assert launch_level_from_pressure(vert, target) == count
+        term = HinesGwd(launch_pressure_hpa=target)
+        term.cache_coords(SimpleNamespace(vertical=vert))
+        assert term.launch_level == count
+
+    def test_same_pressure_is_a_different_count_on_a_different_table(self):
+        """The point of the key: one pressure, different level counts."""
+        p = 50.0
+        assert (launch_level_from_pressure(_echam_vertical(47), p)
+                != launch_level_from_pressure(_echam_vertical(95), p))
+
+    def test_both_keys_is_an_error(self):
+        with pytest.raises(ValueError, match="not both"):
+            HinesGwd(launch_level=10, launch_pressure_hpa=634.0)
+
+    def test_default_is_echam_emiss_lev(self):
+        from types import SimpleNamespace
+        term = HinesGwd()
+        assert term.launch_level == 10 and term.launch_pressure_hpa is None
+        term.cache_coords(SimpleNamespace(vertical=_echam_vertical(47)))
+        assert term.launch_level == 10
+        # Unchanged tendencies versus the explicit ECHAM count.
+        explicit = HinesGwd(launch_level=10)
+        explicit.cache_coords(SimpleNamespace(vertical=_echam_vertical(47)))
+        out = _term_tendencies(term, ncols=2)
+        ref = _term_tendencies(explicit, ncols=2)
+        np.testing.assert_array_equal(np.asarray(out.u_wind),
+                                      np.asarray(ref.u_wind))
+
+    @pytest.mark.parametrize("p", [1e-4, 1050.0, 1005.0, float("nan")])
+    def test_out_of_range_pressure_names_valid_range(self, p):
+        vert = _echam_vertical(47)
+        p_hpa = _ref_pressure_hpa(vert)
+        with pytest.raises(ValueError, match="outside the range") as err:
+            launch_level_from_pressure(vert, p)
+        assert f"{p_hpa[0]:.4g}" in str(err.value)
+
+    def test_unresolved_pressure_term_refuses_to_run(self):
+        with pytest.raises(RuntimeError, match="cache_coords"):
+            _term_tendencies(HinesGwd(launch_pressure_hpa=634.0), ncols=1)
+
+    def test_launch_level_beyond_grid_is_rejected_at_cache(self):
+        from types import SimpleNamespace
+        term = HinesGwd(launch_level=47)
+        with pytest.raises(ValueError, match="valid: 1 to 46"):
+            term.cache_coords(SimpleNamespace(vertical=_echam_vertical(47)))
+
+    def test_nonpositive_launch_level_is_rejected(self):
+        with pytest.raises(ValueError, match=">= 1"):
+            HinesGwd(launch_level=0)
+
+    def test_sigma_vertical_resolves(self):
+        from dinosaur.sigma_coordinates import SigmaCoordinates
+        vert = SigmaCoordinates.equidistant(20)
+        level = launch_level_from_pressure(vert, 500.0)
+        idx = 20 - level - 1
+        assert abs(float(vert.centers[idx]) * 1013.25 - 500.0) <= 26.0
+
+    def test_single_column_and_block_agree(self):
+        from types import SimpleNamespace
+        vert = _echam_vertical(47)
+        term = HinesGwd(launch_pressure_hpa=300.0)
+        term.cache_coords(SimpleNamespace(vertical=vert))
+        block = _term_tendencies(term, ncols=3)
+        single = _term_tendencies(term, ncols=1)
+        np.testing.assert_allclose(np.asarray(block.u_wind[:, 0]),
+                                   np.asarray(single.u_wind[:, 0]),
+                                   rtol=1e-3, atol=1e-9)
+
+    def test_factory_passes_launch_keys(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        phys = echam_physics(hines_launch_pressure_hpa=300.0)
+        hines = [t for t in phys.terms if isinstance(t, HinesGwd)][0]
+        assert hines.launch_pressure_hpa == 300.0
+        with pytest.raises(ValueError, match="not both"):
+            echam_physics(hines_launch_level=8, hines_launch_pressure_hpa=300.0)
