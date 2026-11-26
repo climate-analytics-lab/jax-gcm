@@ -825,10 +825,16 @@ class TestGlacierShareOfTheLand(unittest.TestCase):
 
     def test_half_glacier_blends_albedo_and_wetness(self):
         half = self._fluxes(0.2, glacier=0.5)
-        # Albedo: glacier at albsn (snow), the bare half at alb0.
+        # Albedo: glacier at albsn (snow), the bare half at alb0. Checked
+        # cell by cell rather than on the grid mean. alb_l is uniform here, so
+        # the two say the same thing about the blend -- but a float32 `.mean()`
+        # over an (ix, il) field carries ~3e-6 of its own reduction rounding,
+        # which is larger than the blend's error (one ulp) and enough to fail
+        # `places=6` on a platform whose reduce chunks differently (#1240).
+        # `jnp.max` accumulates nothing, so the bound stays tight.
         albsn = float(Parameters.default().mod_radcon.albsn)
-        self.assertAlmostEqual(float(half.mod_radcon.alb_l.mean()),
-                               0.5 * albsn + 0.5 * 0.2, places=6)
+        want = 0.5 * albsn + 0.5 * 0.2
+        self.assertLess(float(jnp.max(jnp.abs(half.mod_radcon.alb_l - want))), 1e-6)
         # Wetness: 0.5 + 0.5·0.2 = 0.6 — the same surface as a glacier-free
         # soil at 0.6 (the snow conductivity aside, which the glacier also
         # carries), so the evaporation matches a soil of that wetness.
