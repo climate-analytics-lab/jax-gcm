@@ -24,7 +24,7 @@ from .cloud_utils import (
     turbulent_updraft_velocity,
 )
 from .lohmann_2m_params import CloudParams2M
-from jcm.testing import check_gradients, inverse_square_quotient
+from jcm.testing import check_gradients
 
 _EPS = 1.1920929e-7  # float32 machine epsilon, as CloudParams2M.eps
 
@@ -298,6 +298,8 @@ class TestEffLiquidDropletRadius:
         the unsplit form with that rule, finite in the current (split) code,
         same primal. JAX's current division need not reproduce the old rule.
         """
+        from jcm.testing import inverse_square_quotient
+
         qc = jnp.asarray(1.0e-30, jnp.float32)
         rho = jnp.asarray(0.9, jnp.float32)
         eps = jnp.float32(self._ISSUE_EPS)
