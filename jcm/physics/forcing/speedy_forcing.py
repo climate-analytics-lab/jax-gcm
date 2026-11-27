@@ -41,6 +41,14 @@ def set_forcing(
 ) -> tuple[PhysicsTendency, PhysicsData]:
     # 2. daily-mean radiative forcing
     physics_data = get_zonal_average_fields(state, physics_data, forcing=forcing, terrain=terrain)
+    # Scale the insolation and the ozone absorption proportional to it.
+    solar_scale = parameters.mod_radcon.solar_scale
+    sw = physics_data.shortwave_rad
+    physics_data = physics_data.copy(shortwave_rad=sw.copy(
+        fsol=sw.fsol * solar_scale,
+        ozupp=sw.ozupp * solar_scale,
+        ozone=sw.ozone * solar_scale,
+    ))
 
     # total surface albedo
     fmask = terrain.fmask

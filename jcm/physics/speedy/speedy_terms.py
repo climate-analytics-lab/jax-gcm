@@ -43,6 +43,8 @@ from jcm.physics.speedy.params import (
     LandModelParameters,
 )
 
+import dataclasses
+
 import jax.numpy as jnp
 import jcm.constants as physical_constants
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -82,12 +84,43 @@ def _tendency_from_legacy_speedy_units(
     )
 
 
+def _forcing_in(args):
+    """The ``ForcingData`` among a legacy routine's arguments, if any."""
+    return next((arg for arg in args if isinstance(arg, ForcingData)), None)
+
+
+def _apply_parameter_fields(parameters: Parameters, forcing) -> Parameters:
+    """Replace scalar parameters by the forcing's per-column maps.
+
+    ``forcing.parameter_fields`` maps ``"<group>.<name>"`` to an ``(ix, il)``
+    array that stands in for ``parameters.<group>.<name>`` in this step. Only
+    parameters whose every use broadcasts against a horizontal map can be
+    overridden this way; the others fail at trace time with a shape error.
+    """
+    fields = getattr(forcing, "parameter_fields", None)
+    if not fields:
+        return parameters
+    by_group: dict = {}
+    for key, value in fields.items():
+        group, name = key.split(".")
+        by_group.setdefault(group, {})[name] = value
+    return dataclasses.replace(parameters, **{
+        group: dataclasses.replace(getattr(parameters, group), **values)
+        for group, values in by_group.items()
+    })
+
+
 def _call_legacy_speedy(routine, state: PhysicsState, *args):
     """Call one translated SPEEDY routine across the humidity-unit boundary.
 
     The routine returns ``(tendency, data)`` and possibly further outputs,
     which are passed through unchanged after those two.
     """
+    args = tuple(
+        _apply_parameter_fields(arg, _forcing_in(args))
+        if isinstance(arg, Parameters) else arg
+        for arg in args
+    )
     tendency, data, *rest = routine(_state_in_legacy_speedy_units(state), *args)
     return (_tendency_from_legacy_speedy_units(tendency), data, *rest)
 

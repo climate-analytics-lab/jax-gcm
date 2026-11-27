@@ -179,11 +179,13 @@ def shortwave_rad_fluxes(operand):
     one_minus_tau0 = jnp.zeros((kx, ix, il))
     one_minus_tau0 = one_minus_tau0.at[0].set(-jnp.expm1(-od0_top))
 
-    abs1 = parameters.shortwave_radiation.absdry + parameters.shortwave_radiation.absaer * fsg[1:nl1] ** 2
+    # ``absaer`` may be an (ix, il) map, so the level factor gets its own axes.
+    abs1 = (parameters.shortwave_radiation.absdry
+            + parameters.shortwave_radiation.absaer * fsg[1:nl1, jnp.newaxis, jnp.newaxis] ** 2)
     cloudy = jnp.arange(2, nl1+1)[:, jnp.newaxis, jnp.newaxis] >= icltop
 
     od0_mid = psaz * dhs[1:nl1, jnp.newaxis, jnp.newaxis] * (
-        abs1[:, jnp.newaxis, jnp.newaxis] +
+        abs1 +
         parameters.shortwave_radiation.abswv1 * qa[1:nl1] +
         cloudy * acloud
     )
@@ -310,7 +312,7 @@ def shortwave_rad_fluxes(operand):
     absorptivity = jnp.stack([
         parameters.shortwave_radiation.ablwin
         + parameters.shortwave_radiation.ablwvc * qa * qa * pressure_ratio,
-        physics_data.mod_radcon.ablco2 * jnp.ones_like(qa),
+        physics_data.mod_radcon.ablco2 * parameters.mod_radcon.ablco2_scale * jnp.ones_like(qa),
         parameters.shortwave_radiation.ablwv1 * qa,
         parameters.shortwave_radiation.ablwv2 * qa
     ], axis=-1)

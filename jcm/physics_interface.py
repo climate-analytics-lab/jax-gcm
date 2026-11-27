@@ -1001,6 +1001,11 @@ def compute_physics_step_gridpoint(
         tendency representation before integrating.
 
     """
+    land_fraction = getattr(forcing, "land_fraction", None)
+    if land_fraction is not None:
+        # A traced land-sea mask from the forcing takes the place of the
+        # terrain's compiled-in one (``ForcingData.land_fraction``).
+        terrain = terrain.copy(fmask=land_fraction)
     clamped_physics_state = verify_state(physics_state)
     raw_physics_tendency, raw_carry = physics.compute_tendencies(
         clamped_physics_state, forcing, terrain,

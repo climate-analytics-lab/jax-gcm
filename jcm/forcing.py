@@ -696,6 +696,19 @@ class ForcingData:
     # ``TimeSeries``, stepped by month as SLIM's ``nc_import`` does) and the
     # static ``glc_mask``. ``None``: no SLIM properties (the prescribed land).
     slim_properties: Any = None
+    # Per-column overrides of scalar physics parameters, as a dict from
+    # ``"<group>.<name>"`` (e.g. ``"mod_radcon.albsea"``) to an ``(ix, il)``
+    # map or a `TimeSeries` of one. Unlike the parameters themselves, which
+    # are compiled into the step as constants, these are traced with the rest
+    # of the forcing, so they can vary in space and change between runs
+    # without a recompile. Read by the SPEEDY terms
+    # (``speedy_terms._apply_parameter_fields``).
+    parameter_fields: Any = None
+    # Land fraction ``(ix, il)`` replacing ``TerrainData.fmask`` for the
+    # physics (``compute_physics_step_gridpoint``). The terrain is a compiled
+    # constant; this makes the land-sea mask a traced input. Orography is not
+    # affected.
+    land_fraction: Any = None
 
     @classmethod
     def zeros(cls,nodal_shape,
@@ -1304,6 +1317,8 @@ class ForcingData:
              ocean_v=None,
              land_skin_temperature=_UNSET,
              slim_properties=None,
+             parameter_fields=None,
+             land_fraction=None,
              ):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
         # the natural value for "no nudging target wired" — falling back to
@@ -1395,6 +1410,10 @@ class ForcingData:
                                    else land_skin_temperature),
             slim_properties=(slim_properties if slim_properties is not None
                              else self.slim_properties),
+            parameter_fields=(parameter_fields if parameter_fields is not None
+                              else self.parameter_fields),
+            land_fraction=(land_fraction if land_fraction is not None
+                           else self.land_fraction),
         )
 
     def isnan(self):

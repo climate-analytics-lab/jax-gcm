@@ -181,6 +181,11 @@ class ModRadConParameters:
     # concentration (jcm.physics.forcing.speedy_forcing.CO2_VMR_REF_PPMV); the forcing scales
     # it with the run's CO2. SPEEDY's value is physics_data.ablco2_ref.
     ablco2_ref: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(6.0))
+    # Multiplier on the CO2 absorptivity (equivalently on the CO2 concentration,
+    # which it is linear in). As a per-column map it is a local greenhouse forcing.
+    ablco2_scale: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(1.0))
+    # Multiplier on the top-of-atmosphere insolation (1 = the solar constant).
+    solar_scale: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(1.0))
     # Energy fraction of the blackbody spectrum in the CO2 band and in the weak and strong
     # water-vapour bands, each ``a + b * (T - t0)**2`` with T clipped to 200-320 K (SPEEDY's
     # radset table, whose values are the defaults); the window band takes the remainder.
