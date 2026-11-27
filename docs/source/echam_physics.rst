@@ -245,6 +245,10 @@ logistic surrogate (:doc:`science/convection`).
      - Width of the surrogate of the ``zqumqe > zdqmin`` gate, as a fraction
        of ``zdqmin``. Static; derivative only
      - 0.1
+   * - ``cloud_base_interpolation``
+     - Interpolate complete neighboring plumes at the parcel saturation
+       crossing for derivatives. Static; forward values stay exact
+     - True
    * - ``cu_cminbuoy``
      - Floor on the cloud-base sub-grid buoyancy excess ``zlift`` (K)
      - 0.2

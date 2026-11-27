@@ -673,6 +673,8 @@ def _tiedtke_convection_toa_first(
     humidity_m1: jnp.ndarray | None = None,
     use_updraft_cover: bool = False,
     pressure_half: jnp.ndarray | None = None,
+    _cloud_base=None,
+    _deep_weight=None,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run Tiedtke-Nordeng convection scheme with fixed qc/qi transport
 
@@ -789,6 +791,8 @@ def _tiedtke_convection_toa_first(
         temperature, humidity, pressure, config, thvsig, layer_thickness,
         cp_moist=cp_moist, env=env,
     )
+    if _cloud_base is not None:
+        cloud_base_sfc = _cloud_base
     if omega is None:
         omega = jnp.zeros_like(temperature)
     midlev_base, has_midlev_base = find_midlevel_cloud_base(
@@ -878,13 +882,11 @@ def _tiedtke_convection_toa_first(
     #     is then demoted to shallow if its realized cloud is thinner than
     #     200 hPa (line 752; see ``apply_full_convection``).
     #
-    # ECHAM has no CAPE trigger and no CAPE type split. The deep/shallow
-    # choice uses the reference derivative by default. A positive
-    # ``deep_convergence_width`` opts into a logistic surrogate, so the per-type
-    # entrainment rates and entrainment bands, blended linearly by these
-    # weights, respond to the convergence that selects them; the closure is
-    # chosen by the integer type.
-    w_deep = threshold_switch(zdqcv - zhelp, config.deep_convergence_width)
+    # A type surrogate must include its closure and flux ledger, not just
+    # entrainment. The outer wrapper blends complete columns when enabled.
+    w_deep = (zdqcv > zhelp).astype(dtype)
+    if _deep_weight is not None:
+        w_deep = jnp.asarray(_deep_weight, dtype)
     w_mid = use_midlev.astype(dtype)
     type_weights = jnp.stack([
         (1.0 - w_mid) * w_deep,                   # deep
@@ -1329,6 +1331,80 @@ def _tiedtke_convection_toa_first(
     return tendencies, updated_state
 
 
+def _blend_columns(columns, weight):
+    """Blend whole floating-point ledgers; integer diagnostics have no tangent."""
+    return jax.tree.map(
+        lambda x: ((1.0 - weight) * x[0] + weight * x[1]
+                   if jnp.issubdtype(x.dtype, jnp.floating) else x[0]),
+        columns)
+
+
+def _convection_surrogate(inputs, config, use_updraft_cover=False):
+    """Interpolate complete columns across base-level and plume-type choices.
+
+    The cloud-base weight locates saturation between two half levels by
+    linear interpolation of the dry parcel's humidity excess. Each candidate
+    runs its own moisture budget, ascent, closure, downdraft and flux ledger.
+    A positive ``deep_convergence_width`` similarly blends complete shallow
+    and deep columns. Other switches retain their configured derivatives;
+    this does not smooth every decision in the scheme.
+
+    ``inputs`` contains the TOA-first arguments of the column kernel, except
+    ``config`` and the static ``use_updraft_cover`` option. This function's
+    values are for derivative checks only; the public entry point returns
+    the reference column's values through ``with_surrogate_gradient``.
+    """
+    from .half_levels import cubase_seed_static_energy
+    from .updraft import column_environment
+
+    t, q, p = (inputs[name] for name in ("temperature", "humidity", "pressure"))
+    q_m1 = inputs.get("humidity_m1")
+    cp = moist_isobaric_heat_capacity(q if q_m1 is None else q_m1)
+    env = column_environment(
+        t, q, p, cp, inputs.get("pressure_half"),
+        layer_mass=inputs.get("layer_mass"),
+        condensate=inputs["qc"] + inputs["qi"])
+    base, found = find_cloud_base(
+        t, q, p, config, inputs.get("thvsig"), cp_moist=cp, env=env)
+
+    if config.deep_convergence_width > 0:
+        evaporation = jnp.maximum(inputs["moisture_supply"], 0.0)
+        mass = env.dp / c.grav
+        supply = inputs.get("moisture_tend_profile")
+        if supply is None:
+            supply = jnp.zeros_like(q).at[-1].set(evaporation / mass[-1])
+        dynamics = inputs.get("qte_dynamics")
+        if dynamics is not None:
+            supply = supply + dynamics
+        distance = jnp.sum(supply * mass) - 1.1 * evaporation
+        deep = jax.nn.sigmoid(distance / config.deep_convergence_width)
+
+    def at_base(k):
+        def column(deep_weight=None):
+            return _tiedtke_convection_toa_first(
+                **inputs, config=config, use_updraft_cover=use_updraft_cover,
+                _cloud_base=k, _deep_weight=deep_weight)
+
+        if config.deep_convergence_width == 0:
+            return column()
+        return _blend_columns(lax.map(column, jnp.asarray([0.0, 1.0], t.dtype)), deep)
+
+    if not config.cloud_base_interpolation:
+        return at_base(base)
+
+    dry = (cubase_seed_static_energy(env) - env.geoh) / env.cpcu
+    excess = env.qenh[-1] - saturation_mixing_ratio(env.paph[:-1], dry)
+    lower = jnp.minimum(base + 1, t.size - 2)
+    # Only bracket a reachable surface LCL; no extrapolation into a dry or
+    # inhibited column, or past the lowest interface cubase tests.
+    bracket = found & (lower != base) & (excess[base] >= 0) & (excess[lower] <= 0)
+    gap = jnp.where(bracket, excess[base] - excess[lower], 1.0)
+    weight = jnp.where(
+        bracket & (gap > 0), excess[base] / jnp.where(gap > 0, gap, 1.0), 0.0)
+    columns = lax.map(at_base, jnp.stack([base, jnp.where(bracket, lower, base)]))
+    return _blend_columns(columns, weight)
+
+
 def tiedtke_nordeng_convection(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,
@@ -1382,23 +1458,38 @@ def tiedtke_nordeng_convection(
         land_fraction = jnp.array(0.0)
     if moisture_supply is None:
         moisture_supply = jnp.array(0.0)
+    if config is None:
+        config = ConvectionParameters.default()
     nlev = temperature.shape[0]
     is_surface_first = pressure[0] >= pressure[-1]
 
     def to_toa(a):
         return None if a is None else jnp.where(is_surface_first, a[::-1], a)
 
-    tend, state = _tiedtke_convection_toa_first(
-        to_toa(temperature), to_toa(humidity), to_toa(pressure),
-        to_toa(layer_thickness), to_toa(rho),
-        to_toa(u_wind), to_toa(v_wind), to_toa(qc), to_toa(qi),
-        dt, config, land_fraction, moisture_supply,
-        to_toa(moisture_tend_profile), thvsig,
-        to_toa(omega), to_toa(qte_dynamics),
-        to_toa(layer_mass), to_toa(humidity_m1),
-        use_updraft_cover,
-        to_toa(pressure_half),
-    )
+    inputs = dict(
+        temperature=to_toa(temperature), humidity=to_toa(humidity),
+        pressure=to_toa(pressure), layer_thickness=to_toa(layer_thickness),
+        rho=to_toa(rho), u_wind=to_toa(u_wind), v_wind=to_toa(v_wind),
+        qc=to_toa(qc), qi=to_toa(qi), dt=dt,
+        land_fraction=land_fraction, moisture_supply=moisture_supply,
+        moisture_tend_profile=to_toa(moisture_tend_profile), thvsig=thvsig,
+        omega=to_toa(omega), qte_dynamics=to_toa(qte_dynamics),
+        layer_mass=to_toa(layer_mass), humidity_m1=to_toa(humidity_m1),
+        pressure_half=to_toa(pressure_half))
+
+    def exact(column, params):
+        return _tiedtke_convection_toa_first(
+            **column, config=params, use_updraft_cover=use_updraft_cover)
+
+    if config.cloud_base_interpolation or config.deep_convergence_width > 0:
+        from jcm.physics.surrogate_gradient import with_surrogate_gradient
+
+        def surrogate(column, params):
+            return _convection_surrogate(column, params, use_updraft_cover)
+
+        tend, state = with_surrogate_gradient(exact, surrogate)(inputs, config)
+    else:
+        tend, state = exact(inputs, config)
 
     def back(a):
         if hasattr(a, "ndim") and a.ndim >= 1 and a.shape[0] == nlev:

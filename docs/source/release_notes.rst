@@ -7,14 +7,21 @@ dev (unreleased)
 Bug fixes
 ^^^^^^^^^
 
-- **Tiedtke's deep/shallow surrogate is opt-in** (#1223).
+- **Tiedtke column transitions use complete plume calculations** (#665, #1223).
+  Cloud-base derivatives interpolate neighboring plume outputs at the dry
+  parcel's saturation crossing. This includes each candidate's moisture
+  budget, closure and heat/water ledger. The static option
+  ``cloud_base_interpolation=False`` restores the fixed-index derivative.
   ``deep_convergence_width`` now defaults to zero, selecting the reference
-  derivative within each regime. The previous ``2e-7`` kg/m²/s logistic
+  derivative of the type decision. The previous ``2e-7`` kg/m²/s logistic
   amplified the lagged humidity difference into large artificial gradients.
   A synthetic-column regression checks forward and reverse derivatives
   against finite differences while staying inside one regime. Forward
-  physics values are unchanged. Explicit positive widths remain available;
-  the other surrogate widths keep their defaults.
+  physics values are unchanged. Explicit positive widths now blend complete
+  shallow and deep column outputs, including their different closures;
+  narrow widths can still amplify sensitivities. The other surrogate widths
+  keep their defaults. Cloud-base and type-interpolation tests check state
+  and parameter derivatives and the water ledger without external data.
 
 - **McICA sub-columns are the same with ``jax_enable_x64`` on or off.** The
   rank draws are float32 in every precision mode. They were the session's

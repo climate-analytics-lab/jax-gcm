@@ -122,9 +122,15 @@ decision (convective or not, type, cloud base, cloud top) on every column,
 and its cloud-base mass flux, surface precipitation and per-level tendencies
 agree to 2.1e-12 or better (``cumastr_reference_test.py``).
 
-The decisions support named surrogate derivatives (``switches.py``; see
-{doc}`../design/surrogate_gradients`): the value is ECHAM's, and a positive
-width selects the derivative of a logistic of the switching quantity. Defaults are
+The decisions support named surrogate derivatives (``switches.py`` and
+``_convection_surrogate``; see {doc}`../design/surrogate_gradients`): the
+value is ECHAM's. The default ``cloud_base_interpolation=True`` interpolates
+complete neighboring plumes at the dry parcel's saturation crossing for
+derivatives only. Both candidates run their own budgets and closures; their
+heat, water and flux outputs use the same interpolation weight. This removes
+the base-level jump from that interpolant while leaving other discrete
+decisions in place. Set it to ``False`` for a fixed-index derivative.
+A positive width selects a logistic derivative for the other switches. Defaults are
 ``ascent_buoyancy_width`` (0.01 K), ``ascent_mass_flux_width`` (2e-3 of the
 cloud-base flux), ``ascent_condensate_width`` (1e-8 kg/kg, a rescaled
 logistic that is exactly zero without condensation),
@@ -134,8 +140,9 @@ derivative), ``sub_cloud_supply_width`` (2e-7 kg m⁻² s⁻¹) and
 ``ConvectionParameters``; zero selects the reference derivative. The deep/shallow
 surrogate is opt-in: its narrow logistic amplifies humidity changes through the
 lagged dynamics tendency ``(q_now - q_after_physics)/dt``. The default keeps the
-within-regime derivative and gives no gradient through a change of type; the
-forward values are unchanged. The
+derivative with type held fixed. A positive width blends complete shallow and
+deep column outputs, including their closures, but can still amplify the
+lagged humidity sensitivity. Forward values are unchanged. The
 per-level ascent test is one surrogate, used for the continuing flux, the
 overshoot and, at the first interface above a cloud base at ``klevm1``, the
 column's ``ldcum``; the chain of decisions that makes ``ldcum`` weights the

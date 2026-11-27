@@ -44,11 +44,13 @@ class ConvectionParameters:
     (``pytree_node=False``). ECHAM decides by hard comparisons whether a
     column convects, which plume type it carries, where the plume stops and
     where it starts to rain; jcm keeps each decision's value exactly and
-    gives it the derivative of a logistic surrogate whose width is one of
-    these fields (:mod:`~jcm.physics.convection.tiedtke_nordeng.switches`,
+    supports surrogate derivatives configured by these fields
+    (:mod:`~jcm.physics.convection.tiedtke_nordeng.switches`,
     ``docs/source/design/surrogate_gradients.md``). A width of zero selects
     the reference derivative; this is the default for the deep/shallow
-    choice. ECHAM has no CAPE trigger, and neither does
+    choice. ``cloud_base_interpolation`` is a separate static switch: by
+    default, derivatives interpolate complete neighboring cloud-base plumes
+    at the dry parcel's saturation crossing. ECHAM has no CAPE trigger, and neither does
     this scheme: a surface plume convects when ``cubase`` finds a buoyant
     cloud base, the cloud-base moisture budget passes ``cumastr``'s ``zlo1``
     test and the ascents leave ``kctop`` above ``klevm1`` (a cloud base above
@@ -183,6 +185,9 @@ class ConvectionParameters:
     # Opt in: a narrow logistic amplifies the lagged humidity difference (#1223).
     deep_convergence_width: float = struct.field(
         pytree_node=False, default=0.0)
+    # Interpolate complete neighboring plumes at the parcel's saturation level.
+    cloud_base_interpolation: bool = struct.field(
+        pytree_node=False, default=True)
     # The ``zlo1`` gate of the cloud-base moisture budget
     # (mo_cumastr.f90:563-566): ``zdqpbl > 0`` per unit of ``g`` [kg/m²/s],
     # and ``zqumqe > zdqmin`` as a fraction of ``zdqmin`` [-].
@@ -229,12 +234,14 @@ class ConvectionParameters:
                  cu_midlev_ptop=30_000.0,
                  lmfdudv=True, cu_lmfmid=True,
                  conservative_downdraft_uptake=True,
+                 cloud_base_interpolation=True,
                  **widths) -> 'ConvectionParameters':
         """Return default convection parameters.
 
         The numeric arguments become array leaves. ``widths`` may set any of
         the static surrogate widths (:data:`SURROGATE_WIDTH_FIELDS`), which
-        stay Python floats.
+        stay Python floats. ``cloud_base_interpolation`` selects the
+        neighboring-plume derivative and stays a Python bool.
         """
         unknown = sorted(set(widths) - set(SURROGATE_WIDTH_FIELDS))
         if unknown:
@@ -269,6 +276,7 @@ class ConvectionParameters:
             lmfdudv=jnp.array(lmfdudv),
             cu_lmfmid=jnp.array(cu_lmfmid),
             conservative_downdraft_uptake=bool(conservative_downdraft_uptake),
+            cloud_base_interpolation=bool(cloud_base_interpolation),
             **{k: float(v) for k, v in widths.items()},
         )
         params.validate()

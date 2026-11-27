@@ -698,6 +698,9 @@ and a gradient with respect to them does not exist:
      - ``sub_cloud_supply_width`` (2e-7 kg m⁻² s⁻¹) and
        ``cloud_base_excess_width`` (0.1 of ``zdqmin``), new
      - the ``zlo1`` gate
+   * - –
+     - ``cloud_base_interpolation``, default True
+     - derivative of complete neighboring cloud-base columns
 
 An override of a removed or renamed field is rejected with the list of valid
 fields, from Hydra (``+physics.convection.trigger_cape=...``,
@@ -707,6 +710,9 @@ fields, from Hydra (``+physics.convection.trigger_cape=...``,
 the trigger are ``cu_cminbuoy``/``cu_cmaxbuoy``/``cu_cbfac`` (the sub-grid
 buoyancy excess ``zlift``) and the entrainment rates. Setting a width to zero
 selects the reference derivative, which is zero across each decision.
+Set ``cloud_base_interpolation=False`` as well to keep the cloud-base index
+fixed in derivatives. Positive ``deep_convergence_width`` values blend
+complete shallow and deep outputs, including their closures.
 ``ConvectionParameters`` is a ``flax.struct`` dataclass: ``.replace`` works
 as before, while ``tree_math`` arithmetic on it (``params * 2``) does not.
 

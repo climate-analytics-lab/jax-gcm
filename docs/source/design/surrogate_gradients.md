@@ -112,7 +112,8 @@ scheme does (`speedy_vdiff._pbl_moisture_flux`).
 |---|---|---|---|
 | Tiedtke ascent test, each interface (`convection/tiedtke_nordeng/switches.py::ascent_test`) | `cuasc`'s `pqu < zqold`, `zbuo > 0`, `pmfu ≥ 0.01·pmfub` (`mo_cuascent.f90:442-451`) | product of a rescaled logistic of the condensate and logistics of `zbuo` and of the flux fraction | `ascent_condensate_width` 1e-8 kg/kg, `ascent_buoyancy_width` 0.01 K, `ascent_mass_flux_width` 2e-3 |
 | Tiedtke precipitation onset (`updraft.py`) | `zpbase − paphp1 ≥ zdnoprc` (l.454-455) | logistic of the depth excess | `precip_onset_width` 2000 Pa |
-| Tiedtke deep/shallow type (`tiedtke_nordeng.py`) | `zdqcv > zhelp` (`mo_cumastr.f90:571-574`) | logistic, opt-in | `deep_convergence_width` 0 by default (reference derivative); positive widths in kg m⁻² s⁻¹ |
+| Tiedtke cloud-base level (`tiedtke_nordeng.py::_convection_surrogate`) | first reachable condensing, buoyant interface | complete neighboring columns interpolated at the dry parcel's saturation crossing | `cloud_base_interpolation=True`; no tunable width |
+| Tiedtke deep/shallow type (`tiedtke_nordeng.py::_convection_surrogate`) | `zdqcv > zhelp` (`mo_cumastr.f90:571-574`) | logistic blend of complete shallow and deep columns, opt-in | `deep_convergence_width` 0 by default (reference derivative); positive widths in kg m⁻² s⁻¹ |
 | Tiedtke `zlo1` gate (`tiedtke_nordeng.py`) | `zdqpbl > 0` and `zqumqe > zdqmin` (l.563-566) | logistic, and logistic relative to `zdqmin` | `sub_cloud_supply_width` 2e-7 kg m⁻² s⁻¹, `cloud_base_excess_width` 0.1 |
 | Tiedtke `ldcum` | the chain `zlo1` → first ascent → final ascent (`mo_cuascent.f90:541`) | the links' surrogates, chained as above; it weights the whole ledger and the published mass fluxes | – |
 | DeMott (2010) INP, `n_aer_coarse ** exponent` (`clouds/lohmann_2m/deposition_freezing.py::demott2010_inp`) | the fractional power, 0 at `n_aer_coarse <= 0` | `where(n_aer_coarse > 0, max(n_aer_coarse, floor) ** exponent, 0)` -- ONE function; at `n_aer_coarse <= 0` the value is identically 0 for every `exponent`, so both partials are exactly 0 there (not DeMott's own, since the fit does not apply); for `0 < n_aer_coarse`, including below the floor where the fit is itself undefined, both partials are this one surrogate's | `_DEMOTT_N_AER_FLOOR_CM3` 0.01 cm⁻³, the fit's own calibration floor |
@@ -120,23 +121,69 @@ scheme does (`speedy_vdiff._pbl_moisture_flux`).
 The cloud cover and the one-moment microphysics use it as recorded in their
 science pages.
 
+### Tiedtke column choices
+
+The cloud-base index controls the parcel, sub-cloud moisture budget, closure,
+ascent and downdraft. Giving the index a fractional value would not change
+the integer gathers and masks downstream. Instead, `_convection_surrogate`
+runs the complete column with each of two neighboring cloud bases and blends
+all floating-point tendencies and state outputs with the same weight.
+
+Let `k` be the first reachable condensing interface and `k+1` the interface
+below it. With dry-parcel humidity excess `d = q_parcel - q_sat(T_dry, p)`,
+the weight of the lower candidate is
+`w = d[k] / (d[k] - d[k+1])`. This is linear interpolation of the saturation
+crossing, with `d[k] >= 0` and `d[k+1] <= 0`. At a base-level change, the
+two adjacent interpolants meet at their common candidate column. The
+interpolant is continuous there when the other decisions are unchanged;
+its one-sided slopes can differ. No smoothing width is needed. The dry
+parcel and saturation calculation are the same ones used by `cubase`.
+
+An absent or inhibited surface cloud base is not extrapolated, and the
+lowest testable interface has no lower candidate. These cases use the
+existing column. The forward calculation still uses the exact integer base.
+`cloud_base_interpolation=False` restores the derivative with that index held
+fixed. The separate diagnostic `calculate_cape_cin`, the mid-level trigger,
+and other level selections are unchanged. Integer diagnostics still have
+no tangent; downstream decisions made from them are not smoothed by this
+column surrogate.
+
+The same weight blends every term of the water ledger, including detrained
+condensate, surface precipitation and the floor source, so both its value
+and tangent conserve water. The heat tendencies come from each candidate's
+existing heat ledger; no heat source is added by interpolation. The other
+switches keep their configured surrogates. Finite-difference checks of the
+column interpolant isolate these switches with zero widths, and avoid their
+remaining kinks. This is not a globally smooth replacement of convection.
+
+Only differentiation evaluates the extra columns. With cloud-base
+interpolation enabled it evaluates two candidates; enabling deep/shallow
+blending as well evaluates four. Ordinary forward runs evaluate only the
+reference column. Column tests check the transition, both derivative modes,
+state and parameter sensitivities, and water conservation. The reference
+column tests check unchanged forward values in both precisions.
+
 The Tiedtke deep/shallow surrogate is opt-in because the tested moisture
 convergence includes `(q_now - q_after_physics) / dt`. With the previous state
 held fixed, a fractional change in specific humidity can span many surrogate widths.
 The logistic's maximum slope is `1 / (4 * width)`, so a narrow width can add a
 large artificial sensitivity even where the forward model stays in one regime.
 Increasing the width reduces this contribution but does not make it the local
-derivative of the forward model. The default `deep_convergence_width=0` uses the
-reference derivative within each regime; it gives no gradient through a change
-of type. The forward switch is still discontinuous at the boundary.
+derivative of the forward model. A positive width now blends complete shallow
+and deep columns, including their different closures and final ledgers, instead
+of only blending entrainment while holding the closure's integer type fixed.
+This makes the switching term proportional to the difference between the two
+column outputs. It does not make a narrow width well conditioned. The default
+`deep_convergence_width=0` gives no gradient through a change of type. The
+forward switch is still discontinuous at the boundary.
 
 Set `ConvectionParameters.default(deep_convergence_width=2e-7)` to opt into
-the former derivative, or use the Hydra override
+the complete-column logistic derivative, or use the Hydra override
 `+physics.terms.tiedtke_convection.params.deep_convergence_width=2e-7`.
 This is a choice of surrogate, not a validated width for sensitivity analysis.
 The other six widths keep their defaults. To select reference derivatives for
 all Tiedtke decisions in Python, use
-`ConvectionParameters.default(**{name: 0.0 for name in SURROGATE_WIDTH_FIELDS})`,
+`ConvectionParameters.default(cloud_base_interpolation=False, **{name: 0.0 for name in SURROGATE_WIDTH_FIELDS})`,
 with both names imported from `jcm.physics.convection.tiedtke_nordeng.types`.
 
 SPEEDY's switches use it through the helpers of

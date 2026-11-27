@@ -46,6 +46,7 @@ _INPUTS = ("temperature", "humidity", "pressure", "layer_thickness", "rho",
            "moisture_tend_profile", "thvsig", "omega", "qte_dynamics",
            "layer_mass", "humidity_m1", "pressure_half")
 _ZERO_WIDTHS = {name: 0.0 for name in SURROGATE_WIDTH_FIELDS}
+_ZERO_WIDTHS["cloud_base_interpolation"] = False
 
 
 @functools.lru_cache(maxsize=1)
@@ -158,9 +159,9 @@ def test_default_type_gradient_matches_lagged_humidity_response():
             np.testing.assert_allclose(reverse, difference, rtol=1e-5, atol=1e-10)
 
         # Opting into a surrogate changes derivatives only.
-        legacy = jax.jit(lambda s: output(s, params.replace(
+        opt_in = jax.jit(lambda s: output(s, params.replace(
             deep_convergence_width=2e-7)))(one)
-        np.testing.assert_array_equal(value, legacy)
+        np.testing.assert_array_equal(value, opt_in)
 
 
 def _grad_wrt(field, base=None):
@@ -282,8 +283,9 @@ class TestAcrossTheOnset:
         with jax.enable_x64(True):
             args = [jnp.asarray(ref[f"input_{k}"][rows], jnp.float64)
                     for k in _INPUTS]
+            # Isolate the ascent gates; base interpolation has its own tests.
             heat, dheat, ktype, precip = self._heating_jvp(
-                ConvectionParameters.default())(*args)
+                ConvectionParameters.default(cloud_base_interpolation=False))(*args)
             heat_r, dheat_r, ktype_r, precip_r = self._heating_jvp(
                 ConvectionParameters.default(**_ZERO_WIDTHS))(*args)
         heat, dheat = np.asarray(heat), np.asarray(dheat)
