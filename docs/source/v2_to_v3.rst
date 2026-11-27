@@ -692,7 +692,7 @@ and a gradient with respect to them does not exist:
      - ``precip_onset_width``, default 2000
      - Pa
    * - ``cu_dqcv_width``
-     - ``deep_convergence_width``, default 2e-7
+     - ``deep_convergence_width``, default 0 (reference derivative)
      - kg m⁻² s⁻¹
    * - –
      - ``sub_cloud_supply_width`` (2e-7 kg m⁻² s⁻¹) and

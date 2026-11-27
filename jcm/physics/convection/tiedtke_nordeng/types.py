@@ -47,7 +47,8 @@ class ConvectionParameters:
     gives it the derivative of a logistic surrogate whose width is one of
     these fields (:mod:`~jcm.physics.convection.tiedtke_nordeng.switches`,
     ``docs/source/design/surrogate_gradients.md``). A width of zero selects
-    the reference derivative. ECHAM has no CAPE trigger, and neither does
+    the reference derivative; this is the default for the deep/shallow
+    choice. ECHAM has no CAPE trigger, and neither does
     this scheme: a surface plume convects when ``cubase`` finds a buoyant
     cloud base, the cloud-base moisture budget passes ``cumastr``'s ``zlo1``
     test and the ascents leave ``kctop`` above ``klevm1`` (a cloud base above
@@ -179,8 +180,9 @@ class ConvectionParameters:
         pytree_node=False, default=2.0e3)
     # The deep/shallow test ``zdqcv > MAX(0, -1.1·pqhfla·g)``
     # (mo_cumastr.f90:571-574), per unit of ``g`` [kg/m²/s].
+    # Opt in: a narrow logistic amplifies the lagged humidity difference (#1223).
     deep_convergence_width: float = struct.field(
-        pytree_node=False, default=2.0e-7)
+        pytree_node=False, default=0.0)
     # The ``zlo1`` gate of the cloud-base moisture budget
     # (mo_cumastr.f90:563-566): ``zdqpbl > 0`` per unit of ``g`` [kg/m²/s],
     # and ``zqumqe > zdqmin`` as a fraction of ``zdqmin`` [-].

@@ -238,8 +238,9 @@ logistic surrogate (:doc:`science/convection`).
      - 2000.0
    * - ``deep_convergence_width``, ``sub_cloud_supply_width``
      - Widths of the surrogates of the deep/shallow test and of the
-       ``zdqpbl > 0`` gate (kg/m²/s). Static; derivative only
-     - 2.0e-7, 2.0e-7
+       ``zdqpbl > 0`` gate (kg/m²/s). Static; derivative only. Zero keeps
+       the reference derivative; the deep/shallow surrogate is opt-in
+     - 0.0, 2.0e-7
    * - ``cloud_base_excess_width``
      - Width of the surrogate of the ``zqumqe > zdqmin`` gate, as a fraction
        of ``zdqmin``. Static; derivative only

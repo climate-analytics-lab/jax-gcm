@@ -112,13 +112,32 @@ scheme does (`speedy_vdiff._pbl_moisture_flux`).
 |---|---|---|---|
 | Tiedtke ascent test, each interface (`convection/tiedtke_nordeng/switches.py::ascent_test`) | `cuasc`'s `pqu < zqold`, `zbuo > 0`, `pmfu ≥ 0.01·pmfub` (`mo_cuascent.f90:442-451`) | product of a rescaled logistic of the condensate and logistics of `zbuo` and of the flux fraction | `ascent_condensate_width` 1e-8 kg/kg, `ascent_buoyancy_width` 0.01 K, `ascent_mass_flux_width` 2e-3 |
 | Tiedtke precipitation onset (`updraft.py`) | `zpbase − paphp1 ≥ zdnoprc` (l.454-455) | logistic of the depth excess | `precip_onset_width` 2000 Pa |
-| Tiedtke deep/shallow type (`tiedtke_nordeng.py`) | `zdqcv > zhelp` (`mo_cumastr.f90:571-574`) | logistic | `deep_convergence_width` 2e-7 kg m⁻² s⁻¹ |
+| Tiedtke deep/shallow type (`tiedtke_nordeng.py`) | `zdqcv > zhelp` (`mo_cumastr.f90:571-574`) | logistic, opt-in | `deep_convergence_width` 0 by default (reference derivative); positive widths in kg m⁻² s⁻¹ |
 | Tiedtke `zlo1` gate (`tiedtke_nordeng.py`) | `zdqpbl > 0` and `zqumqe > zdqmin` (l.563-566) | logistic, and logistic relative to `zdqmin` | `sub_cloud_supply_width` 2e-7 kg m⁻² s⁻¹, `cloud_base_excess_width` 0.1 |
 | Tiedtke `ldcum` | the chain `zlo1` → first ascent → final ascent (`mo_cuascent.f90:541`) | the links' surrogates, chained as above; it weights the whole ledger and the published mass fluxes | – |
 | DeMott (2010) INP, `n_aer_coarse ** exponent` (`clouds/lohmann_2m/deposition_freezing.py::demott2010_inp`) | the fractional power, 0 at `n_aer_coarse <= 0` | `where(n_aer_coarse > 0, max(n_aer_coarse, floor) ** exponent, 0)` -- ONE function; at `n_aer_coarse <= 0` the value is identically 0 for every `exponent`, so both partials are exactly 0 there (not DeMott's own, since the fit does not apply); for `0 < n_aer_coarse`, including below the floor where the fit is itself undefined, both partials are this one surrogate's | `_DEMOTT_N_AER_FLOOR_CM3` 0.01 cm⁻³, the fit's own calibration floor |
 
 The cloud cover and the one-moment microphysics use it as recorded in their
 science pages.
+
+The Tiedtke deep/shallow surrogate is opt-in because the tested moisture
+convergence includes `(q_now - q_after_physics) / dt`. With the previous state
+held fixed, a fractional change in specific humidity can span many surrogate widths.
+The logistic's maximum slope is `1 / (4 * width)`, so a narrow width can add a
+large artificial sensitivity even where the forward model stays in one regime.
+Increasing the width reduces this contribution but does not make it the local
+derivative of the forward model. The default `deep_convergence_width=0` uses the
+reference derivative within each regime; it gives no gradient through a change
+of type. The forward switch is still discontinuous at the boundary.
+
+Set `ConvectionParameters.default(deep_convergence_width=2e-7)` to opt into
+the former derivative, or use the Hydra override
+`+physics.terms.tiedtke_convection.params.deep_convergence_width=2e-7`.
+This is a choice of surrogate, not a validated width for sensitivity analysis.
+The other six widths keep their defaults. To select reference derivatives for
+all Tiedtke decisions in Python, use
+`ConvectionParameters.default(**{name: 0.0 for name in SURROGATE_WIDTH_FIELDS})`,
+with both names imported from `jcm.physics.convection.tiedtke_nordeng.types`.
 
 SPEEDY's switches use it through the helpers of
 `jcm.physics.speedy.smoothing` (`surrogate_gate`, `surrogate_pos`,
@@ -178,10 +197,11 @@ The gradient is not the derivative of the value. A finite-difference check of
 the whole model disagrees with automatic differentiation wherever a
 surrogate is active, by design.
 
-First-order optimisers and variational assimilation are unaffected in
-practice: they need a direction that reduces the cost, and the surrogate's
-gradient provides one where the reference's provides none. Methods that
-compare the predicted and the actual change of the cost are affected. A line
+For first-order optimisation and variational assimilation, a surrogate can
+provide a search direction where the reference derivative is zero. It does
+not guarantee a descent direction for the forward model: its magnitude and
+sign must be checked for the chosen objective. Methods that compare the
+predicted and the actual change of the cost are also affected. A line
 search with a curvature condition, or a trust-region ratio, can reject a good
 step because the two differ near a switch. Setting every width to zero
 recovers the reference derivative for such a method, at the price of the

@@ -7,6 +7,15 @@ dev (unreleased)
 Bug fixes
 ^^^^^^^^^
 
+- **Tiedtke's deep/shallow surrogate is opt-in** (#1223).
+  ``deep_convergence_width`` now defaults to zero, selecting the reference
+  derivative within each regime. The previous ``2e-7`` kg/m²/s logistic
+  amplified the lagged humidity difference into large artificial gradients.
+  A synthetic-column regression checks forward and reverse derivatives
+  against finite differences while staying inside one regime. Forward
+  physics values are unchanged. Explicit positive widths remain available;
+  the other surrogate widths keep their defaults.
+
 - **McICA sub-columns are the same with ``jax_enable_x64`` on or off.** The
   rank draws are float32 in every precision mode. They were the session's
   default float, so a run with x64 enabled (importing ``mam4_jax`` enables it)

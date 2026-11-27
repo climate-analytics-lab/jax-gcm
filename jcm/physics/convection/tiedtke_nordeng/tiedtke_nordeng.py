@@ -879,8 +879,8 @@ def _tiedtke_convection_toa_first(
     #     200 hPa (line 752; see ``apply_full_convection``).
     #
     # ECHAM has no CAPE trigger and no CAPE type split. The deep/shallow
-    # choice is ECHAM's in the value and carries a logistic surrogate's
-    # derivative of width ``deep_convergence_width``, so the per-type
+    # choice uses the reference derivative by default. A positive
+    # ``deep_convergence_width`` opts into a logistic surrogate, so the per-type
     # entrainment rates and entrainment bands, blended linearly by these
     # weights, respond to the convergence that selects them; the closure is
     # chosen by the integer type.
