@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from jcm.filters import (
     mass_conserving_positivity, MassConservingPositivity, stable_quotient,
 )
+from jcm.testing import inverse_square_quotient
 
 
 class MassConservingPositivityMathTest(unittest.TestCase):
@@ -75,8 +76,8 @@ class StableQuotientTest(unittest.TestCase):
     The reason it exists is a range limit in the *derivative* of the bare
     quotient: ``-n / d**2`` is ``inf`` once ``d**2`` leaves the dtype's normal
     range (``d`` below ~1.08e-19 in float32) although ``n / d`` is fine. Every
-    case below is therefore pitched in that band, with the bare quotient as
-    the control that shows the case can fail.
+    case below is therefore pitched in that band, with an explicit
+    inverse-square derivative as the control that shows the case can fail.
     """
 
     def test_value_is_the_plain_quotient_bit_for_bit(self):
@@ -114,7 +115,7 @@ class StableQuotientTest(unittest.TestCase):
             jnp.asarray(n), jnp.asarray(d))
         np.testing.assert_allclose(float(d2), 2.0 * n / d ** 3, rtol=1e-4)
 
-    def test_derivative_is_finite_and_correct_where_the_bare_quotient_overflows(self):
+    def test_derivative_is_finite_and_correct_where_inverse_square_overflows(self):
         dtype = _working_dtype()
         # A denominator between the guard that keeps it positive and the point
         # where its square leaves the normal range.
@@ -122,10 +123,9 @@ class StableQuotientTest(unittest.TestCase):
         n = 0.9999 * d
         args = (jnp.asarray(n, dtype), jnp.asarray(d, dtype))
 
-        # The control: the bare quotient's reverse pass is not finite here,
-        # for a zero cotangent (nan) and for a unit one (inf).
+        # Pin the inverse-square rule: newer JAX division avoids this overflow.
         for ct in (0.0, 1.0):
-            _, vjp = jax.vjp(lambda a, b: a / b, *args)
+            _, vjp = jax.vjp(inverse_square_quotient, *args)
             bare = np.asarray(vjp(jnp.asarray(ct, dtype)))
             self.assertFalse(np.all(np.isfinite(bare)), ct)
 
@@ -140,13 +140,13 @@ class StableQuotientTest(unittest.TestCase):
                 np.testing.assert_allclose(grads, expected, rtol=1e-4)
 
 
-def _plain_filter(q, m):
+def _plain_filter(q, m, divide=jnp.divide):
     """Apply the filter as a masked bare quotient, the formulation to reproduce bit for bit."""
     q_clip = jnp.maximum(0.0, q)
     col_mass = jnp.sum(m * q, axis=0)
     col_mass_clip = jnp.sum(m * q_clip, axis=0)
     scale = jnp.where(col_mass_clip > 0.0,
-                      jnp.maximum(col_mass, 0.0) / col_mass_clip, 0.0)
+                      divide(jnp.maximum(col_mass, 0.0), col_mass_clip), 0.0)
     return q_clip * scale[jnp.newaxis, ...]
 
 
@@ -197,9 +197,9 @@ class MassConservingPositivityGradientTest(unittest.TestCase):
             grad = np.asarray(pullback(q, jnp.full_like(q, ct_value)))
             for j, name in enumerate(names):
                 self.assertTrue(np.all(np.isfinite(grad[:, j])), (name, ct_value))
-        # The control: the plain formulation is not finite in the columns the
-        # test is about, so this test fails if the guard is removed.
-        plain = np.asarray(jax.vjp(lambda x: _plain_filter(x, m), q)[1](
+        # Keep the failure control independent of JAX's current division rule.
+        plain = np.asarray(jax.vjp(
+            lambda x: _plain_filter(x, m, inverse_square_quotient), q)[1](
             jnp.zeros_like(q))[0])
         self.assertFalse(np.all(np.isfinite(plain[:, names.index("empty")])))
         self.assertFalse(np.all(np.isfinite(plain[:, names.index("residue_only")])))

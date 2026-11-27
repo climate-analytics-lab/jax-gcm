@@ -119,6 +119,23 @@ import numpy as np
 DEFAULT_STEPS = tuple(1e-3 * 0.5**k for k in range(11))
 
 
+@jax.custom_jvp
+def inverse_square_quotient(numerator, denominator):
+    """Test control: division with the overflow-prone pre-0.12.1 JAX rule.
+
+    Use only to reproduce historical gradient failures independently of the
+    installed JAX version. Production division must not use this rule.
+    """
+    return numerator / denominator
+
+
+@inverse_square_quotient.defjvp
+def _inverse_square_quotient_jvp(primals, tangents):
+    n, d = primals
+    dn, dd = tangents
+    return n / d, dn / d - (dd * n) * jax.lax.integer_pow(d, -2)
+
+
 def _child_fields(node):
     """Return ``node``'s fields when they map one-to-one onto its children.
 

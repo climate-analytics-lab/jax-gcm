@@ -236,7 +236,7 @@ class TestEffLiquidDropletRadius:
     _ISSUE_EPS = 1.0e-12
 
     @staticmethod
-    def _unsplit_quotient_form(qc, rho, cdnc, eps, breadth=None):
+    def _unsplit_quotient_form(qc, rho, cdnc, eps, breadth=None, divide=jnp.divide):
         """Return the pre-#1130 form: cube root of the QUOTIENT, not split.
 
         Kept here (not imported) so the comparison is against upstream's own
@@ -251,7 +251,7 @@ class TestEffLiquidDropletRadius:
             breadth = breadth_factor(cdnc)
         has_liquid = qc > 0.0
         radius_base = (
-            (3.0 / (4.0 * pi * c.rhow)) * qc * rho / jnp.maximum(cdnc, eps)
+            divide((3.0 / (4.0 * pi * c.rhow)) * qc * rho, jnp.maximum(cdnc, eps))
         )
         has_liquid = jnp.logical_and(has_liquid, radius_base != 0.0)
         radius_base = jnp.where(has_liquid, radius_base, 1.0)
@@ -290,20 +290,24 @@ class TestEffLiquidDropletRadius:
                     )
 
     def test_upstream_unsplit_form_overflows_the_float32_reverse_pass(self):
-        """#1130's own reproduction: the pre-fix quotient form is non-finite.
+        """#1130's reproduction with the historical inverse-square AD rule.
 
         A trace of liquid (q ~ 1e-30 kg/kg, well under the ~1e-22 kg/kg
         threshold the issue names) over a droplet number at or just above
         the 1e-12 m^-3 floor: d/dN is NaN at N = 0 and -inf just above it in
-        the unsplit form, finite in the current (split) code, same primal.
+        the unsplit form with that rule, finite in the current (split) code,
+        same primal. JAX's current division need not reproduce the old rule.
         """
+        from jcm.testing import inverse_square_quotient
+
         qc = jnp.asarray(1.0e-30, jnp.float32)
         rho = jnp.asarray(0.9, jnp.float32)
         eps = jnp.float32(self._ISSUE_EPS)
         for n in (0.0, 1.0e-9):
             nn = jnp.asarray(n, jnp.float32)
             g_old = jax.grad(
-                lambda n: self._unsplit_quotient_form(qc, rho, n, eps),
+                lambda n: self._unsplit_quotient_form(
+                    qc, rho, n, eps, divide=inverse_square_quotient),
             )(nn)
             g_new = jax.grad(
                 lambda n: eff_liquid_droplet_radius(qc, rho, n, eps),

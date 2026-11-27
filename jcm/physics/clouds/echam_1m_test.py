@@ -1006,15 +1006,24 @@ class TestBroadcasting:
         tb, sb = run_sweep(*cols, DT)
         for j in range(4):
             tc, sc = run_sweep(*(a[:, j] for a in cols), DT)
-            for got, want in zip(jax.tree.leaves((tb, sb)), jax.tree.leaves((tc, sc))):
+            for (path, got), want in zip(
+                    jax.tree_util.tree_flatten_with_path((tb, sb))[0],
+                    jax.tree.leaves((tc, sc))):
                 got = np.asarray(got)
                 want = np.asarray(want)
                 # XLA vectorises the block differently: round-off of the
                 # field's own scale, which fluxes that cancel to ~1e-20 carry
                 # at up to ~1e-11 of it.
                 scale = float(np.max(np.abs(want))) if want.size else 0.0
+                atol = 1e-10 * scale
+                # zdxlcor is a cancellation correction, including when stored
+                # in echam_locals. Scalar/block differences reach 1.1e-23 kg/kg/s
+                # on JAX 0.12.1; a relative bound on that residue is meaningless.
+                if "zdxlcor" in jax.tree_util.keystr(path):
+                    atol = max(atol, 1e-22)
                 np.testing.assert_allclose(got[..., j] if got.ndim else got, want,
-                                           rtol=1e-13, atol=1e-10 * scale)
+                                           rtol=1e-13, atol=atol,
+                                           err_msg=jax.tree_util.keystr(path))
 
     def test_three_dimensional_grid(self):
         cols = [jnp.asarray(a) for a in random_columns(6, ncols=6)]
@@ -1363,48 +1372,44 @@ class TestSweepGradients:
             for g in grads:
                 assert np.all(np.isfinite(np.asarray(g))), fields
 
-    def test_float32_derivative_where_the_precipitation_nearly_cancels(self):
-        """A float32 column whose ``zpresum`` is ~1e-19 keeps a finite gradient.
-
-        Ice deposited aloft falls as snow that sublimates to a round-off
-        remainder (7e-20 kg/m²/s), which reaches every level below. ECHAM
-        discards the precipitating fraction there (``zpresum <= cqtmin``,
-        F:1196); the division that forms it is guarded by that same
-        condition, since between the dtype's tiny and ``cqtmin`` its
-        reverse-mode rule ``-(0·x)·zpresum**-2`` overflows to ``0·inf`` in
-        float32: without the guard this column's gradient is not finite. The
-        remainder is round-off, so the humidity (0.5375 of saturation) is the
-        one that reaches the case with the model's constants.
-        """
+    def test_float32_derivative_under_a_residual_precipitation_flux(self):
+        """Drive the discarded tiny-flux branch without a rounding-tuned column."""
         with jax.enable_x64(False):
             dtype = jnp.float32
-            nlev = 47
-            p = jnp.linspace(1000.0, 100000.0, nlev).astype(dtype)
-            t = jnp.linspace(200.0, 295.0, nlev).astype(dtype)
-            # e_s·rd/rv/p over water, formed in float32 as the case was found.
-            esw = _es_and_derivative(t, ice=False)[0]
-            q = (0.5375 * jnp.minimum(esw * c.rd / c.rv / p, 0.01)).astype(dtype)
-            dp = jnp.full(nlev, 99000.0 / nlev, dtype)
-            rho = p / (c.rd * t)
-            dz = dp / (rho * c.grav)
-            z = jnp.zeros(nlev, dtype)
-            n = jnp.full(nlev, 8e7, dtype)
+            cfg = jax.tree.map(
+                lambda x: x.astype(dtype)
+                if jnp.issubdtype(jnp.result_type(x), jnp.floating) else x,
+                MicrophysicsParameters.default())
+            d = dict(tm1=285.0, qm1=0.003, dtemp=0.0, dq=0.0, xlp=0.0, xip=0.0,
+                     paclc=0.0, p=90000.0, dp=2000.0, rho=1.1, dz=180.0,
+                     cdnc=8e7, cdnc_aut=8e7, pcair=1010.0)
+            inp = LevelInputs(
+                **{k: jnp.asarray(v, dtype) for k, v in d.items()},
+                zauloc_off=jnp.asarray(False), top=jnp.asarray(False),
+                bottom=jnp.asarray(False))
+            zero = jnp.zeros((), dtype)
 
-            def loss(t_):
-                tend, st = run_sweep(t_, q, z, z, z, z, z, p, dp, rho, dz, n, DT)
-                return st.precip_rain + st.precip_snow + jnp.sum(tend.dtedt)
+            def level(rain):
+                return _sweep_level((rain, zero, zero, zero), inp, cfg,
+                                    jnp.asarray(DT, dtype))
 
-            # The column reaches the case: some level's zpresum lies between
-            # the float32 tiny and 1e-18 (formed as the sweep forms it).
-            _, st = run_sweep(t, q, z, z, z, z, z, p, dp, rho, dz, n, DT)
-            loc = {k: np.asarray(v, np.float64) for k, v in st.echam_locals.items()}
-            zmass_ = np.asarray(dp, np.float64) / (DT * c.grav)
-            presum = loc["zrfl_melt"] + loc["zsfl_melt"] + zmass_ * (
-                loc["zrpr"] + loc["zspr"] + loc["zsacl"])
-            presum[-1] += loc["zxiflux_sed"][-1]
-            assert np.any((presum > np.finfo(np.float32).tiny) & (presum < 1e-18))
-            g = jax.grad(loss)(t)
-            assert np.all(np.isfinite(np.asarray(g)))
+            def loss(rain):
+                carry, out = level(rain)
+                return sum(carry) + out.ztte + out.zqvte
+
+            for rain in (1e-25, 1e-20):
+                flux = jnp.asarray(rain, dtype)
+                carry, out = level(flux)
+                loc = out.echam_locals
+                presum = (loc["zrfl_melt"] + loc["zsfl_melt"]
+                          + inp.dp / (DT * c.grav)
+                          * (loc["zrpr"] + loc["zspr"] + loc["zsacl"]))
+                assert np.finfo(np.float32).tiny < float(presum) < 1e-18
+                assert float(presum) < float(cfg.cqtmin)
+                assert float(carry[2]) == 0.0
+                for grad in (jax.grad(loss), jax.jit(jax.grad(loss))):
+                    # No evaporation or new rain: the tiny incoming flux passes through.
+                    np.testing.assert_allclose(float(grad(flux)), 1.0, rtol=1e-6)
 
     def test_float32_derivative_under_a_vanishing_precipitating_fraction(self):
         """A tiny incoming ``zclcpre`` with no incoming rain or snow: finite in float32.
