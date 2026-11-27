@@ -1,8 +1,37 @@
 """Tests for the dinosaur dycore backend: transport and trajectory output."""
 
+import itertools
 import unittest
+from typing import ClassVar
+from unittest import mock
 
+import jax
+import jax.numpy as jnp
 import numpy as np
+from dinosaur import primitive_equations
+
+import jcm.constants as c
+from jcm.dycore.base import DynamicalCore
+from jcm.dycore.dinosaur import dycore as dycore_mod
+from jcm.dycore.dinosaur.dycore import (
+    DEFAULT_OFF_CENTERING,
+    DinosaurDycore,
+    semi_lagrangian_available,
+)
+from jcm.dycore.dinosaur.state_bridge import dynamics_state_to_physics_state
+from jcm.forcing import ForcingData
+from jcm.model import Model
+from jcm.physics.composable_physics import ComposablePhysics
+from jcm.physics.echam.echam_levels import get_echam_levels
+from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
+from jcm.physics.held_suarez.utils import get_held_suarez_coords
+from jcm.physics.physics_term import PhysicsTerm, TracerSpec
+from jcm.physics.speedy.speedy_coords import get_speedy_coords
+from jcm.physics.speedy.speedy_terms import speedy_physics
+from jcm.physics_interface import PhysicsTendency
+from jcm.terrain import TerrainData
+from jcm.testing import check_gradients, inverse_square_quotient
+from jcm.utils import get_coords
 
 
 class SemiLagrangianRequiredTest(unittest.TestCase):
@@ -16,10 +45,6 @@ class SemiLagrangianRequiredTest(unittest.TestCase):
     """
 
     def test_missing_sl_core_fails_with_an_actionable_message(self):
-        from unittest import mock
-
-        from jcm.dycore.dinosaur import dycore as dycore_mod
-
         with mock.patch.object(dycore_mod, "semi_lagrangian_available",
                                return_value=False):
             with self.assertRaises(RuntimeError) as ctx:
@@ -30,10 +55,6 @@ class SemiLagrangianRequiredTest(unittest.TestCase):
         self.assertIn("pip install", msg)
 
     def test_available_probe_matches_the_installed_dinosaur(self):
-        from dinosaur import primitive_equations
-
-        from jcm.dycore.dinosaur.dycore import semi_lagrangian_available
-
         expected = all(
             hasattr(primitive_equations, n)
             for n in ("SemiLagrangianPrimitiveEquations",
@@ -43,16 +64,10 @@ class SemiLagrangianRequiredTest(unittest.TestCase):
 
 
 def _sl_available() -> bool:
-    from jcm.dycore.dinosaur.dycore import semi_lagrangian_available
-
     return semi_lagrangian_available()
 
 
 def _small_dycore(**kwargs):
-    from jcm.dycore.dinosaur.dycore import DinosaurDycore
-    from jcm.physics.speedy.speedy_coords import get_speedy_coords
-    from jcm.terrain import TerrainData
-
     coords = get_speedy_coords(layers=8, spectral_truncation=21)
     return DinosaurDycore(
         coords=coords,
@@ -74,8 +89,6 @@ class AdvectionSelectionTest(unittest.TestCase):
     """
 
     def _dust(self):
-        from jcm.physics.physics_term import TracerSpec
-
         return {"dust": TracerSpec(name="dust")}
 
     def test_unknown_scheme_is_rejected(self):
@@ -83,8 +96,6 @@ class AdvectionSelectionTest(unittest.TestCase):
             _small_dycore(advection="spectral")
 
     def test_explicit_eulerian_builds_the_spectral_core(self):
-        from dinosaur import primitive_equations
-
         dycore = _small_dycore(advection="eulerian")
         self.assertEqual(dycore.advection, "eulerian")
         self.assertIsInstance(dycore.primitive, primitive_equations.PrimitiveEquations)
@@ -131,9 +142,6 @@ class AdvectionSelectionTest(unittest.TestCase):
             _small_dycore().resolve_advection("spectral")
 
     def test_model_resolves_speedy_to_eulerian(self):
-        from jcm.model import Model
-        from jcm.physics.speedy.speedy_terms import speedy_physics
-
         model = Model(coords=_small_dycore().coords, physics=speedy_physics())
         self.assertEqual(model.dycore.advection, "eulerian")
         # Explicit dycore in auto mode resolves the same way.
@@ -141,13 +149,6 @@ class AdvectionSelectionTest(unittest.TestCase):
         self.assertEqual(model.dycore.advection, "eulerian")
 
     def test_model_puts_speedy_plus_tracers_on_semi_lagrangian(self):
-        from typing import ClassVar
-
-        from jcm.model import Model
-        from jcm.physics.physics_term import PhysicsTerm, TracerSpec
-        from jcm.physics.speedy.speedy_terms import speedy_physics
-        from jcm.physics_interface import PhysicsTendency
-
         class DustTerm(PhysicsTerm):
             name: ClassVar[str] = "dust_term"
             category: ClassVar[str] = "test"
@@ -166,20 +167,10 @@ class AdvectionSelectionTest(unittest.TestCase):
         self.assertIn("dust", model.dycore.primitive.nodal_tracers)
 
     def test_model_leaves_held_suarez_semi_lagrangian(self):
-        from jcm.model import Model
-        from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
-
         model = Model(_small_dycore(), physics=held_suarez_physics())
         self.assertEqual(model.dycore.advection, "semi_lagrangian")
 
     def test_eulerian_speedy_steps_finite(self):
-        import jax
-        import numpy as np
-
-        from jcm.forcing import ForcingData
-        from jcm.model import Model
-        from jcm.physics.speedy.speedy_terms import speedy_physics
-
         dycore = _small_dycore(advection="eulerian")
         model = Model(dycore, physics=speedy_physics())
         preds = model.run(
@@ -202,8 +193,6 @@ class TracerRegistrationSyncTest(unittest.TestCase):
     """
 
     def test_assigning_tracer_specs_rebuilds_the_nodal_registration(self):
-        from jcm.physics.physics_term import TracerSpec
-
         dycore = _small_dycore()
         self.assertEqual(dycore.primitive.nodal_tracers, ("specific_humidity",))
 
@@ -214,8 +203,6 @@ class TracerRegistrationSyncTest(unittest.TestCase):
                          ("dust", "specific_humidity"))
 
     def test_reassigning_identical_specs_does_not_rebuild(self):
-        from jcm.physics.physics_term import TracerSpec
-
         specs = {"dust": TracerSpec(name="dust")}
         dycore = _small_dycore(tracer_specs=specs)
         primitive = dycore.primitive
@@ -223,13 +210,6 @@ class TracerRegistrationSyncTest(unittest.TestCase):
         self.assertIs(dycore.primitive, primitive)
 
     def test_model_with_prebuilt_dycore_registers_physics_tracers(self):
-        from typing import ClassVar
-
-        from jcm.model import Model
-        from jcm.physics.composable_physics import ComposablePhysics
-        from jcm.physics.physics_term import PhysicsTerm, TracerSpec
-        from jcm.physics_interface import PhysicsTendency
-
         class TracerTerm(PhysicsTerm):
             name: ClassVar[str] = "tracer_term"
             category: ClassVar[str] = "test"
@@ -260,8 +240,6 @@ class OffCenteringDefaultTest(unittest.TestCase):
     """
 
     def test_constructor_default_is_the_shared_constant(self):
-        from jcm.dycore.dinosaur.dycore import DEFAULT_OFF_CENTERING
-
         self.assertEqual(DEFAULT_OFF_CENTERING, 0.2)
         self.assertEqual(_small_dycore().off_centering, DEFAULT_OFF_CENTERING)
 
@@ -287,15 +265,11 @@ class TracerMassFixerTest(unittest.TestCase):
         # The fixer closes integral(q dp) to roundoff, so the closure
         # assertions below only hold in float64: in float32 the residual is
         # ~1e-6, the precision of the sum itself rather than a transport leak.
-        import jax
-
         prior = jax.config.read("jax_enable_x64")
         jax.config.update("jax_enable_x64", True)
         self.addCleanup(jax.config.update, "jax_enable_x64", prior)
 
     def _dycore_with_tracer(self):
-        from jcm.physics.physics_term import TracerSpec
-
         dycore = _small_dycore(
             tracer_specs={"dust": TracerSpec(name="dust")},
         )
@@ -303,16 +277,11 @@ class TracerMassFixerTest(unittest.TestCase):
         return dycore, state
 
     def _mass(self, dycore, state):
-        import jax.numpy as jnp
-        import numpy as np
-
         w = np.asarray(dycore.coords.horizontal.quadrature_weights)
         dp = dycore._nodal_tracer_column_weight(state)
         return float(jnp.sum(state.tracers["dust"] * dp * w))
 
     def test_fixer_restores_transport_mass_error(self):
-        import jax.numpy as jnp
-
         dycore, state = self._dycore_with_tracer()
         # A rough positive field (the regime where SL leaks).
         q = 1e-9 * (1.0 + 0.9 * jnp.sin(
@@ -330,9 +299,6 @@ class TracerMassFixerTest(unittest.TestCase):
         )
 
     def test_fixer_guards_empty_fields_and_clips(self):
-        import jax.numpy as jnp
-        import numpy as np
-
         dycore, state = self._dycore_with_tracer()
         zero = state.replace(
             tracers={**state.tracers,
@@ -357,8 +323,6 @@ class TracerMassFixerTest(unittest.TestCase):
         )
 
     def test_step_conserves_nodal_tracer_mass(self):
-        import jax.numpy as jnp
-
         dycore, state = self._dycore_with_tracer()
         # Sharp positive blob: the hard case for SL conservation.
         shape = state.tracers["dust"].shape
@@ -378,11 +342,6 @@ class TracerMassFixerTest(unittest.TestCase):
 
 def _moist_l47_dycore(**sl_options):
     """T21, ECHAM L47 hybrid SL dycore with explicit ``sl_options``."""
-    from jcm.dycore.dinosaur.dycore import DinosaurDycore
-    from jcm.physics.echam.echam_levels import get_echam_levels
-    from jcm.terrain import TerrainData
-    from jcm.utils import get_coords
-
     coords = get_coords(get_echam_levels(47), spectral_truncation=21)
     return DinosaurDycore(
         coords=coords, terrain=TerrainData.aquaplanet(coords),
@@ -399,11 +358,6 @@ def _moist_divergent_state(dycore, divergence=2e-5):
     (convergence below, divergence aloft, ``cos(πσ)``) drives the vertical
     displacements at which linear interpolation over-reads a convex profile.
     """
-    import jax
-    import jax.numpy as jnp
-
-    import jcm.constants as c
-
     state = dycore.initial_state(None, random_seed=0)
     grid = dycore.coords.horizontal
     sig_half = (np.asarray(dycore._a_half) / c.p0
@@ -429,10 +383,6 @@ def _moist_divergent_state(dycore, divergence=2e-5):
 
 def _global_water(dycore, state):
     """Global-mean column water vapour [kg/m²] of a hybrid dycore state."""
-    import jax.numpy as jnp
-
-    import jcm.constants as c
-
     grid = dycore.coords.horizontal
     w = jnp.asarray(grid.quadrature_weights)
     q = state.tracers["specific_humidity"]
@@ -484,12 +434,6 @@ class HumidityMassConservationTest(unittest.TestCase):
 
     @classmethod
     def _budget_residual(cls, dycore):
-        import jax
-        import jax.numpy as jnp
-
-        import jcm.constants as c
-        from jcm.physics_interface import PhysicsTendency
-
         state = _moist_divergent_state(dycore)
         grid_state = dycore.to_physics_state(state)
         shape = grid_state.temperature.shape
@@ -542,15 +486,11 @@ class HumidityMassFixerTest(unittest.TestCase):
     """``_fix_humidity_mass`` restores ``∫ q·dp`` exactly, and only under SL."""
 
     def setUp(self):
-        import jax
-
         prior = jax.config.read("jax_enable_x64")
         jax.config.update("jax_enable_x64", True)
         self.addCleanup(jax.config.update, "jax_enable_x64", prior)
 
     def _mass(self, dycore, state):
-        import jax.numpy as jnp
-
         grid = dycore.coords.horizontal
         w = jnp.asarray(grid.quadrature_weights)
         q = grid.to_nodal(state.tracers["specific_humidity"])
@@ -588,10 +528,6 @@ class HumidityMassFixerTest(unittest.TestCase):
         self.assertFalse(off.local_mass_fixer)
 
     def test_grids_below_four_levels_default_to_linear(self):
-        from jcm.dycore.dinosaur.dycore import DinosaurDycore
-        from jcm.physics.speedy.speedy_coords import get_speedy_coords
-        from jcm.terrain import TerrainData
-
         coords = get_speedy_coords(layers=3, spectral_truncation=21)
         dycore = DinosaurDycore(coords=coords,
                                 terrain=TerrainData.aquaplanet(coords),
@@ -606,11 +542,6 @@ class HumidityMassFixerTest(unittest.TestCase):
         # Eulerian transport is flux-consistent: its step stays exactly the
         # tendency add, the dynamics and the filters, so tracer-free SPEEDY on
         # the Eulerian core is bit-identical to a build without the fixer.
-        import jax
-        import jax.numpy as jnp
-
-        from jcm.physics_interface import PhysicsTendency
-
         dycore = _small_dycore(advection="eulerian")
         state = dycore.initial_state(None, random_seed=0)
         grid = dycore.coords.horizontal
@@ -643,12 +574,6 @@ class AfterPhysicsStateTest(unittest.TestCase):
     """
 
     def _setup(self, nodal_humidity=True):
-        import jax
-        import jax.numpy as jnp
-
-        from jcm.physics.physics_term import TracerSpec
-        from jcm.physics_interface import PhysicsTendency
-
         dycore = _small_dycore(tracer_specs={"qc": TracerSpec(name="qc")},
                                sl_options={"nodal_humidity": nodal_humidity})
         state = dycore.initial_state(None, random_seed=0)
@@ -665,10 +590,6 @@ class AfterPhysicsStateTest(unittest.TestCase):
         return dycore, state, grid, tendency
 
     def test_differs_from_the_gridpoint_add_by_the_projection_residual(self):
-        import numpy as np
-
-        from jcm.dycore.base import DynamicalCore
-
         dycore, state, grid, tendency = self._setup(nodal_humidity=False)
         after = dycore.after_physics_state(state, tendency)
         naive = DynamicalCore.after_physics_state(dycore, state, tendency)
@@ -690,10 +611,6 @@ class AfterPhysicsStateTest(unittest.TestCase):
                 self._check_equals_what_step_advances_from(nodal_humidity)
 
     def _check_equals_what_step_advances_from(self, nodal_humidity):
-        import numpy as np
-
-        from jcm.dycore.dinosaur.state_bridge import dynamics_state_to_physics_state
-
         dycore, state, grid, tendency = self._setup(nodal_humidity)
         after = dycore.after_physics_state(state, tendency)
         # With the dynamics, the filters and the mass fixer switched off,
@@ -712,8 +629,6 @@ class AfterPhysicsStateTest(unittest.TestCase):
                                       np.asarray(advanced_from.tracers["qc"]))
 
     def test_no_tendency_is_the_unfiltered_state(self):
-        import numpy as np
-
         dycore, state, grid, _ = self._setup()
         after = dycore.after_physics_state(state, None)
         np.testing.assert_array_equal(np.asarray(after.temperature),
@@ -730,12 +645,6 @@ class NodalHumidityTest(unittest.TestCase):
     """
 
     def _setup(self, nodal):
-        import jax
-        import jax.numpy as jnp
-
-        from jcm.physics.physics_term import TracerSpec
-        from jcm.physics_interface import PhysicsTendency
-
         dycore = _small_dycore(tracer_specs={"qc": TracerSpec(name="qc")},
                                sl_options={"nodal_humidity": nodal})
         grid0 = dycore.to_physics_state(dycore.initial_state(None, random_seed=0))
@@ -765,10 +674,6 @@ class NodalHumidityTest(unittest.TestCase):
         self.assertNotIn("specific_humidity", eulerian._nodal_tracers)
 
     def test_humidity_increment_is_applied_whole(self):
-        import numpy as np
-
-        from jcm.dycore.base import DynamicalCore
-
         dycore, state, tendency = self._setup(nodal=True)
         self.assertEqual(state.tracers["specific_humidity"].shape,
                          dycore.to_physics_state(state).specific_humidity.shape)
@@ -782,8 +687,6 @@ class NodalHumidityTest(unittest.TestCase):
         self.assertGreater(np.abs(residual).max(), 1e-3 * dycore.dt_seconds * 1e-4)
 
     def test_step_is_finite_and_conserves_humidity_mass(self):
-        import numpy as np
-
         dycore, state, tendency = self._setup(nodal=True)
         after = dycore._apply_physics_tendency(state, tendency)
         new = dycore.step(state, tendency)
@@ -807,10 +710,6 @@ class NodalHumidityTest(unittest.TestCase):
         with respect to the humidity and its physics increment is finite and
         is the derivative of the step, not a zeroed or NaN one.
         """
-        import jax
-
-        from jcm.testing import check_gradients
-
         dycore, state, tendency = self._setup(nodal=True)
         q0 = state.tracers["specific_humidity"]
 
@@ -832,8 +731,6 @@ def _plain_quotient_fixer(dycore, state_ref, state_new, divide=None):
     bit for bit, kept here as the reference for the forward and as the control
     for the derivative tests below.
     """
-    import jax.numpy as jnp
-
     if divide is None:
         divide = jnp.divide
     w = jnp.asarray(dycore.coords.horizontal.quadrature_weights)
@@ -876,11 +773,6 @@ class TracerMassFixerGradientTest(unittest.TestCase):
     TOTALS = (0.0, 1e-40, 1e-30, 3e-21, 1e-10, 1.0)
 
     def _setup(self):
-        import jax.numpy as jnp
-        import numpy as np
-
-        from jcm.physics.physics_term import TracerSpec
-
         dycore = _small_dycore(tracer_specs={"dust": TracerSpec(name="dust")})
         state = dycore.initial_state(None, random_seed=0)
         dtype = state.tracers["dust"].dtype
@@ -900,13 +792,9 @@ class TracerMassFixerGradientTest(unittest.TestCase):
     @staticmethod
     def _unguarded_total(dtype):
         """Return a total above the fixer's guard whose square underflows ``dtype``."""
-        import numpy as np
-
         return 1e-2 * float(np.sqrt(np.finfo(dtype).tiny))
 
     def test_forward_is_the_plain_quotient_bit_for_bit(self):
-        import itertools
-
         dycore, _, with_total, _ = self._setup()
         for t_ref, t_new in itertools.product(self.TOTALS, self.TOTALS):
             ref, new = with_total(t_ref), with_total(t_new)
@@ -919,8 +807,6 @@ class TracerMassFixerGradientTest(unittest.TestCase):
 
     def _pullback(self, dycore, fixer, state_ref, state_new, ct):
         """Reverse-mode pullback of ``fixer`` w.r.t. the new tracer field, jitted."""
-        import jax
-
         def f(q_new):
             return fixer(
                 state_ref,
@@ -935,8 +821,6 @@ class TracerMassFixerGradientTest(unittest.TestCase):
         return np.asarray(run(q_new, ct * np.ones_like(q_new)))
 
     def test_zero_and_unit_cotangents_are_finite_in_the_unguarded_band(self):
-        from jcm.testing import inverse_square_quotient
-
         dycore, _, with_total, dtype = self._setup()
         total = self._unguarded_total(dtype)
         # Before and after transport differ by a rounding-sized fraction, so
@@ -965,15 +849,6 @@ class TracerMassFixerGradientTest(unittest.TestCase):
         # tracer receives a rounding-sized physics tendency, the fixer sees
         # totals in the unguarded band, and a zero cotangent must stay zero
         # through the whole dynamical state.
-        from unittest import mock
-
-        import jax
-        import jax.numpy as jnp
-
-        from jcm.dycore.dinosaur import dycore as dycore_mod
-        from jcm.physics_interface import PhysicsTendency
-        from jcm.testing import inverse_square_quotient
-
         dycore, state, with_total, dtype = self._setup()
         state = with_total(0.0)
         measure = float(np.sum(
@@ -1009,9 +884,6 @@ class TracerMassFixerGradientTest(unittest.TestCase):
         # Ordinary field, ratio inside the clip: compare the directional
         # derivative of <ct, fixed(q)> with a central difference of a float64
         # numpy re-implementation (no dependence on the code under test).
-        import jax
-        import jax.numpy as jnp
-
         dycore, state, _, dtype = self._setup()
         w = np.asarray(dycore.coords.horizontal.quadrature_weights, np.float64)
         dp = np.asarray(dycore._nodal_tracer_column_weight(state), np.float64)
@@ -1066,15 +938,6 @@ class TrajectoryToXarrayTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from jcm.model import Model
-        from jcm.physics.held_suarez.held_suarez_physics import (
-            held_suarez_physics,
-        )
-        from jcm.physics.held_suarez.utils import get_held_suarez_coords
-        from jcm.physics.speedy.speedy_coords import get_speedy_coords
-        from jcm.physics.speedy.speedy_terms import speedy_physics
-        from jcm.terrain import TerrainData
-
         # The reproduction from the issue, verbatim.
         c = get_held_suarez_coords()
         cls.held_suarez = Model(coords=c, terrain=TerrainData.from_coords(c),
@@ -1146,8 +1009,6 @@ class TrajectoryToXarrayTest(unittest.TestCase):
         ``jax.device_get`` turns every leaf into a numpy array; the file a
         trajectory writes must not depend on where its arrays live.
         """
-        import jax
-
         for model, predictions in ((self.held_suarez, self.held_suarez_run),
                                    (self.speedy, self.speedy_run)):
             on_host = jax.device_get(predictions).with_context(model)
@@ -1174,8 +1035,6 @@ class TrajectoryToXarrayTest(unittest.TestCase):
                 self.held_suarez_run._predictions, np.array([0.125, 0.25]))
 
     def test_explicit_physics_wins_and_none_bound_is_refused(self):
-        from jcm.dycore.dinosaur.dycore import DinosaurDycore
-
         predictions = self.held_suarez_run
         # Passing the physics explicitly is the same conversion.
         ds = self.held_suarez.dycore.to_xarray(
