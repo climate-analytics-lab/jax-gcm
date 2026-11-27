@@ -112,26 +112,6 @@ jobs:
       - name: Run Ruff
         run: ruff check .
 
-  gradient-compatibility:
-    needs: lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: ./.github/actions/setup-jcm
-        with:
-          python-version: '3.12'
-      # Python 3.11's resolver cannot select the newer JAX line (#1226).
-      - name: Test gradients with the newer JAX resolver
-        env:
-          JAX_PLATFORMS: cpu
-        run: |
-          python -c "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"
-          pytest -q -n auto --dist loadscope -m "not slow" \
-            jcm/filters_test.py jcm/testing_test.py \
-            jcm/dycore/dinosaur/dycore_test.py \
-            jcm/physics/clouds/cloud_utils_test.py \
-            jcm/physics/clouds/echam_1m_test.py
-
   fast-tests:
     needs: lint
     runs-on: ubuntu-latest

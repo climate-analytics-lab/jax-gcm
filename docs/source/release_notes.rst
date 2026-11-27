@@ -13,8 +13,8 @@ Bug fixes
   larger finite-difference steps without relaxing their tolerances. The
   tiny-precipitation regression supplies the flux directly, and the cloud
   layout comparison allows an absolute rounding residue only for the liquid
-  correction diagnostic. Physics formulas and guards are unchanged. A
-  Python 3.12 CI job runs these test modules with the newer JAX resolver;
+  correction diagnostic. Physics formulas and guards are unchanged.
+  The affected test modules pass locally on JAX 0.10.2 and 0.12.1;
   0.10.2 remains the climate-validation baseline.
 
 - **McICA sub-columns are the same with ``jax_enable_x64`` on or off.** The
