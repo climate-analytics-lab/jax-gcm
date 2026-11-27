@@ -825,7 +825,7 @@ class NodalHumidityTest(unittest.TestCase):
         check_gradients(stored_q, (q0, tendency.specific_humidity), rtol=0.05)
 
 
-def _plain_quotient_fixer(dycore, state_ref, state_new):
+def _plain_quotient_fixer(dycore, state_ref, state_new, divide=None):
     """Apply the mass fixer written with a bare ``target / current``.
 
     The formulation ``DinosaurDycore._fix_nodal_tracer_mass`` must reproduce
@@ -834,6 +834,8 @@ def _plain_quotient_fixer(dycore, state_ref, state_new):
     """
     import jax.numpy as jnp
 
+    if divide is None:
+        divide = jnp.divide
     w = jnp.asarray(dycore.coords.horizontal.quadrature_weights)
     dp_ref = dycore._nodal_tracer_column_weight(state_ref)
     dp_new = dycore._nodal_tracer_column_weight(state_new)
@@ -848,7 +850,7 @@ def _plain_quotient_fixer(dycore, state_ref, state_new):
         safe_current = jnp.where(ok, current, 1.0)
         safe_target = jnp.where(ok, target, 1.0)
         scale = jnp.where(
-            ok, jnp.clip(safe_target / safe_current, 2.0 / 3.0, 1.5), 1.0)
+            ok, jnp.clip(divide(safe_target, safe_current), 2.0 / 3.0, 1.5), 1.0)
         tracers[name] = q_new * scale
     return state_new.replace(tracers=tracers)
 
@@ -933,6 +935,8 @@ class TracerMassFixerGradientTest(unittest.TestCase):
         return np.asarray(run(q_new, ct * np.ones_like(q_new)))
 
     def test_zero_and_unit_cotangents_are_finite_in_the_unguarded_band(self):
+        from jcm.testing import inverse_square_quotient
+
         dycore, _, with_total, dtype = self._setup()
         total = self._unguarded_total(dtype)
         # Before and after transport differ by a rounding-sized fraction, so
@@ -942,10 +946,10 @@ class TracerMassFixerGradientTest(unittest.TestCase):
             grad = self._pullback(
                 dycore, dycore._fix_nodal_tracer_mass, ref, new, ct)
             self.assertTrue(np.all(np.isfinite(grad)), ct)
-            # The control: the plain quotient is not finite at this point,
-            # so the assertion above fails if the helper is removed.
+            # Newer JAX division is safe; pin the historical failure rule.
             plain = self._pullback(
-                dycore, lambda a, b: _plain_quotient_fixer(dycore, a, b),
+                dycore, lambda a, b: _plain_quotient_fixer(
+                    dycore, a, b, inverse_square_quotient),
                 ref, new, ct)
             self.assertFalse(np.all(np.isfinite(plain)), ct)
 
@@ -968,6 +972,7 @@ class TracerMassFixerGradientTest(unittest.TestCase):
 
         from jcm.dycore.dinosaur import dycore as dycore_mod
         from jcm.physics_interface import PhysicsTendency
+        from jcm.testing import inverse_square_quotient
 
         dycore, state, with_total, dtype = self._setup()
         state = with_total(0.0)
@@ -994,10 +999,9 @@ class TracerMassFixerGradientTest(unittest.TestCase):
 
         leaves = [np.asarray(x) for x in zero_pullback()]
         self.assertTrue(all(np.all(np.isfinite(x)) for x in leaves))
-        # The control: with the plain quotient in the fixer the same pullback
-        # is not finite, so this test fails if the helper is taken out.
+        # Pin the unsafe derivative without depending on JAX's division rule.
         with mock.patch.object(dycore_mod, "stable_quotient",
-                               lambda numerator, denominator: numerator / denominator):
+                               inverse_square_quotient):
             plain = [np.asarray(x) for x in zero_pullback()]
         self.assertFalse(all(np.all(np.isfinite(x)) for x in plain))
 

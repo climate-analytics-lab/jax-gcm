@@ -7,6 +7,16 @@ dev (unreleased)
 Bug fixes
 ^^^^^^^^^
 
+- **JAX 0.12.1 is no longer excluded** (#1226). Gradient failure controls
+  explicitly use the historical inverse-square division rule, so improved
+  JAX derivatives cannot invalidate them. Smooth-function tests include
+  larger finite-difference steps without relaxing their tolerances. The
+  tiny-precipitation regression supplies the flux directly, and the cloud
+  layout comparison allows an absolute rounding residue only for the liquid
+  correction diagnostic. Physics formulas and guards are unchanged. A
+  Python 3.12 CI job runs these test modules with the newer JAX resolver;
+  0.10.2 remains the climate-validation baseline.
+
 - **McICA sub-columns are the same with ``jax_enable_x64`` on or off.** The
   rank draws are float32 in every precision mode. They were the session's
   default float, so a run with x64 enabled (importing ``mam4_jax`` enables it)
@@ -1126,7 +1136,7 @@ Dependencies
 - **The jax upper bound is gone.** ``requirements.txt`` required
   ``jax<0.11`` because flax 0.12.9 imports a ``jax.experimental.hijax``
   symbol that no jax ≥ 0.11 provides (#853); flax 0.12.10 fixed that, so
-  the bound is now ``jax>=0.10`` (less 0.12.1, next entry) with
+  the bound for this release is ``jax>=0.10`` (less 0.12.1, next entry) with
   ``flax!=0.12.9``, the one pair that cannot import. jcm passes the fast and
   slow suites on jax 0.12.0.1 with flax 0.12.12, and ``t63-echam-rrtmgp``
   runs 20 days clean on an A100, diverging from jax 0.10.2 no faster than a
@@ -1136,13 +1146,14 @@ Dependencies
   Python 3.11, cannot resolve anything newer either way, and the GPU Docker
   image installs the 0.10 line.
 
-- **jax 0.12.1 is excluded, as a stopgap** (``jax>=0.10,!=0.12.1.*``, which
+- **jax 0.12.1 was excluded, as a stopgap** (``jax>=0.10,!=0.12.1.*``, which
   also excludes its ``0.12.1.x`` hotfixes). It fails nine fast tests that
   0.12.0 and 0.10.2 pass. Five are controls
   asserting that an unguarded division's reverse pass overflows in float32,
   which 0.12.1's rewritten division derivative no longer does; the guarded
   helpers they check still pass. The other four are float32 tolerances not
-  yet diagnosed. The exclusion stays until #1226 resolves them.
+  yet diagnosed at release time. The exclusion is lifted in the dev entry
+  above after resolving #1226.
 
 - ``requirements.txt`` carries one reason-and-pointer line per pin; the
   history behind each pin lives in these notes and the design docs.

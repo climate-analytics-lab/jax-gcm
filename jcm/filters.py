@@ -33,8 +33,8 @@ def stable_quotient(numerator, denominator):
 
     The value is the plain quotient, bit for bit. The derivative is the true
     derivative of that quotient, not a surrogate:
-    ``d(n/d) = (dn - (n/d)·dd) / d``. Reverse-mode differentiation of a bare
-    ``n / d`` forms ``-n · d**-2`` instead, and in float32 ``d**-2`` is
+    ``d(n/d) = (dn - (n/d)·dd) / d``. JAX versions before 0.12.1 differentiate
+    a bare ``n / d`` using ``-n · d**-2``, and in float32 ``d**-2`` is
     ``inf`` for every ``d`` below ``2**-63 ≈ 1.08e-19`` (the square underflows)
     although ``n / d`` itself is representable; a zero cotangent multiplying
     that ``inf`` is ``nan``. This form needs only ``1/d``, which is finite for
