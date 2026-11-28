@@ -299,13 +299,35 @@ than the per-column blocks would be.
 
 On TPU `"auto"` cuts the columns into 128-aligned, checkpointed blocks
 (`rrtmgp.py::tpu_column_steps`; two of 9216 at T63), which bound the
-gas-optics scratch to one block's, and the library caps the g-points solved per
-spectral-loop iteration to what fits the chip's vector memory
-(`two_stream.TPU_CHUNK_VMEM_BYTES`: 16 for such a block), so jcm passes
-`gpt_chunk` through unchanged. The lowered TPU program is asserted free of
+gas-optics scratch to one block's. When the configured `gpt_chunk` is the
+A100 default of 64, jcm uses `DEFAULT_TPU_GPT_CHUNK = 8` on TPU; other chunk
+values pass through unchanged. The platform comes from the model's device
+mesh when configured, otherwise from `jax.default_backend()`. CPU and GPU
+keep the default of 64.
+
+The TPU default is a speed choice, separate from the library's vector-memory
+cap (`two_stream.TPU_CHUNK_VMEM_BYTES`, 32 MiB, which allows 16 for a
+9216-column T63L47 block). Eight g-points use half the `(nz, chunk, nc)`
+scratch memory of 16 and divide both supported LW/SW table sizes (128/112
+and 256/224) without tail padding. The library still caps larger configured
+chunks to the available vector memory.
+
+The measurements in [#1218](https://github.com/climate-analytics-lab/jax-gcm/issues/1218)
+use a TPU v5e, JAX 0.11.0 and jax-rrtmgp commit `805f53c` (included in
+releases after 0.7.0), with LW, SW, clear-sky fluxes, McICA and aerosol:
+
+| columns per block | 8 g-points | 16 g-points |
+|---|---|---|
+| 9216 | 109.3 ms | 130.9 ms |
+| 4608 | 51.6 ms | 59.2 ms |
+
+A T63L47 radiation step with two 9216-column blocks takes 222.9 ms at 8,
+against 265.9 ms at 16, about 16% less time. These are radiation timings;
+an end-to-end simulated-day comparison remains to be measured.
+
+The lowered TPU program is asserted free of
 gathers, scatters and optimization barriers
-(`TestRRTMGPColumnMinor::test_tpu_program_has_no_gather_or_scatter`). On a TPU
-v5e chip the T63L47 radiation call takes 269 ms.
+(`TestRRTMGPColumnMinor::test_tpu_program_has_no_gather_or_scatter`).
 
 On an A100 the column-minor call is about 10 % faster than the per-column vmap
 on the same library and compiles a quarter faster. Measured on one held

@@ -130,7 +130,8 @@ standalone harness: 2.78 -> 2.13 s per call at 24 devices with B = 8, with the
 same flux agreement against the single vmap at `gpt_chunk=64` as above. In the
 whole model the difference is not measurable (table above), so the shipped
 presets keep `gpt_chunk=64`, the A100 optimum ({doc}`rrtmgp_gpu_performance`),
-on every backend. The override is `physics.terms.rrtmgp_radiation.gpt_chunk`
+on CPU and GPU. TPU substitutes its measured default of 8. The override is
+`physics.terms.rrtmgp_radiation.gpt_chunk`
 (`physics.radiation_gpt_chunk` on the factory-built presets).
 
 ## What was not measured

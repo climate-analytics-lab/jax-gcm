@@ -2695,7 +2695,7 @@ class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
         with pytest.raises(ValueError, match="use_scan"):
             RRTMGPRadiation(use_scan="yes")
 
-    def _library_options_seen(self, monkeypatch, **options):
+    def _library_options_seen(self, monkeypatch, *, column_platform=None, **options):
         from jcm.physics.radiation import rrtmgp as rrtmgp_module
 
         instance = rrtmgp_module._ensure_rrtmgp()
@@ -2718,7 +2718,9 @@ class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
         monkeypatch.setattr(instance, "compute_heating_rate_zc", spy_zc)
         term, state, diagnostics, forcing = self._term_and_inputs()
         diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
-        self._twin(term, **options)(state, diagnostics, forcing, None)
+        twin = self._twin(term, **options)
+        twin._column_platform = column_platform
+        twin(state, diagnostics, forcing, None)
         return set(seen)
 
     def test_options_reach_the_library_call(self, monkeypatch):
@@ -2727,14 +2729,19 @@ class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
             use_scan=False)
         assert seen == {("per_gpt", 2, False)}
 
-    def test_defaults_reach_the_library_call(self, monkeypatch):
-        assert self._library_options_seen(monkeypatch) == {("all_gpts", 64, True)}
+    @pytest.mark.parametrize("backend,column_platform,expected", [
+        ("cpu", None, 64), ("gpu", None, 64), ("tpu", None, 8),
+        ("cpu", "tpu", 8), ("tpu", "gpu", 64),
+    ])
+    def test_defaults_reach_the_library_call(
+            self, monkeypatch, backend, column_platform, expected):
+        monkeypatch.setattr(jax, "default_backend", lambda: backend)
+        assert self._library_options_seen(
+            monkeypatch, column_platform=column_platform) == {
+                ("all_gpts", expected, True)}
 
-    def test_tpu_backend_passes_gpt_chunk_through(self, monkeypatch):
-        # The TPU vector-memory cap on the chunk is the library's
-        # (``two_stream._column_minor_chunk_plan``), not a second jcm default.
+    def test_tpu_backend_preserves_explicit_gpt_chunk(self, monkeypatch):
         monkeypatch.setattr(jax, "default_backend", lambda: "tpu")
-        assert self._library_options_seen(monkeypatch) == {("all_gpts", 64, True)}
         assert self._library_options_seen(monkeypatch, gpt_chunk=16) == {
             ("all_gpts", 16, True)
         }
@@ -2754,6 +2761,7 @@ class TestRRTMGPLibraryPerformanceOptions(_RRTMGPTermFixture):
         others = (
             dict(gas_optics_mode="all_gpts", gpt_chunk=1, use_scan=False),
             dict(gas_optics_mode="all_gpts", gpt_chunk=4, use_scan=False),
+            dict(gpt_chunk=8),  # the TPU default
             dict(),  # the defaults
         )
         _, ref_diag = self._twin(term, **reference_options)(
