@@ -249,6 +249,14 @@ logistic surrogate (:doc:`science/convection`).
      - Interpolate complete neighboring plumes at the parcel saturation
        crossing for derivatives. Static; forward values stay exact
      - True
+   * - ``lfs_interpolation``
+     - Interpolate neighboring downdraft starts through closure and the final
+       ledger for derivatives. Static; forward values stay exact
+     - True
+   * - ``cape_buoyancy_width``
+     - LFC/EL transition width (m/s²) in the separate CAPE/CIN diagnostic.
+       Static; derivative only; zero selects the exact window
+     - 0.01
    * - ``cu_cminbuoy``
      - Floor on the cloud-base sub-grid buoyancy excess ``zlift`` (K)
      - 0.2

@@ -12,6 +12,11 @@ Bug fixes
   parcel's saturation crossing. This includes each candidate's moisture
   budget, closure and heat/water ledger. The static option
   ``cloud_base_interpolation=False`` restores the fixed-index derivative.
+  Downdraft-start interpolation likewise carries both candidate descents
+  through their closures and final ledgers; ``lfs_interpolation=False``
+  restores the fixed-start derivative. The separate CAPE/CIN diagnostic
+  interpolates neighboring lifts and uses a smooth first-buoyant-layer
+  LFC/EL window (``cape_buoyancy_width=0.01`` m/s², zero for the exact window).
   ``deep_convergence_width`` now defaults to zero, selecting the reference
   derivative of the type decision. The previous ``2e-7`` kg/m²/s logistic
   amplified the lagged humidity difference into large artificial gradients.

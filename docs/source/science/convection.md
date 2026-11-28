@@ -130,6 +130,15 @@ derivatives only. Both candidates run their own budgets and closures; their
 heat, water and flux outputs use the same interpolation weight. This removes
 the base-level jump from that interpolant while leaving other discrete
 decisions in place. Set it to ``False`` for a fixed-index derivative.
+The default ``lfs_interpolation=True`` similarly interpolates neighboring
+downdraft starts at zero mixture buoyancy. Both candidates must pass the
+reference cloud/rain eligibility tests, and each feeds its own closure,
+final ascent and flux ledger. The complete outputs share one weight;
+setting the option to ``False`` restores the fixed-start derivative.
+The separate surface-parcel CAPE/CIN diagnostic uses a smooth first-buoyant-
+layer window with ``cape_buoyancy_width=0.01`` m/s², together with the
+cloud-base interpolation. Zero width restores the exact LFC/EL window.
+These choices change derivatives only; no forward cloud or rain is added.
 A positive width selects a logistic derivative for the other switches. Defaults are
 ``ascent_buoyancy_width`` (0.01 K), ``ascent_mass_flux_width`` (2e-3 of the
 cloud-base flux), ``ascent_condensate_width`` (1e-8 kg/kg, a rescaled

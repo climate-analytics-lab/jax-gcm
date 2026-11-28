@@ -47,6 +47,7 @@ _INPUTS = ("temperature", "humidity", "pressure", "layer_thickness", "rho",
            "layer_mass", "humidity_m1", "pressure_half")
 _ZERO_WIDTHS = {name: 0.0 for name in SURROGATE_WIDTH_FIELDS}
 _ZERO_WIDTHS["cloud_base_interpolation"] = False
+_ZERO_WIDTHS["lfs_interpolation"] = False
 
 
 @functools.lru_cache(maxsize=1)
@@ -125,7 +126,9 @@ def _deep_precip(params, supply=2e-5, convergence=1.5):
 def test_default_type_gradient_matches_lagged_humidity_response():
     """The deep/shallow choice adds no artificial slope within a regime."""
     with jax.enable_x64(True):
-        params = ConvectionParameters.default()
+        # Isolate the type choice from the separate level interpolations.
+        params = ConvectionParameters.default(
+            cloud_base_interpolation=False, lfs_interpolation=False)
         t, q, p, dz, rho = _deep_column()
         mass = jnp.diff(reconstruct_pressure_half(p)) / c.grav
         dt, evaporation, distance = 900.0, 3e-5, 1e-7
@@ -285,7 +288,8 @@ class TestAcrossTheOnset:
                     for k in _INPUTS]
             # Isolate the ascent gates; base interpolation has its own tests.
             heat, dheat, ktype, precip = self._heating_jvp(
-                ConvectionParameters.default(cloud_base_interpolation=False))(*args)
+                ConvectionParameters.default(cloud_base_interpolation=False,
+                                             lfs_interpolation=False))(*args)
             heat_r, dheat_r, ktype_r, precip_r = self._heating_jvp(
                 ConvectionParameters.default(**_ZERO_WIDTHS))(*args)
         heat, dheat = np.asarray(heat), np.asarray(dheat)

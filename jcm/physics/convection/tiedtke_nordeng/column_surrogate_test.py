@@ -29,7 +29,7 @@ def _inputs():
         qte_dynamics=zeros.at[10:16].set(3e-5 / jnp.sum(mass[10:16]))), mass
 
 
-@pytest.mark.parametrize("choice", ["cloud_base", "deep_shallow"])
+@pytest.mark.parametrize("choice", ["cloud_base", "deep_shallow", "lfs"])
 def test_column_derivative_follows_complete_branch_interpolation(choice):
     with jax.enable_x64(True):
         inputs, mass = _inputs()
@@ -37,7 +37,8 @@ def test_column_derivative_follows_complete_branch_interpolation(choice):
         if choice == "deep_shallow":
             widths["deep_convergence_width"] = 2e-7
         config = ConvectionParameters.default(
-            cloud_base_interpolation=choice == "cloud_base", **widths)
+            cloud_base_interpolation=choice == "cloud_base",
+            lfs_interpolation=choice == "lfs", **widths)
         q = inputs["humidity"]
         previous = q - inputs["dt"] * jnp.zeros_like(q).at[10:16].set(
             (0.1 * inputs["moisture_supply"] + 1e-7) / jnp.sum(mass[10:16]))
@@ -59,8 +60,8 @@ def test_column_derivative_follows_complete_branch_interpolation(choice):
         smooth = jax.jit(lambda x: output(x, True))
         forward = jax.jit(jax.jacfwd(output))
         reverse = jax.jit(jax.jacrev(output))
-        x = jnp.asarray([0.93 if choice == "cloud_base" else 1.0, 1.0])
-        step = 1e-7 if choice == "cloud_base" else 1e-9
+        x = jnp.asarray([{"cloud_base": .93, "lfs": .85, "deep_shallow": 1.}[choice], 1.0])
+        step = 1e-9 if choice == "deep_shallow" else 1e-7
         fd = jnp.stack([
             (smooth(x.at[i].add(step)) - smooth(x.at[i].add(-step))) / (2 * step)
             for i in range(2)], axis=1)
@@ -94,6 +95,12 @@ def test_column_derivative_follows_complete_branch_interpolation(choice):
                 if jnp.issubdtype(value.dtype, jnp.floating):
                     np.testing.assert_array_less(
                         np.abs(value - a), np.abs(b - a) + 1e-10)
+        elif choice == "lfs":
+            edge = .8553732143754313
+            left = jnp.asarray([edge-1e-7, 1.])
+            right = jnp.asarray([edge+1e-7, 1.])
+            assert abs(float(exact(right)[0] - exact(left)[0])) > 3e-5
+            assert abs(float(smooth(right)[0] - smooth(left)[0])) < 1e-8
 
 
 def test_batched_float32_gradients_and_vertical_ordering():
@@ -119,3 +126,34 @@ def test_batched_float32_gradients_and_vertical_ordering():
     np.testing.assert_allclose(flipped_tangent, tangent, rtol=2e-5, atol=1e-7)
     np.testing.assert_array_equal(value[0], 0.)
     np.testing.assert_array_equal(tangent[0], 0.)
+
+
+def test_lfs_candidates_stay_inside_the_eligible_cloud():
+    from .downdraft import find_lfs, wetbulb_temperature
+    from .updraft import column_environment
+
+    inputs, _ = _inputs()
+    t, q, p = (inputs[k] for k in ("temperature", "humidity", "pressure"))
+    env = column_environment(t, q, p)
+    twb, qwb = wetbulb_temperature(env.tenh, env.qenh, env.paph[:-1])
+    up_q = env.qenh
+    mixed_factor = 1.0 + c.vtmpc1 * .5 * (up_q + qwb)
+    env_tv = env.tenh * (1.0 + c.vtmpc1 * env.qenh)
+
+    def candidates(start, rain=1e-4):
+        buoy = jnp.full_like(t, .1).at[start].set(-.1)
+        up_t = 2.0 * (env_tv + buoy) / mixed_factor - twb
+        return find_lfs(
+            t, q, p, up_t, up_q, jnp.full_like(t, .05), jnp.asarray(rain),
+            10, 2, ConvectionParameters.default(), env=env, _interpolate=True)
+
+    levels, weight = candidates(5)
+    np.testing.assert_array_equal(levels, [5, 4])
+    np.testing.assert_allclose(weight, .5, atol=1e-4)
+    # A cloud's top is excluded, even when the next interface is the LFS.
+    levels, weight = candidates(3)
+    np.testing.assert_array_equal(levels, [3, 3])
+    assert float(weight) == 0.
+    levels, weight = candidates(5, rain=0.)
+    np.testing.assert_array_equal(levels, [2, 2])
+    assert float(weight) == 0.

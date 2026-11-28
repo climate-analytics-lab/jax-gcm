@@ -32,6 +32,7 @@ SURROGATE_WIDTH_FIELDS = (
     "ascent_mass_flux_width", "precip_onset_width",
     "deep_convergence_width", "sub_cloud_supply_width",
     "cloud_base_excess_width",
+    "cape_buoyancy_width",
 )
 
 
@@ -50,7 +51,9 @@ class ConvectionParameters:
     the reference derivative; this is the default for the deep/shallow
     choice. ``cloud_base_interpolation`` is a separate static switch: by
     default, derivatives interpolate complete neighboring cloud-base plumes
-    at the dry parcel's saturation crossing. ECHAM has no CAPE trigger, and neither does
+    at the dry parcel's saturation crossing. ``lfs_interpolation`` does the
+    same for the downdraft start and the closure it feeds. The diagnostic
+    LFC/EL window uses ``cape_buoyancy_width``. ECHAM has no CAPE trigger, and neither does
     this scheme: a surface plume convects when ``cubase`` finds a buoyant
     cloud base, the cloud-base moisture budget passes ``cumastr``'s ``zlo1``
     test and the ascents leave ``kctop`` above ``klevm1`` (a cloud base above
@@ -188,6 +191,11 @@ class ConvectionParameters:
     # Interpolate complete neighboring plumes at the parcel's saturation level.
     cloud_base_interpolation: bool = struct.field(
         pytree_node=False, default=True)
+    # Blend complete closure/ledger calculations across a downdraft start level.
+    lfs_interpolation: bool = struct.field(pytree_node=False, default=True)
+    # Diagnostic LFC/EL transition, about 0.3 K of virtual-T excess at 300 K.
+    cape_buoyancy_width: float = struct.field(
+        pytree_node=False, default=0.01)  # m/s²; diagnostic only
     # The ``zlo1`` gate of the cloud-base moisture budget
     # (mo_cumastr.f90:563-566): ``zdqpbl > 0`` per unit of ``g`` [kg/m²/s],
     # and ``zqumqe > zdqmin`` as a fraction of ``zdqmin`` [-].
@@ -235,13 +243,15 @@ class ConvectionParameters:
                  lmfdudv=True, cu_lmfmid=True,
                  conservative_downdraft_uptake=True,
                  cloud_base_interpolation=True,
+                 lfs_interpolation=True,
                  **widths) -> 'ConvectionParameters':
         """Return default convection parameters.
 
         The numeric arguments become array leaves. ``widths`` may set any of
         the static surrogate widths (:data:`SURROGATE_WIDTH_FIELDS`), which
-        stay Python floats. ``cloud_base_interpolation`` selects the
-        neighboring-plume derivative and stays a Python bool.
+        stay Python floats. ``cloud_base_interpolation`` and
+        ``lfs_interpolation`` select neighboring-level derivatives and stay
+        Python bools.
         """
         unknown = sorted(set(widths) - set(SURROGATE_WIDTH_FIELDS))
         if unknown:
@@ -277,6 +287,7 @@ class ConvectionParameters:
             cu_lmfmid=jnp.array(cu_lmfmid),
             conservative_downdraft_uptake=bool(conservative_downdraft_uptake),
             cloud_base_interpolation=bool(cloud_base_interpolation),
+            lfs_interpolation=bool(lfs_interpolation),
             **{k: float(v) for k, v in widths.items()},
         )
         params.validate()

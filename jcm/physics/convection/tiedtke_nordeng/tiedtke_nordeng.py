@@ -457,12 +457,13 @@ def midlevel_mass_flux(omega_at_base: jnp.ndarray,
     return jnp.clip(-omega_at_base / c.grav, config.cmfcmin, config.cmfcmax)
 
 
-def calculate_cape_cin(temperature: jnp.ndarray,
+def _calculate_cape_cin(temperature: jnp.ndarray,
                       humidity: jnp.ndarray,
                       pressure: jnp.ndarray,
                       layer_thickness: jnp.ndarray,
                       cloud_base: int,
-                      config: ConvectionParameters) -> Tuple[jnp.ndarray, jnp.ndarray]:
+                      config: ConvectionParameters,
+                      smooth_window=False) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Calculate CAPE and CIN for convective instability.
 
     Lifts a surface parcel: dry-adiabatic up to cloud base, moist-
@@ -587,6 +588,11 @@ def calculate_cape_cin(temperature: jnp.ndarray,
     parcel_tv_sf = parcel_temp_sf * (1.0 + 0.61 * parcel_q_sf)
     buoyancy_sf = c.grav * (parcel_tv_sf - env_tv_sf) / env_tv_sf
 
+    if smooth_window and config.cape_buoyancy_width > 0:
+        from .switches import cape_cin_window
+        return cape_cin_window(
+            buoyancy_sf, dz_sf, is_above_cb, config.cape_buoyancy_width)
+
     # LFC: lowest-altitude (smallest surface-first index) at-or-above cb
     #      where buoyancy first becomes positive.
     pos_above_cb = (buoyancy_sf > 0) & is_above_cb
@@ -619,6 +625,48 @@ def calculate_cape_cin(temperature: jnp.ndarray,
     cin = jnp.where(has_lfc, jnp.sum(cin_contrib), 0.0)
 
     return cape, cin
+
+
+def _cape_cin_surrogate(t, q, p, dz, base, config):
+    """TOA-first diagnostic with interpolated bases and a soft LFC/EL window."""
+    from .updraft import column_environment
+
+    def at_base(index):
+        return jnp.stack(_calculate_cape_cin(
+            t, q, p, dz, index, config, smooth_window=True))
+
+    if not config.cloud_base_interpolation:
+        return tuple(at_base(base))
+    env = column_environment(t, q, p)
+    lower, weight = _cloud_base_bracket(env, base, jnp.asarray(True))
+    values = lax.map(at_base, jnp.stack([base, lower]))
+    return tuple((1.0 - weight) * values[0] + weight * values[1])
+
+
+def calculate_cape_cin(temperature: jnp.ndarray, humidity: jnp.ndarray,
+                      pressure: jnp.ndarray, layer_thickness: jnp.ndarray,
+                      cloud_base: int, config: ConvectionParameters
+                      ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Surface-parcel CAPE and CIN [J/kg], with reference-exact values.
+
+    See :func:`_calculate_cape_cin` for the parcel lift and integration.
+    Both vertical orderings are supported. Derivatives interpolate adjacent
+    cloud-base lifts when ``cloud_base_interpolation`` is enabled, and use a
+    soft first-buoyant-layer window of width ``cape_buoyancy_width`` [m/s²].
+    A zero width and disabled interpolation select reference derivatives.
+    This diagnostic is not the running scheme's in-plume CAPE closure.
+    """
+    from jcm.physics.surrogate_gradient import with_surrogate_gradient
+
+    surface_first = pressure[0] >= pressure[-1]
+    toa = lambda a: jnp.where(surface_first, a[::-1], a)
+    base = jnp.where(surface_first, temperature.size - 1 - cloud_base, cloud_base)
+    args = (toa(temperature), toa(humidity), toa(pressure),
+            toa(layer_thickness), base, config)
+
+    if config.cloud_base_interpolation or config.cape_buoyancy_width > 0:
+        return with_surrogate_gradient(_calculate_cape_cin, _cape_cin_surrogate)(*args)
+    return _calculate_cape_cin(*args)
 
 
 def shallow_reclosure_flux(zmfub, zqumqe, zdqmin, zdqpbl, mfu_cfl_max, config):
@@ -675,6 +723,7 @@ def _tiedtke_convection_toa_first(
     pressure_half: jnp.ndarray | None = None,
     _cloud_base=None,
     _deep_weight=None,
+    _interpolate_lfs=False,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run Tiedtke-Nordeng convection scheme with fixed qc/qi transport
 
@@ -1034,253 +1083,267 @@ def _tiedtke_convection_toa_first(
         precip_rate = jnp.where(
             ldcum_first, jnp.sum(updraft_state.pdmfup), 0.0)
 
-        # Downdraft (cudlfs + cuddraf, on half levels), searched inside the
-        # realized cloud of a convective column.
-        downdraft_state = calculate_downdraft(
-            temperature, humidity, pressure, layer_thickness, rho,
-            updraft_state, precip_rate, cloud_base, actual_ktop, config,
-            u_wind=u_wind, v_wind=v_wind, cp_moist=cp_moist, env=env,
-            mass_flux_base=mass_flux_base,
-        )
-
-        # --- Nordeng CAPE closure (deep convection; mo_cumastr.f90:812-906)
-        # Rescale the trial cloud-base flux so the REALIZED flux profile
-        # would consume the plume CAPE in cmftau seconds:
-        #     zmfub1 = zcape·zmfub / (zheat·cmftau)
-        # Both integrals run over the cloud interfaces ``kctop < jk ≤ kcbot``
-        # (lines 824-852). At interface ``jk`` the layer above it contributes
-        # its thickness ``zdz = Δp(jk−1)·zroi/g`` with ``zroi`` the inverse
-        # density of the half-level environment:
-        #   zheat += [(pten(jk−1) − pten(jk) + g·zdz/pcpcu(jk))/ptenh(jk)
-        #             + vtmpc1·(pqen(jk−1) − pqen(jk))]·g·(pmfu + pmfd)(jk)·zroi
-        #   zcape += [g·(ptu − ptenh)/ptenh + g·vtmpc1·(pqu − pqenh)
-        #             − g·plu](jk)·zdz
-        # — the CAPE-consumption rate per unit net convective mass flux and
-        # the plume CAPE with virtual-T and condensate loading. Both come
-        # from this first ascent; the final amplitude is applied below.
-        in_cloud = (levels > actual_ktop) & (levels <= cloud_base)
-        up = jnp.maximum(levels - 1, 0)
-        zroi = (c.rd * env.tenh * (1.0 + c.vtmpc1 * env.qenh)
-                / jnp.maximum(env.paph[:-1], 1.0))
-        zdz = env.dp[up] * zroi / c.grav
-        net_mf = updraft_state.mfu + downdraft_state.mfd
-        zheat = jnp.sum(
-            jnp.where(
-                in_cloud,
-                ((temperature[up] - temperature
-                  + c.grav * zdz / env.cpcu) / env.tenh
-                 + c.vtmpc1 * (humidity[up] - humidity))
-                * (c.grav * net_mf) * zroi,
-                0.0,
+        def finish(updraft_state, actual_ktop, lfs_override=None):
+            # Downdraft (cudlfs + cuddraf, on half levels), searched inside the
+            # realized cloud of a convective column.
+            downdraft_state = calculate_downdraft(
+                temperature, humidity, pressure, layer_thickness, rho,
+                updraft_state, precip_rate, cloud_base, actual_ktop, config,
+                u_wind=u_wind, v_wind=v_wind, cp_moist=cp_moist, env=env,
+                mass_flux_base=mass_flux_base, _lfs=lfs_override,
             )
-        )
-        zcape_plume = jnp.sum(
-            jnp.where(
-                in_cloud,
-                (c.grav * (updraft_state.tu - env.tenh) / env.tenh
-                 + c.grav * c.vtmpc1 * (updraft_state.qu - env.qenh)
-                 - c.grav * updraft_state.lu) * zdz,
-                0.0,
+
+            # --- Nordeng CAPE closure (deep convection; mo_cumastr.f90:812-906)
+            # Rescale the trial cloud-base flux so the REALIZED flux profile
+            # would consume the plume CAPE in cmftau seconds:
+            #     zmfub1 = zcape·zmfub / (zheat·cmftau)
+            # Both integrals run over the cloud interfaces ``kctop < jk ≤ kcbot``
+            # (lines 824-852). At interface ``jk`` the layer above it contributes
+            # its thickness ``zdz = Δp(jk−1)·zroi/g`` with ``zroi`` the inverse
+            # density of the half-level environment:
+            #   zheat += [(pten(jk−1) − pten(jk) + g·zdz/pcpcu(jk))/ptenh(jk)
+            #             + vtmpc1·(pqen(jk−1) − pqen(jk))]·g·(pmfu + pmfd)(jk)·zroi
+            #   zcape += [g·(ptu − ptenh)/ptenh + g·vtmpc1·(pqu − pqenh)
+            #             − g·plu](jk)·zdz
+            # — the CAPE-consumption rate per unit net convective mass flux and
+            # the plume CAPE with virtual-T and condensate loading. Both come
+            # from this first ascent; the final amplitude is applied below.
+            in_cloud = (levels > actual_ktop) & (levels <= cloud_base)
+            up = jnp.maximum(levels - 1, 0)
+            zroi = (c.rd * env.tenh * (1.0 + c.vtmpc1 * env.qenh)
+                    / jnp.maximum(env.paph[:-1], 1.0))
+            zdz = env.dp[up] * zroi / c.grav
+            net_mf = updraft_state.mfu + downdraft_state.mfd
+            zheat = jnp.sum(
+                jnp.where(
+                    in_cloud,
+                    ((temperature[up] - temperature
+                      + c.grav * zdz / env.cpcu) / env.tenh
+                     + c.vtmpc1 * (humidity[up] - humidity))
+                    * (c.grav * net_mf) * zroi,
+                    0.0,
+                )
             )
-        )
-        zmfub = jnp.maximum(mass_flux_base, config.cmfcmin)
-        zmfub1 = zcape_plume * zmfub / (jnp.maximum(zheat, 1e-10) * config.tau)
-        # Bounds (mo_cumastr.f90:902-904): at least ``0.001`` kg/m²/s — also
-        # where the plume CAPE is not positive — and at most the CFL cap
-        # above.
-        zmfub1 = jnp.minimum(
-            jnp.maximum(zmfub1, config.cu_mfub1_min), mfu_cfl_max)
-        # ECHAM rescales EVERY deep column (mo_cumastr.f90:812-906): the
-        # moisture-budget flux is only the FIRST GUESS; Nordeng's
-        # zmfub1 = zcape·zmfub/(zheat·cmftau) sets the final amplitude.
-        # ECHAM SHALLOW re-closure (mo_cumastr.f90:909-936): after the
-        # downdrafts, a ktype==2 column recomputes its cloud-base flux from
-        # the PBL moisture budget INCLUDING the downdraft moisture at cloud
-        # base (zqumqe = qu + lu − zeps·qd − (1−zeps)·qenh at the cloud-base
-        # interface, with zeps = cmfdeps where a downdraft reaches it) and
-        # applies it only when it moves less than 20% from the first guess.
-        ikb = cloud_base
-        # ECHAM keys zeps on ``pmfd(ikb) < 0 .AND. loddraf``
-        # (mo_cumastr.f90:924). ``loddraf`` is "a downdraft was initiated"
-        # (an LFS was found); a negative downdraft mass flux AT the cloud-base
-        # interface already implies it, so that is tested directly.
-        zeps = jnp.where(
-            downdraft_state.mfd[ikb] < 0.0, config.cmfdeps, 0.0,
-        )
-        zqumqe_sh = (
-            updraft_state.qu[ikb] + updraft_state.lu[ikb]
-            - zeps * downdraft_state.qd[ikb]
-            - (1.0 - zeps) * env.qenh[ikb]
-        )
-        zdqmin_sh = jnp.maximum(0.01 * env.qenh[ikb], 1.0e-10)
-        # The re-closed flux is accepted within a 20% window of the first
-        # guess and then clipped to jcm's CFL cap / cmfcmax (see
-        # ``shallow_reclosure_flux`` — ECHAM's shallow branch omits that final
-        # clip, so a near-cap first guess could otherwise be raised past the
-        # hard CFL limit the rest of the scheme enforces).
-        zmfub1_sh = shallow_reclosure_flux(
-            zmfub, zqumqe_sh, zdqmin_sh, zdqpbl * c.grav, mfu_cfl_max, config,
-        )
-        rescale_shallow = zmfub1_sh / zmfub
+            zcape_plume = jnp.sum(
+                jnp.where(
+                    in_cloud,
+                    (c.grav * (updraft_state.tu - env.tenh) / env.tenh
+                     + c.grav * c.vtmpc1 * (updraft_state.qu - env.qenh)
+                     - c.grav * updraft_state.lu) * zdz,
+                    0.0,
+                )
+            )
+            zmfub = jnp.maximum(mass_flux_base, config.cmfcmin)
+            zmfub1 = zcape_plume * zmfub / (jnp.maximum(zheat, 1e-10) * config.tau)
+            # Bounds (mo_cumastr.f90:902-904): at least ``0.001`` kg/m²/s — also
+            # where the plume CAPE is not positive — and at most the CFL cap
+            # above.
+            zmfub1 = jnp.minimum(
+                jnp.maximum(zmfub1, config.cu_mfub1_min), mfu_cfl_max)
+            # ECHAM rescales EVERY deep column (mo_cumastr.f90:812-906): the
+            # moisture-budget flux is only the FIRST GUESS; Nordeng's
+            # zmfub1 = zcape·zmfub/(zheat·cmftau) sets the final amplitude.
+            # ECHAM SHALLOW re-closure (mo_cumastr.f90:909-936): after the
+            # downdrafts, a ktype==2 column recomputes its cloud-base flux from
+            # the PBL moisture budget INCLUDING the downdraft moisture at cloud
+            # base (zqumqe = qu + lu − zeps·qd − (1−zeps)·qenh at the cloud-base
+            # interface, with zeps = cmfdeps where a downdraft reaches it) and
+            # applies it only when it moves less than 20% from the first guess.
+            ikb = cloud_base
+            # ECHAM keys zeps on ``pmfd(ikb) < 0 .AND. loddraf``
+            # (mo_cumastr.f90:924). ``loddraf`` is "a downdraft was initiated"
+            # (an LFS was found); a negative downdraft mass flux AT the cloud-base
+            # interface already implies it, so that is tested directly.
+            zeps = jnp.where(
+                downdraft_state.mfd[ikb] < 0.0, config.cmfdeps, 0.0,
+            )
+            zqumqe_sh = (
+                updraft_state.qu[ikb] + updraft_state.lu[ikb]
+                - zeps * downdraft_state.qd[ikb]
+                - (1.0 - zeps) * env.qenh[ikb]
+            )
+            zdqmin_sh = jnp.maximum(0.01 * env.qenh[ikb], 1.0e-10)
+            # The re-closed flux is accepted within a 20% window of the first
+            # guess and then clipped to jcm's CFL cap / cmfcmax (see
+            # ``shallow_reclosure_flux`` — ECHAM's shallow branch omits that final
+            # clip, so a near-cap first guess could otherwise be raised past the
+            # hard CFL limit the rest of the scheme enforces).
+            zmfub1_sh = shallow_reclosure_flux(
+                zmfub, zqumqe_sh, zdqmin_sh, zdqpbl * c.grav, mfu_cfl_max, config,
+            )
+            rescale_shallow = zmfub1_sh / zmfub
 
-        rescale = jnp.where(
-            conv_type_final == 1,
-            zmfub1 / zmfub,
-            jnp.where(conv_type_final == 2, rescale_shallow, 1.0),
-        )
+            rescale = jnp.where(
+                conv_type_final == 1,
+                zmfub1 / zmfub,
+                jnp.where(conv_type_final == 2, rescale_shallow, 1.0),
+            )
 
-        # The final ascent (mo_cumastr.f90:974-1007): ECHAM re-runs cuasc with
-        # the closed cloud-base flux ``zmfub1`` and the (possibly demoted)
-        # final type, rather than scaling the first ascent. The ascent is not
-        # linear in its base flux — the ``zmfmax`` limiter caps the flux
-        # leaving each interface at the air mass of the layer above per step
-        # — so only a re-run keeps that cap at the final amplitude. A deep
-        # plume demoted to shallow re-ascends with the shallow entrainment,
-        # and the first ascent's realized top becomes the cloud-top bound
-        # (``ictop0 = kctop``, line 753).
-        demoted = (conv_type == 1) & (conv_type_final == 2)
-        type_weights_final = jnp.where(
-            demoted,
-            jnp.stack([jnp.zeros_like(type_weights[0]),
-                       type_weights[0] + type_weights[1],
-                       type_weights[2]]),
-            type_weights,
-        )
-        # A surface plume that took no hold in the first ascent leaves the
-        # column non-convective there, and the second ascent's ``cubasmc`` may
-        # then seed a mid-level plume in it (cuasc resets ``klab`` for a
-        # non-convective column, line 190): omega-driven, bounded at 400 hPa,
-        # with no downdraft and no rescale.
-        switch_mid = cubase_on & ~ldcum_first & has_midlev_base
-        base_final = jnp.where(switch_mid, midlev_base, cloud_base)
-        type_final = jnp.where(
-            switch_mid, jnp.asarray(3, conv_type_final.dtype), conv_type_final)
-        weights_final = jnp.where(
-            switch_mid,
-            jnp.stack([jnp.zeros_like(type_weights[0]),
-                       jnp.zeros_like(type_weights[0]),
-                       jnp.ones_like(type_weights[0])]),
-            type_weights_final,
-        )
-        mfub_mid = jnp.minimum(
-            midlevel_mass_flux(omega[midlev_base], config),
-            layer_air_mass[jnp.maximum(midlev_base - 1, 0)] / dt)
-        mfub_final = jnp.where(
-            switch_mid, mfub_mid, mass_flux_base * rescale)
-        kctop0_final = jnp.where(ldcum_first, actual_ktop, kctop0_no_cubase)
-        first_ldcum_weight = updraft_state.ldcum_weight
-        updraft_state = ascent(
-            base_final, kctop0_final, type_final, mfub_final, weights_final)
-        actual_ktop = updraft_state.kctop
-        # ``ldcum`` at the ledger is a chain of decisions. A cubase column
-        # must pass the cloud-base moisture budget (``zlo1``); then its first
-        # ascent must pass an interface (mo_cuascent.f90:541) — a column the
-        # first ascent leaves non-convective runs no surface plume in the
-        # second, as cuasc resets ``pmfub`` and ``klab`` there (lines
-        # 190, 216-217); then so must the final ascent. The mid-level
-        # plume the second ascent seeds afresh is decided by that ascent
-        # alone. As a weight the chain is 1.0 or 0.0, and where it fails its
-        # derivative is that of the first link that failed (``switches.chain``).
-        ldcum_weight = jnp.where(
-            switch_mid,
-            updraft_state.ldcum_weight,
-            jnp.where(use_midlev,
-                      chain(first_ldcum_weight, updraft_state.ldcum_weight),
-                      chain(zlo1, first_ldcum_weight,
-                            updraft_state.ldcum_weight)))
-        ldcum = ldcum_weight > 0.5
+            # The final ascent (mo_cumastr.f90:974-1007): ECHAM re-runs cuasc with
+            # the closed cloud-base flux ``zmfub1`` and the (possibly demoted)
+            # final type, rather than scaling the first ascent. The ascent is not
+            # linear in its base flux — the ``zmfmax`` limiter caps the flux
+            # leaving each interface at the air mass of the layer above per step
+            # — so only a re-run keeps that cap at the final amplitude. A deep
+            # plume demoted to shallow re-ascends with the shallow entrainment,
+            # and the first ascent's realized top becomes the cloud-top bound
+            # (``ictop0 = kctop``, line 753).
+            demoted = (conv_type == 1) & (conv_type_final == 2)
+            type_weights_final = jnp.where(
+                demoted,
+                jnp.stack([jnp.zeros_like(type_weights[0]),
+                           type_weights[0] + type_weights[1],
+                           type_weights[2]]),
+                type_weights,
+            )
+            # A surface plume that took no hold in the first ascent leaves the
+            # column non-convective there, and the second ascent's ``cubasmc`` may
+            # then seed a mid-level plume in it (cuasc resets ``klab`` for a
+            # non-convective column, line 190): omega-driven, bounded at 400 hPa,
+            # with no downdraft and no rescale.
+            switch_mid = cubase_on & ~ldcum_first & has_midlev_base
+            base_final = jnp.where(switch_mid, midlev_base, cloud_base)
+            type_final = jnp.where(
+                switch_mid, jnp.asarray(3, conv_type_final.dtype), conv_type_final)
+            weights_final = jnp.where(
+                switch_mid,
+                jnp.stack([jnp.zeros_like(type_weights[0]),
+                           jnp.zeros_like(type_weights[0]),
+                           jnp.ones_like(type_weights[0])]),
+                type_weights_final,
+            )
+            mfub_mid = jnp.minimum(
+                midlevel_mass_flux(omega[midlev_base], config),
+                layer_air_mass[jnp.maximum(midlev_base - 1, 0)] / dt)
+            mfub_final = jnp.where(
+                switch_mid, mfub_mid, mass_flux_base * rescale)
+            kctop0_final = jnp.where(ldcum_first, actual_ktop, kctop0_no_cubase)
+            first_ldcum_weight = updraft_state.ldcum_weight
+            updraft_state = ascent(
+                base_final, kctop0_final, type_final, mfub_final, weights_final)
+            actual_ktop = updraft_state.kctop
+            # ``ldcum`` at the ledger is a chain of decisions. A cubase column
+            # must pass the cloud-base moisture budget (``zlo1``); then its first
+            # ascent must pass an interface (mo_cuascent.f90:541) — a column the
+            # first ascent leaves non-convective runs no surface plume in the
+            # second, as cuasc resets ``pmfub`` and ``klab`` there (lines
+            # 190, 216-217); then so must the final ascent. The mid-level
+            # plume the second ascent seeds afresh is decided by that ascent
+            # alone. As a weight the chain is 1.0 or 0.0, and where it fails its
+            # derivative is that of the first link that failed (``switches.chain``).
+            ldcum_weight = jnp.where(
+                switch_mid,
+                updraft_state.ldcum_weight,
+                jnp.where(use_midlev,
+                          chain(first_ldcum_weight, updraft_state.ldcum_weight),
+                          chain(zlo1, first_ldcum_weight,
+                                updraft_state.ldcum_weight)))
+            ldcum = ldcum_weight > 0.5
 
-        def _weighted(x):
-            """``x`` weighted by ``ldcum``: ECHAM's value, the chain's slope.
+            def _weighted(x):
+                """``x`` weighted by ``ldcum``: ECHAM's value, the chain's slope.
 
-            Where the column is not convective the ledger belongs to a plume
-            ECHAM does not run; it contributes only through the weight's
-            derivative, and a non-finite value there must not reach the
-            output, whose value is zero.
-            """
-            safe = jnp.where(ldcum | jnp.isfinite(x), x, 0.0)
-            return safe * ldcum_weight
-        # The downdraft is not re-run: ECHAM scales its fluxes and rain uptake
-        # by the same factor (mo_cumastr.f90:944-972). It exists only under a
-        # plume that took hold in the first ascent (cudlfs requires
-        # ``ldcum``), so a column that turned to a mid-level plume has none,
-        # and ``cuflx`` cancels it where its level of free sinking, found in
-        # the first ascent's cloud, lies above the final plume's top
-        # (``IF (kdtop < kctop) lddraf = .FALSE.``, mo_cufluxdts.f90:189).
-        # jcm removes the whole cancelled downdraft, a deliberate deviation.
-        # ECHAM zeroes it only from ``kctop − 1`` down and keeps the levels
-        # above as cuddraf left them: ABSOLUTE heat and moisture fluxes
-        # (``pmfds = pmfd·(pcpcu·ptd + pgeoh)``, mo_cudescent.f90:164, 312),
-        # converted to deviations only where the downdraft is kept
-        # (mo_cufluxdts.f90:199-212), and cudtdq applies them from ``ktopm2``
-        # down. An absolute static-energy flux of ~1e3 W/m² ending at
-        # ``kctop − 1`` is a heating dipole estimated at order 10 K/hr, so
-        # jcm does not reproduce it. The two agree wherever the LFS is at
-        # most one interface above the top; it is two or more in 4 of 1.1
-        # million column-steps over half a day of t63-echam-1m. ECHAM zeroes
-        # the tracer fluxes of those levels too (mo_cufluxdts.f90:215-227).
-        dd_active = ldcum_first & (downdraft_state.lfs >= actual_ktop)
-        dd_scale = jnp.where(dd_active, rescale, 0.0)
-        downdraft_state = downdraft_state._replace(
-            mfd=downdraft_state.mfd * dd_scale,
-            pdmfdp=downdraft_state.pdmfdp * dd_scale,
-            dmfen=downdraft_state.dmfen * dd_scale,
-        )
+                Where the column is not convective the ledger belongs to a plume
+                ECHAM does not run; it contributes only through the weight's
+                derivative, and a non-finite value there must not reach the
+                output, whose value is zero.
+                """
+                safe = jnp.where(ldcum | jnp.isfinite(x), x, 0.0)
+                return safe * ldcum_weight
+            # The downdraft is not re-run: ECHAM scales its fluxes and rain uptake
+            # by the same factor (mo_cumastr.f90:944-972). It exists only under a
+            # plume that took hold in the first ascent (cudlfs requires
+            # ``ldcum``), so a column that turned to a mid-level plume has none,
+            # and ``cuflx`` cancels it where its level of free sinking, found in
+            # the first ascent's cloud, lies above the final plume's top
+            # (``IF (kdtop < kctop) lddraf = .FALSE.``, mo_cufluxdts.f90:189).
+            # jcm removes the whole cancelled downdraft, a deliberate deviation.
+            # ECHAM zeroes it only from ``kctop − 1`` down and keeps the levels
+            # above as cuddraf left them: ABSOLUTE heat and moisture fluxes
+            # (``pmfds = pmfd·(pcpcu·ptd + pgeoh)``, mo_cudescent.f90:164, 312),
+            # converted to deviations only where the downdraft is kept
+            # (mo_cufluxdts.f90:199-212), and cudtdq applies them from ``ktopm2``
+            # down. An absolute static-energy flux of ~1e3 W/m² ending at
+            # ``kctop − 1`` is a heating dipole estimated at order 10 K/hr, so
+            # jcm does not reproduce it. The two agree wherever the LFS is at
+            # most one interface above the top; it is two or more in 4 of 1.1
+            # million column-steps over half a day of t63-echam-1m. ECHAM zeroes
+            # the tracer fluxes of those levels too (mo_cufluxdts.f90:215-227).
+            dd_active = ldcum_first & (downdraft_state.lfs >= actual_ktop)
+            dd_scale = jnp.where(dd_active, rescale, 0.0)
+            downdraft_state = downdraft_state._replace(
+                mfd=downdraft_state.mfd * dd_scale,
+                pdmfdp=downdraft_state.pdmfdp * dd_scale,
+                dmfen=downdraft_state.dmfen * dd_scale,
+            )
 
-        # cuflx + cudtdq + cududv: the finite-volume ledger on the true
-        # layer mass.
-        tendencies = calculate_tendencies(
-            temperature, humidity, u_wind, v_wind, pressure, rho, layer_thickness,
-            updraft_state, downdraft_state,
-            base_final, actual_ktop, dt, config,
-            ktype=type_final, use_updraft_cover=use_updraft_cover,
-            cp_moist=cp_moist, env=env,
-        )
-        # cuflx/cudtdq act only on convective columns (``ldcum``). The
-        # ledger is weighted by ``ldcum_weight`` rather than masked: its value
-        # is exactly zero where ECHAM's column is not convective, and its
-        # derivative there is that of the switch that turned it off applied
-        # to the ledger of the plume the scheme ran for the column.
-        tendencies = jax.tree.map(_weighted, tendencies)
+            # cuflx + cudtdq + cududv: the finite-volume ledger on the true
+            # layer mass.
+            tendencies = calculate_tendencies(
+                temperature, humidity, u_wind, v_wind, pressure, rho, layer_thickness,
+                updraft_state, downdraft_state,
+                base_final, actual_ktop, dt, config,
+                ktype=type_final, use_updraft_cover=use_updraft_cover,
+                cp_moist=cp_moist, env=env,
+            )
+            # cuflx/cudtdq act only on convective columns (``ldcum``). The
+            # ledger is weighted by ``ldcum_weight`` rather than masked: its value
+            # is exactly zero where ECHAM's column is not convective, and its
+            # derivative there is that of the switch that turned it off applied
+            # to the ledger of the plume the scheme ran for the column.
+            tendencies = jax.tree.map(_weighted, tendencies)
 
-        # NOTE: ECHAM applies NO grid-mean saturation adjustment after
-        # cudtdq (mo_cumastr.f90 — after the tendencies only cududv and the
-        # tracer mass fixer run; environment supersaturation is the
-        # stratiform cloud scheme's job, fed by the detrained condensate),
-        # so the ledger's tendencies flow through unmodified.
+            # NOTE: ECHAM applies NO grid-mean saturation adjustment after
+            # cudtdq (mo_cumastr.f90 — after the tendencies only cududv and the
+            # tracer mass fixer run; environment supersaturation is the
+            # stratiform cloud scheme's job, fed by the detrained condensate),
+            # so the ledger's tendencies flow through unmodified.
 
-        # Update state. The prognostic plume winds computed for the cududv
-        # momentum transport (``uu``/``vu`` from cuasc, ``ud``/``vd`` from
-        # cuddraf) are carried out on the state so a standalone caller
-        # consuming it sees the actual in-plume winds rather than the
-        # environment. They are intensive (m/s), so — unlike the mass fluxes —
-        # they are NOT touched by the Nordeng amplitude rescale and carry no
-        # cap scaling; the momentum TENDENCY the cap scales is separate.
-        new_state = ConvectionState(
-            tu=updraft_state.tu, qu=updraft_state.qu, lu=updraft_state.lu,
-            uu=updraft_state.uu, vu=updraft_state.vu,
-            td=downdraft_state.td, qd=downdraft_state.qd,
-            ud=downdraft_state.ud, vd=downdraft_state.vd,
-            mfu=updraft_state.mfu, mfd=downdraft_state.mfd,
-            # Fractional entrainment (1/m) is rescale-invariant (a rate,
-            # not a flux).
-            entr=updraft_state.entr,
-            ktype=jnp.where(ldcum, type_final, 0).astype(jnp.int32),
-            kbase=jnp.asarray(base_final, dtype=jnp.int32),
-            ktop=jnp.asarray(actual_ktop, dtype=jnp.int32),
-            prate=tendencies.precip_conv,
-            entrain_up=updraft_state.dmfen,
-            entrain_down=downdraft_state.dmfen,
-        )
-        # A non-convective column publishes no plume; the published fluxes,
-        # which drive the convective tracer transport, carry the same weight
-        # as the ledger.
-        new_state = new_state._replace(**{
-            f: _weighted(getattr(new_state, f))
-            for f in ("mfu", "mfd", "entrain_up", "entrain_down")})
+            # Update state. The prognostic plume winds computed for the cududv
+            # momentum transport (``uu``/``vu`` from cuasc, ``ud``/``vd`` from
+            # cuddraf) are carried out on the state so a standalone caller
+            # consuming it sees the actual in-plume winds rather than the
+            # environment. They are intensive (m/s), so — unlike the mass fluxes —
+            # they are NOT touched by the Nordeng amplitude rescale and carry no
+            # cap scaling; the momentum TENDENCY the cap scales is separate.
+            new_state = ConvectionState(
+                tu=updraft_state.tu, qu=updraft_state.qu, lu=updraft_state.lu,
+                uu=updraft_state.uu, vu=updraft_state.vu,
+                td=downdraft_state.td, qd=downdraft_state.qd,
+                ud=downdraft_state.ud, vd=downdraft_state.vd,
+                mfu=updraft_state.mfu, mfd=downdraft_state.mfd,
+                # Fractional entrainment (1/m) is rescale-invariant (a rate,
+                # not a flux).
+                entr=updraft_state.entr,
+                ktype=jnp.where(ldcum, type_final, 0).astype(jnp.int32),
+                kbase=jnp.asarray(base_final, dtype=jnp.int32),
+                ktop=jnp.asarray(actual_ktop, dtype=jnp.int32),
+                prate=tendencies.precip_conv,
+                entrain_up=updraft_state.dmfen,
+                entrain_down=downdraft_state.dmfen,
+            )
+            # A non-convective column publishes no plume; the published fluxes,
+            # which drive the convective tracer transport, carry the same weight
+            # as the ledger.
+            new_state = new_state._replace(**{
+                f: _weighted(getattr(new_state, f))
+                for f in ("mfu", "mfd", "entrain_up", "entrain_down")})
 
-        return tendencies, new_state
-    
+            return tendencies, new_state
+
+        if _interpolate_lfs:
+            from .downdraft import find_lfs
+            candidates, weight = find_lfs(
+                temperature, humidity, pressure,
+                updraft_state.tu, updraft_state.qu, updraft_state.mfu,
+                precip_rate, cloud_base, actual_ktop, config, env=env,
+                mass_flux_base=mass_flux_base, _interpolate=True)
+            # Closure, final ascent and the rain/heat/water ledgers must see
+            # each candidate descent before the complete outputs are blended.
+            columns = lax.map(lambda k: finish(updraft_state, actual_ktop, k), candidates)
+            return _blend_columns(columns, weight)
+        return finish(updraft_state, actual_ktop)
+
     # No convection case (with fixed qc/qi placeholders)
     def no_convection():
         # Initialize fixed qc/qi tendencies to zero
@@ -1339,6 +1402,20 @@ def _blend_columns(columns, weight):
         columns)
 
 
+def _cloud_base_bracket(env, base, found):
+    """Adjacent reachable cloud bases and the lower base's saturation weight."""
+    from .half_levels import cubase_seed_static_energy
+
+    dry = (cubase_seed_static_energy(env) - env.geoh) / env.cpcu
+    excess = env.qenh[-1] - saturation_mixing_ratio(env.paph[:-1], dry)
+    lower = jnp.minimum(base + 1, dry.size - 2)
+    bracket = found & (lower > base) & (excess[base] >= 0) & (excess[lower] <= 0)
+    gap = jnp.where(bracket, excess[base] - excess[lower], 1.0)
+    weight = jnp.where(
+        bracket & (gap > 0), excess[base] / jnp.where(gap > 0, gap, 1.0), 0.0)
+    return jnp.where(bracket, lower, base), weight
+
+
 def _convection_surrogate(inputs, config, use_updraft_cover=False):
     """Interpolate complete columns across base-level and plume-type choices.
 
@@ -1346,7 +1423,8 @@ def _convection_surrogate(inputs, config, use_updraft_cover=False):
     linear interpolation of the dry parcel's humidity excess. Each candidate
     runs its own moisture budget, ascent, closure, downdraft and flux ledger.
     A positive ``deep_convergence_width`` similarly blends complete shallow
-    and deep columns. Other switches retain their configured derivatives;
+    and deep columns. ``lfs_interpolation`` blends the closure and ledger
+    for neighboring downdraft start levels. Other switches retain their configured derivatives;
     this does not smooth every decision in the scheme.
 
     ``inputs`` contains the TOA-first arguments of the column kernel, except
@@ -1354,7 +1432,6 @@ def _convection_surrogate(inputs, config, use_updraft_cover=False):
     values are for derivative checks only; the public entry point returns
     the reference column's values through ``with_surrogate_gradient``.
     """
-    from .half_levels import cubase_seed_static_energy
     from .updraft import column_environment
 
     t, q, p = (inputs[name] for name in ("temperature", "humidity", "pressure"))
@@ -1383,7 +1460,8 @@ def _convection_surrogate(inputs, config, use_updraft_cover=False):
         def column(deep_weight=None):
             return _tiedtke_convection_toa_first(
                 **inputs, config=config, use_updraft_cover=use_updraft_cover,
-                _cloud_base=k, _deep_weight=deep_weight)
+                _cloud_base=k, _deep_weight=deep_weight,
+                _interpolate_lfs=config.lfs_interpolation)
 
         if config.deep_convergence_width == 0:
             return column()
@@ -1392,16 +1470,10 @@ def _convection_surrogate(inputs, config, use_updraft_cover=False):
     if not config.cloud_base_interpolation:
         return at_base(base)
 
-    dry = (cubase_seed_static_energy(env) - env.geoh) / env.cpcu
-    excess = env.qenh[-1] - saturation_mixing_ratio(env.paph[:-1], dry)
-    lower = jnp.minimum(base + 1, t.size - 2)
     # Only bracket a reachable surface LCL; no extrapolation into a dry or
     # inhibited column, or past the lowest interface cubase tests.
-    bracket = found & (lower != base) & (excess[base] >= 0) & (excess[lower] <= 0)
-    gap = jnp.where(bracket, excess[base] - excess[lower], 1.0)
-    weight = jnp.where(
-        bracket & (gap > 0), excess[base] / jnp.where(gap > 0, gap, 1.0), 0.0)
-    columns = lax.map(at_base, jnp.stack([base, jnp.where(bracket, lower, base)]))
+    lower, weight = _cloud_base_bracket(env, base, found)
+    columns = lax.map(at_base, jnp.stack([base, lower]))
     return _blend_columns(columns, weight)
 
 
@@ -1481,7 +1553,8 @@ def tiedtke_nordeng_convection(
         return _tiedtke_convection_toa_first(
             **column, config=params, use_updraft_cover=use_updraft_cover)
 
-    if config.cloud_base_interpolation or config.deep_convergence_width > 0:
+    if (config.cloud_base_interpolation or config.deep_convergence_width > 0
+            or config.lfs_interpolation):
         from jcm.physics.surrogate_gradient import with_surrogate_gradient
 
         def surrogate(column, params):

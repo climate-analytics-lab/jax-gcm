@@ -106,6 +106,7 @@ def find_lfs(
     env: HalfLevelEnvironment | None = None,
     pressure_half: jnp.ndarray | None = None,
     mass_flux_base: jnp.ndarray | None = None,
+    _interpolate=False,
 ) -> Tuple[int, bool]:
     """Find the level of free sinking (ECHAM ``cudlfs``).
 
@@ -159,6 +160,16 @@ def find_lfs(
     is_lfs = in_range & (zbuo < 0.0) & (precip_rate > 10.0 * zmftop * zcond)
     found = jnp.any(is_lfs)
     lfs = jnp.where(found, jnp.argmax(is_lfs), ktop)
+    if _interpolate:
+        # Interpolate the negative-buoyancy crossing only inside the eligible
+        # cloud. Every candidate uses the same rain-supply constraint.
+        upper = jnp.maximum(lfs - 1, 2)
+        bracket = (found & (upper < lfs) & in_range[upper]
+                   & (precip_rate > 10.0 * zmftop * zcond[upper])
+                   & (zbuo[upper] >= 0.0))
+        gap = jnp.where(bracket, zbuo[upper] - zbuo[lfs], 1.0)
+        weight = jnp.where(bracket, -zbuo[lfs] / gap, 0.0)
+        return jnp.stack([lfs, jnp.where(bracket, upper, lfs)]), weight
     return lfs, found
 
 
@@ -207,6 +218,7 @@ def calculate_downdraft(
     pressure_half: jnp.ndarray | None = None,
     env: HalfLevelEnvironment | None = None,
     mass_flux_base: jnp.ndarray | None = None,
+    _lfs=None,
 ) -> DowndraftState:
     """Calculate the downdraft on half levels (ECHAM ``cudlfs`` + ``cuddraf``).
 
@@ -255,6 +267,8 @@ def calculate_downdraft(
         precip_rate, kbase, ktop, config, env=env,
         mass_flux_base=mass_flux_base,
     )
+    if _lfs is not None:
+        lfs = _lfs
 
     # --- cudlfs seed at the LFS interface (mo_cudescent.f90:121-150) -------
     # 50/50 mixture of plume air and the wet-bulb half-level environment,
