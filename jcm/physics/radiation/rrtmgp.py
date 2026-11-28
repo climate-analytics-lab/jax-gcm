@@ -718,12 +718,11 @@ GAS_OPTICS_MODES = ("per_gpt", "all_gpts")
 DEFAULT_GAS_OPTICS_MODE = "all_gpts"
 DEFAULT_GPT_CHUNK = 64
 DEFAULT_USE_SCAN = True
-# On TPU the A100 optimum of 64 g-points per iteration does not fit vector
-# memory. jcm passes ``gpt_chunk`` through unchanged and leaves the cut to the
-# library: its column-minor solve caps the chunk so one ``(nz, chunk, nc)``
-# float32 array fits ``rrtmgp.rte.two_stream.TPU_CHUNK_VMEM_BYTES`` (32 MiB),
-# which is 16 g-points for a T63L47 TPU block of 9216 columns
-# (:func:`tpu_column_steps`), and adapts to any other block size.
+# TPU v5e T63L47 measurements (#1218): 8 g-points take 109.3 ms per
+# 9216-column block versus 130.9 ms at 16; two blocks take 222.9 vs 265.9 ms.
+# Eight divides 128/112 and 256/224 without tail padding and halves the
+# (nz, chunk, nc) scratch memory of 16. The library still applies its VMEM cap.
+DEFAULT_TPU_GPT_CHUNK = 8
 
 
 def _check_library_options(
@@ -2465,15 +2464,17 @@ class RRTMGPRadiation(PhysicsTerm):
             gpt_chunk: g-points the library solves per spectral-loop iteration
                 (default 64, with ``use_scan``; 1 is the library's own default
                 and the smallest memory footprint, 16 the largest chunk that
-                adds no memory). Changes no physics.
+                adds no memory on A100). On TPU, the configured default of 64
+                selects :data:`DEFAULT_TPU_GPT_CHUNK` (8); other values pass
+                through unchanged. Changes no physics.
             use_scan: run the vertical recurrences as a ``lax.scan`` over
                 levels (default True) instead of an unrolled chain. Together
                 with ``gpt_chunk=64`` and ``gas_optics_mode="all_gpts"`` this is
                 the measured A100 optimum, at +4 GiB (T63L47) / +8 GiB (T63L95)
                 of peak memory over the unrolled form; the fluxes differ by at
-                most 12 float32 ulp. On TPU the library's column-minor solve
-                caps ``gpt_chunk`` to what fits the chip's vector memory (16 at
-                T63L47); see the comment above :data:`GAS_OPTICS_MODES`.
+                most 12 float32 ulp. On TPU the default chunk is 8, and the
+                library's column-minor solve also caps larger chunks to what
+                fits the chip's vector memory; see :data:`DEFAULT_TPU_GPT_CHUNK`.
             column_block: how the column solve is laid out; static, not a
                 pytree leaf, and no effect on the physics (fluxes agree with
                 the single solve to float32 rounding). An integer B solves B
@@ -2834,6 +2835,8 @@ class RRTMGPRadiation(PhysicsTerm):
         # platform when the model is sharded, else the default backend.
         platform = self._column_platform or jax.default_backend()
         gpt_chunk = self._gpt_chunk
+        if platform == "tpu" and gpt_chunk == DEFAULT_GPT_CHUNK:
+            gpt_chunk = DEFAULT_TPU_GPT_CHUNK
         # The library's column-minor entry point places the gas optics ahead
         # of a scanned, chunked spectral loop; any other placement the user
         # selects is solved by the per-column scheme. So is a column axis
