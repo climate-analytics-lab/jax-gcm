@@ -1340,7 +1340,7 @@ def _tiedtke_convection_toa_first(
                 mass_flux_base=mass_flux_base, _interpolate=True)
             # Closure, final ascent and the rain/heat/water ledgers must see
             # each candidate descent before the complete outputs are blended.
-            columns = lax.map(lambda k: finish(updraft_state, actual_ktop, k), candidates)
+            columns = jax.vmap(lambda k: finish(updraft_state, actual_ktop, k))(candidates)
             return _blend_columns(columns, weight)
         return finish(updraft_state, actual_ktop)
 
@@ -1465,15 +1465,18 @@ def _convection_surrogate(inputs, config, use_updraft_cover=False):
 
         if config.deep_convergence_width == 0:
             return column()
-        return _blend_columns(lax.map(column, jnp.asarray([0.0, 1.0], t.dtype)), deep)
+        return _blend_columns(jax.vmap(column)(jnp.asarray([0.0, 1.0], t.dtype)), deep)
 
     if not config.cloud_base_interpolation:
-        return at_base(base)
+        # Lower plume conditionals before the JVP even for a single base.
+        columns = jax.vmap(at_base)(jnp.expand_dims(base, 0))
+        return jax.tree.map(lambda x: x[0], columns)
 
+    # Batch candidates before the JVP so batched conditionals stay transposable.
     # Only bracket a reachable surface LCL; no extrapolation into a dry or
     # inhibited column, or past the lowest interface cubase tests.
     lower, weight = _cloud_base_bracket(env, base, found)
-    columns = lax.map(at_base, jnp.stack([base, lower]))
+    columns = jax.vmap(at_base)(jnp.stack([base, lower]))
     return _blend_columns(columns, weight)
 
 

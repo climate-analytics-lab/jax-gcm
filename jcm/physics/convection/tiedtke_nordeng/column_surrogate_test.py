@@ -128,6 +128,48 @@ def test_batched_float32_gradients_and_vertical_ordering():
     np.testing.assert_array_equal(tangent[0], 0.)
 
 
+@pytest.mark.parametrize("choice,momentum", [
+    ("all", True), ("all", False), ("cloud_base", True),
+    ("lfs", True), ("deep_shallow", True),
+])
+def test_batched_momentum_gradient_is_adjoint(choice, momentum):
+    inputs, _ = _inputs()
+    wind = jnp.linspace(-10., 10., inputs["temperature"].size)
+    inputs.update(u_wind=wind, v_wind=-.5 * wind)
+    config = ConvectionParameters.default(
+        lmfdudv=momentum,
+        cloud_base_interpolation=choice in ("all", "cloud_base"),
+        lfs_interpolation=choice in ("all", "lfs"),
+        deep_convergence_width=2e-7 if choice == "deep_shallow" else 0.)
+
+    def column(scale):
+        tend, _ = tiedtke_nordeng_convection(
+            **dict(inputs, humidity=scale * inputs["humidity"]), config=config)
+        return jnp.stack([tend.dudt, tend.dvdt])
+
+    batched = jax.vmap(column)
+    scales = jnp.asarray([.7, .93])
+    direction = jnp.asarray([.3, -.2])
+
+    @jax.jit
+    def derivatives(x):
+        value, backward = jax.vjp(batched, x)
+        _, tangent = jax.jvp(batched, (x,), (direction,))
+        cotangent = jnp.linspace(-1., 1., value.size).reshape(value.shape)
+        return value, tangent, backward(cotangent)[0], cotangent
+
+    value, tangent, reverse, cotangent = derivatives(scales)
+    assert np.all(np.isfinite(np.asarray(reverse)))
+    np.testing.assert_allclose(jnp.vdot(tangent, cotangent),
+                               jnp.vdot(direction, reverse), rtol=2e-4, atol=1e-9)
+    if momentum:
+        assert np.any(np.asarray(value) != 0.)
+        assert np.any(np.asarray(reverse) != 0.)
+    else:
+        for result in (value, tangent, reverse):
+            np.testing.assert_array_equal(result, 0.)
+
+
 def test_lfs_candidates_stay_inside_the_eligible_cloud():
     from .downdraft import find_lfs, wetbulb_temperature
     from .updraft import column_environment
