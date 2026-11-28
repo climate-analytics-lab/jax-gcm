@@ -27,6 +27,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import jcm.constants as c
+from jcm.physics.convection.tiedtke_nordeng.half_levels import (
+    reconstruct_pressure_half,
+)
 from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
     ConvectionParameters,
     saturation_mixing_ratio,
@@ -42,6 +46,8 @@ _INPUTS = ("temperature", "humidity", "pressure", "layer_thickness", "rho",
            "moisture_tend_profile", "thvsig", "omega", "qte_dynamics",
            "layer_mass", "humidity_m1", "pressure_half")
 _ZERO_WIDTHS = {name: 0.0 for name in SURROGATE_WIDTH_FIELDS}
+_ZERO_WIDTHS["cloud_base_interpolation"] = False
+_ZERO_WIDTHS["lfs_interpolation"] = False
 
 
 @functools.lru_cache(maxsize=1)
@@ -115,6 +121,50 @@ def _deep_precip(params, supply=2e-5, convergence=1.5):
         moisture_supply=jnp.asarray(supply), land_fraction=jnp.asarray(0.0),
         qte_dynamics=conv)
     return tend.precip_conv
+
+
+def test_default_type_gradient_matches_lagged_humidity_response():
+    """The deep/shallow choice adds no artificial slope within a regime."""
+    with jax.enable_x64(True):
+        # Isolate the type choice from the separate level interpolations.
+        params = ConvectionParameters.default(
+            cloud_base_interpolation=False, lfs_interpolation=False)
+        t, q, p, dz, rho = _deep_column()
+        mass = jnp.diff(reconstruct_pressure_half(p)) / c.grav
+        dt, evaporation, distance = 900.0, 3e-5, 1e-7
+        supply = jnp.zeros_like(q).at[-4:].set(
+            evaporation / jnp.sum(mass[-4:]))
+        convergence = jnp.zeros_like(q).at[10:16].set(
+            (0.1 * evaporation + distance) / jnp.sum(mass[10:16]))
+        previous = q - dt * convergence
+        zeros = jnp.zeros_like(q)
+
+        def output(scale, config=params):
+            humidity = scale * q
+            tend, _ = tiedtke_nordeng_convection(
+                t, humidity, p, dz, rho, zeros, zeros, zeros, zeros,
+                dt=dt, config=config, moisture_supply=jnp.asarray(evaporation),
+                moisture_tend_profile=supply,
+                qte_dynamics=(humidity - previous) / dt)
+            return jnp.stack([tend.precip_conv, jnp.sum(tend.dtedt * mass)])
+
+        one = jnp.asarray(1.0)
+        forward_fn = jax.jit(lambda s: jax.jvp(output, (s,), (jnp.ones_like(s),)))
+        value, forward = forward_fn(one)
+        reverse = jax.jit(jax.jacrev(output))(one)
+        evaluate = jax.jit(output)
+        assert float(value[0]) > 0.0
+        for step in (1e-6, 5e-7, 2.5e-7):
+            # Both perturbations stay on the same side of the type threshold.
+            assert step * float(jnp.sum(q * mass) / dt) < abs(distance)
+            difference = (evaluate(one + step) - evaluate(one - step)) / (2 * step)
+            np.testing.assert_allclose(forward, difference, rtol=1e-5, atol=1e-10)
+            np.testing.assert_allclose(reverse, difference, rtol=1e-5, atol=1e-10)
+
+        # Opting into a surrogate changes derivatives only.
+        opt_in = jax.jit(lambda s: output(s, params.replace(
+            deep_convergence_width=2e-7)))(one)
+        np.testing.assert_array_equal(value, opt_in)
 
 
 def _grad_wrt(field, base=None):
@@ -236,8 +286,10 @@ class TestAcrossTheOnset:
         with jax.enable_x64(True):
             args = [jnp.asarray(ref[f"input_{k}"][rows], jnp.float64)
                     for k in _INPUTS]
+            # Isolate the ascent gates; base interpolation has its own tests.
             heat, dheat, ktype, precip = self._heating_jvp(
-                ConvectionParameters.default())(*args)
+                ConvectionParameters.default(cloud_base_interpolation=False,
+                                             lfs_interpolation=False))(*args)
             heat_r, dheat_r, ktype_r, precip_r = self._heating_jvp(
                 ConvectionParameters.default(**_ZERO_WIDTHS))(*args)
         heat, dheat = np.asarray(heat), np.asarray(dheat)

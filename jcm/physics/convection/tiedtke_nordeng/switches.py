@@ -61,6 +61,33 @@ def threshold_switch(distance, width, inclusive=False):
     return with_surrogate_gradient(exact, surrogate)(distance)
 
 
+def cape_cin_window(buoyancy, thickness, above_base, width):
+    """Smooth work in the first buoyant layer and inhibition below it.
+
+    Surface-first. The scan tracks the probabilities of not yet reaching
+    the LFC and being between the LFC and EL. Once a path exits at its EL,
+    it cannot enter a second buoyant layer. CIN requires a later LFC, as
+    the exact diagnostic reports zero for a column that never becomes buoyant.
+    ``width`` is positive and in m/s²; values are used only in the surrogate.
+    """
+    positive = jnp.where(above_base, jax.nn.sigmoid(buoyancy / width), 0.0)
+
+    def step(carry, p):
+        before, active = carry
+        active = (before + active) * p
+        return (before * (1.0 - p), active), (before, active)
+
+    one, zero = jnp.ones_like(buoyancy[0]), jnp.zeros_like(buoyancy[0])
+    _, (before, active) = jax.lax.scan(step, (one, zero), positive)
+    no_lfc_above = jnp.concatenate([
+        jnp.cumprod((1.0 - positive)[::-1])[::-1][1:], one[None]])
+    cin_weight = before * (1.0 - positive) * (1.0 - no_lfc_above)
+    cape = jnp.sum(active * width * jax.nn.softplus(buoyancy / width) * thickness)
+    cin = jnp.sum(jnp.where(
+        above_base, cin_weight * width * jax.nn.softplus(-buoyancy / width) * thickness, 0.0))
+    return cape, cin
+
+
 def rescaled_sigmoid(x, width):
     """Smooth gate that is exactly 0 for ``x <= 0`` and tends to 1 above.
 

@@ -47,7 +47,13 @@ def _ascent_args(n=41, seed=0):
 
 
 class TestThresholdSwitch:
-    width = _DEFAULT.deep_convergence_width
+    width = 2e-7  # Explicit opt-in; the deep/shallow default uses the exact slope.
+
+    def test_default_type_switch_has_no_surrogate_slope(self):
+        points = jnp.asarray([-1e-7, 1e-7])
+        grad = jax.vmap(jax.grad(lambda d: threshold_switch(
+            d, _DEFAULT.deep_convergence_width)))(points)
+        np.testing.assert_array_equal(grad, jnp.zeros_like(points))
 
     def test_value_is_echams_comparison(self):
         d = jnp.asarray([-1e-6, -1e-12, 0.0, 1e-12, 1e-6])

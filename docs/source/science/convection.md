@@ -122,16 +122,36 @@ decision (convective or not, type, cloud base, cloud top) on every column,
 and its cloud-base mass flux, surface precipitation and per-level tendencies
 agree to 2.1e-12 or better (``cumastr_reference_test.py``).
 
-Each decision's derivative is a named surrogate's (``switches.py``; see
-{doc}`../design/surrogate_gradients`): the value is ECHAM's, and the
-derivative is that of a logistic of the switching quantity, of width
+The decisions support named surrogate derivatives (``switches.py`` and
+``_convection_surrogate``; see {doc}`../design/surrogate_gradients`): the
+value is ECHAM's. The default ``cloud_base_interpolation=True`` interpolates
+complete neighboring plumes at the dry parcel's saturation crossing for
+derivatives only. Both candidates run their own budgets and closures; their
+heat, water and flux outputs use the same interpolation weight. This removes
+the base-level jump from that interpolant while leaving other discrete
+decisions in place. Set it to ``False`` for a fixed-index derivative.
+The default ``lfs_interpolation=True`` similarly interpolates neighboring
+downdraft starts at zero mixture buoyancy. Both candidates must pass the
+reference cloud/rain eligibility tests, and each feeds its own closure,
+final ascent and flux ledger. The complete outputs share one weight;
+setting the option to ``False`` restores the fixed-start derivative.
+The separate surface-parcel CAPE/CIN diagnostic uses a smooth first-buoyant-
+layer window with ``cape_buoyancy_width=0.01`` m/s², together with the
+cloud-base interpolation. Zero width restores the exact LFC/EL window.
+These choices change derivatives only; no forward cloud or rain is added.
+A positive width selects a logistic derivative for the other switches. Defaults are
 ``ascent_buoyancy_width`` (0.01 K), ``ascent_mass_flux_width`` (2e-3 of the
 cloud-base flux), ``ascent_condensate_width`` (1e-8 kg/kg, a rescaled
 logistic that is exactly zero without condensation),
-``precip_onset_width`` (2000 Pa), ``deep_convergence_width`` and
-``sub_cloud_supply_width`` (2e-7 kg m⁻² s⁻¹) or
+``precip_onset_width`` (2000 Pa), ``deep_convergence_width`` (0, reference
+derivative), ``sub_cloud_supply_width`` (2e-7 kg m⁻² s⁻¹) and
 ``cloud_base_excess_width`` (0.1 of ``zdqmin``). They are static fields of
-``ConvectionParameters``; zero selects the reference derivative. The
+``ConvectionParameters``; zero selects the reference derivative. The deep/shallow
+surrogate is opt-in: its narrow logistic amplifies humidity changes through the
+lagged dynamics tendency ``(q_now - q_after_physics)/dt``. The default keeps the
+derivative with type held fixed. A positive width blends complete shallow and
+deep column outputs, including their closures, but can still amplify the
+lagged humidity sensitivity. Forward values are unchanged. The
 per-level ascent test is one surrogate, used for the continuing flux, the
 overshoot and, at the first interface above a cloud base at ``klevm1``, the
 column's ``ldcum``; the chain of decisions that makes ``ldcum`` weights the
@@ -158,8 +178,8 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 64, 1959-1976 (Isca ``betts_miller.f90``).
 
 **Why we differ.**
-- `differentiability` — the decisions are ECHAM's in the value and carry the
-  derivatives of logistic surrogates (above). **The level choices stay
+- `differentiability` — the decisions are ECHAM's in the value and, where
+  enabled, carry derivatives of logistic surrogates (above). **The level choices stay
   discrete**: the ``cubase`` cloud base, the mid-level seed level and its
   trigger conditions, the cloud-top bound and the 200 hPa demotion are level
   indices or trigger identities and carry no derivative, so gradients do not

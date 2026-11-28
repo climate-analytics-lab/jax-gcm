@@ -112,13 +112,112 @@ scheme does (`speedy_vdiff._pbl_moisture_flux`).
 |---|---|---|---|
 | Tiedtke ascent test, each interface (`convection/tiedtke_nordeng/switches.py::ascent_test`) | `cuasc`'s `pqu < zqold`, `zbuo > 0`, `pmfu ≥ 0.01·pmfub` (`mo_cuascent.f90:442-451`) | product of a rescaled logistic of the condensate and logistics of `zbuo` and of the flux fraction | `ascent_condensate_width` 1e-8 kg/kg, `ascent_buoyancy_width` 0.01 K, `ascent_mass_flux_width` 2e-3 |
 | Tiedtke precipitation onset (`updraft.py`) | `zpbase − paphp1 ≥ zdnoprc` (l.454-455) | logistic of the depth excess | `precip_onset_width` 2000 Pa |
-| Tiedtke deep/shallow type (`tiedtke_nordeng.py`) | `zdqcv > zhelp` (`mo_cumastr.f90:571-574`) | logistic | `deep_convergence_width` 2e-7 kg m⁻² s⁻¹ |
+| Tiedtke cloud-base level (`tiedtke_nordeng.py::_convection_surrogate`) | first reachable condensing, buoyant interface | complete neighboring columns interpolated at the dry parcel's saturation crossing | `cloud_base_interpolation=True`; no tunable width |
+| Tiedtke downdraft start (`downdraft.py::find_lfs`) | highest eligible negatively buoyant mixture | neighboring starts interpolated at zero mixture buoyancy, each carried through closure and the final ledger | `lfs_interpolation=True`; no tunable width |
+| CAPE/CIN diagnostic LFC and EL (`switches.py::cape_cin_window`) | first contiguous buoyant layer at or above cloud base | logistic first-layer window and softplus positive/negative work | `cape_buoyancy_width` 0.01 m/s²; diagnostic only |
+| Tiedtke deep/shallow type (`tiedtke_nordeng.py::_convection_surrogate`) | `zdqcv > zhelp` (`mo_cumastr.f90:571-574`) | logistic blend of complete shallow and deep columns, opt-in | `deep_convergence_width` 0 by default (reference derivative); positive widths in kg m⁻² s⁻¹ |
 | Tiedtke `zlo1` gate (`tiedtke_nordeng.py`) | `zdqpbl > 0` and `zqumqe > zdqmin` (l.563-566) | logistic, and logistic relative to `zdqmin` | `sub_cloud_supply_width` 2e-7 kg m⁻² s⁻¹, `cloud_base_excess_width` 0.1 |
 | Tiedtke `ldcum` | the chain `zlo1` → first ascent → final ascent (`mo_cuascent.f90:541`) | the links' surrogates, chained as above; it weights the whole ledger and the published mass fluxes | – |
 | DeMott (2010) INP, `n_aer_coarse ** exponent` (`clouds/lohmann_2m/deposition_freezing.py::demott2010_inp`) | the fractional power, 0 at `n_aer_coarse <= 0` | `where(n_aer_coarse > 0, max(n_aer_coarse, floor) ** exponent, 0)` -- ONE function; at `n_aer_coarse <= 0` the value is identically 0 for every `exponent`, so both partials are exactly 0 there (not DeMott's own, since the fit does not apply); for `0 < n_aer_coarse`, including below the floor where the fit is itself undefined, both partials are this one surrogate's | `_DEMOTT_N_AER_FLOOR_CM3` 0.01 cm⁻³, the fit's own calibration floor |
 
 The cloud cover and the one-moment microphysics use it as recorded in their
 science pages.
+
+### Tiedtke column choices
+
+The cloud-base index controls the parcel, sub-cloud moisture budget, closure,
+ascent and downdraft. Giving the index a fractional value would not change
+the integer gathers and masks downstream. Instead, `_convection_surrogate`
+runs the complete column with each of two neighboring cloud bases and blends
+all floating-point tendencies and state outputs with the same weight.
+
+Let `k` be the first reachable condensing interface and `k+1` the interface
+below it. With dry-parcel humidity excess `d = q_parcel - q_sat(T_dry, p)`,
+the weight of the lower candidate is
+`w = d[k] / (d[k] - d[k+1])`. This is linear interpolation of the saturation
+crossing, with `d[k] >= 0` and `d[k+1] <= 0`. At a base-level change, the
+two adjacent interpolants meet at their common candidate column. The
+interpolant is continuous there when the other decisions are unchanged;
+its one-sided slopes can differ. No smoothing width is needed. The dry
+parcel and saturation calculation are the same ones used by `cubase`.
+
+An absent or inhibited surface cloud base is not extrapolated, and the
+lowest testable interface has no lower candidate. These cases use the
+existing column. The forward calculation still uses the exact integer base.
+`cloud_base_interpolation=False` restores the derivative with that index held
+fixed. The mid-level trigger and other level selections are unchanged. Integer diagnostics still have
+no tangent; downstream decisions made from them are not smoothed by this
+column surrogate.
+
+`lfs_interpolation=True` applies the same construction to the level of free
+sinking. If the first eligible negative-buoyancy mixture is at `k`, the
+candidate above it is `k-1`. Its weight is
+`-buoyancy[k] / (buoyancy[k-1] - buoyancy[k])`. Both candidates must lie
+inside the reference cloud and pass the same rain-supply constraint. No
+downdraft is invented for a column with no eligible start. Each candidate
+descent feeds its own Nordeng/shallow closure, final ascent, downdraft
+cancellation and flux ledger; only those complete outputs are blended.
+Interpolating the descent alone would miss its effect on closure and the
+integer start-level cancellation. `lfs_interpolation=False` restores the
+fixed-start derivative. The wet-bulb calculation already uses the continuous
+evaporation-only `cuadjtq` clip, with the ordinary kink at saturation.
+
+The same weight blends every term of the water ledger, including detrained
+condensate, surface precipitation and the floor source, so both its value
+and tangent conserve water. The heat tendencies come from each candidate's
+existing heat ledger; no heat source is added by interpolation. The other
+switches keep their configured surrogates. Finite-difference checks of the
+column interpolant isolate these switches with zero widths, and avoid their
+remaining kinks. This is not a globally smooth replacement of convection.
+
+Only differentiation evaluates the extra candidates. With both level
+interpolations enabled, two cloud-base ascents each feed two downdraft/closure
+candidates. Enabling deep/shallow blending doubles these combinations.
+The first ascent is shared by the two downdraft candidates. Ordinary forward runs evaluate only the
+reference column. Column tests check the transition, both derivative modes,
+state and parameter sensitivities, and water conservation. The reference
+column tests check unchanged forward values in both precisions.
+
+The separate `calculate_cape_cin` diagnostic interpolates neighboring parcel
+lifts with the same cloud-base weight. Its LFC/EL surrogate tracks two
+probabilities in surface-first order: not yet reaching an LFC (`before`),
+and being inside the first buoyant layer (`active`). At a level with
+`p = sigmoid(buoyancy / cape_buoyancy_width)`,
+`active_new = p * (before + active)` and `before_new = (1-p) * before`.
+This ends each path at its first EL; a second buoyant layer cannot restart
+it. CAPE integrates positive work using softplus. CIN integrates negative
+work before the LFC, weighted by the probability of a later LFC, so the
+zero-width limit retains the reference's zero CIN when there is no LFC.
+The 0.01 m/s² default corresponds to about 0.3 K virtual-temperature excess
+at 300 K. It sets a diagnostic transition scale, not a change in the running
+scheme's in-plume closure. Set it to zero to use the exact LFC/EL window.
+Enumeration of all paths in a five-level column independently checks the
+window. Full parcel-lift tests cross cloud-base and EL boundaries, verify
+both derivative modes, and retain exact forward CAPE/CIN values. The
+approximation does not guarantee descent of every discontinuous objective.
+
+The Tiedtke deep/shallow surrogate is opt-in because the tested moisture
+convergence includes `(q_now - q_after_physics) / dt`. With the previous state
+held fixed, a fractional change in specific humidity can span many surrogate widths.
+The logistic's maximum slope is `1 / (4 * width)`, so a narrow width can add a
+large artificial sensitivity even where the forward model stays in one regime.
+Increasing the width reduces this contribution but does not make it the local
+derivative of the forward model. A positive width now blends complete shallow
+and deep columns, including their different closures and final ledgers, instead
+of only blending entrainment while holding the closure's integer type fixed.
+This makes the switching term proportional to the difference between the two
+column outputs. It does not make a narrow width well conditioned. The default
+`deep_convergence_width=0` gives no gradient through a change of type. The
+forward switch is still discontinuous at the boundary.
+
+Set `ConvectionParameters.default(deep_convergence_width=2e-7)` to opt into
+the complete-column logistic derivative, or use the Hydra override
+`+physics.terms.tiedtke_convection.params.deep_convergence_width=2e-7`.
+This is a choice of surrogate, not a validated width for sensitivity analysis.
+The other running-scheme widths keep their defaults. To select reference derivatives for
+all Tiedtke decisions in Python, use
+`ConvectionParameters.default(cloud_base_interpolation=False, lfs_interpolation=False, **{name: 0.0 for name in SURROGATE_WIDTH_FIELDS})`,
+with both names imported from `jcm.physics.convection.tiedtke_nordeng.types`.
 
 SPEEDY's switches use it through the helpers of
 `jcm.physics.speedy.smoothing` (`surrogate_gate`, `surrogate_pos`,
@@ -178,10 +277,11 @@ The gradient is not the derivative of the value. A finite-difference check of
 the whole model disagrees with automatic differentiation wherever a
 surrogate is active, by design.
 
-First-order optimisers and variational assimilation are unaffected in
-practice: they need a direction that reduces the cost, and the surrogate's
-gradient provides one where the reference's provides none. Methods that
-compare the predicted and the actual change of the cost are affected. A line
+For first-order optimisation and variational assimilation, a surrogate can
+provide a search direction where the reference derivative is zero. It does
+not guarantee a descent direction for the forward model: its magnitude and
+sign must be checked for the chosen objective. Methods that compare the
+predicted and the actual change of the cost are also affected. A line
 search with a curvature condition, or a trust-region ratio, can reject a good
 step because the two differ near a switch. Setting every width to zero
 recovers the reference derivative for such a method, at the price of the

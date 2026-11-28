@@ -121,7 +121,7 @@ class TestMoistureConvergenceSplit(unittest.TestCase):
 
     def test_switch_threshold_is_1p1_e(self):
         """The switch sits at zdqcv = 1.1*E: 0.05*E of extra convergence
-        stays shallow, 0.2*E goes deep (width 2e-7 << 0.05*E here).
+        stays shallow, 0.2*E goes deep.
         """
         col = _unstable_column()
         _, s_below = _run(col, qte_dynamics=_convergence_profile(col[2], 0.05))
